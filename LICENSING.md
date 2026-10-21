@@ -36,7 +36,8 @@
 - 随硬件 / 设备预装，需要明确的免责、责任上限与赔偿条款；
 - 需要定制开发、技术支持或 SLA。
 
-具体范围、期限、费用与责任条款以合同为准。**咨询与报价请通过 [GitHub Issues](https://github.com/ZHO2008/AICompanion/issues) 联系维护者**（标注 `commercial-license`），我们会转到私下渠道沟通。
+具体范围、期限、费用与责任条款以合同为准。**咨询与报价请发邮件至 [2075306213@qq.com](mailto:2075306213@qq.com)**，
+标题请注明「AICompanion 商业授权」。也可以在 [GitHub Issues](https://github.com/ZHO2008/AICompanion/issues) 留言，但商务沟通建议走邮件。
 
 ## 3. 第三方组件与其许可
 

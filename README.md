@@ -10,8 +10,9 @@
 
 ## 一、当前进度
 
-按手册 §7 的实施路线图，本轮完成 **阶段 1（环境与基础设施）+ 阶段 2（核心骨架）**，
-并额外打通了阶段 3 的对话管线与空闲调度，使整个系统可以端到端运行。
+手册 §7 的四个阶段均已实施：基础设施、核心骨架、对话管线与空闲调度、表现层与打包分发。
+托管代码与原生组件可完整构建；对话、语音输入输出、游戏让路、知识库都能端到端跑通。
+仍未闭合的部分（CUDA 运行时随包、Piper C API、目标机性能验收）在第六节逐条列出，不含糊。
 
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
@@ -36,7 +37,7 @@
 | WPF 表现层 | ✅ 完成 | 透明窗口、鼠标穿透、托盘、静态图三级兜底、气泡、设置面板 |
 | `start_all.bat` | ✅ 完成 | 已修正手册中的两处失效逻辑；实际运行五个步骤全部通过 |
 | 对话管线 §4 | ✅ 完成 | 端到端验证全通过（预处理 17ms / LLM 436ms on GPU） |
-| Live2D 真渲染 | ⏸ 本轮降级 | 静态图 + 表情切换（决策 Q4） |
+| Live2D 真渲染 | ✅ 完成 | Cubism SDK（`Live2DCSharpSDK.OpenGL.WPF`）真实渲染，Hiyori 完整显示；动作/口型/表情联动 46 项断言全过；合成与命中问题已定位修复（VERIFICATION §19–§20） |
 | Piper C 库 | ⏸ 后置 | 决策 Q9；已有 SAPI 兜底，不影响出声 |
 | SAPI 语音兜底 | ✅ 完成 | Piper 不可用时自动降级到 Windows 内置语音，任何机器都能发声 |
 | llama-server CUDA 构建 | ✅ 完成 | `bin\ggml-cuda.dll` 54MB；GPU 计算进程列表 + 显存 +1152MB 三重证据；CPU 版备份在 `bin\cpu-backup\` |
@@ -46,6 +47,29 @@
 ---
 
 ## 二、快速开始
+
+### 2.1 先决条件：全新 clone 与"开发机"的差别
+
+仓库里只放代码与文档。上游源码、专有库、模型都因为体积或许可原因**不入库**，
+所以直接 clone 下来是跑不起来的，先按这张表补齐：
+
+| 需要什么 | 怎么来 | 缺了会怎样 |
+| --- | --- | --- |
+| .NET 8 SDK | [dot.net](https://dot.net) | 编不出托管代码 |
+| VS 2022 Build Tools（MSVC x64） | 安装时勾选"使用 C++ 的桌面开发" | 编不出原生组件 |
+| **whisper.cpp 1.9.5** | clone 到 `third_party\whisper.cpp` 并切到该版本 | `build_native.bat asr` 失败——`ai_asr` 桥接层是按这个版本的 C API 编的 |
+| **llama.cpp 0.7.0** | clone 到 `third_party\llama.cpp` 并切到该版本 | 编不出 `llama-server.exe` |
+| CMake + Ninja | 用 `tools\Fetcher` 下载，解压到 `tools\toolchain\` | `build_*.bat` 找不到工具链 |
+| `Live2DCubismCore.dll` | Live2D 官方 Cubism SDK for Native 里取，放**仓库根目录** | 编译出警告，运行时 Live2D 不可用（降级为静态立绘） |
+| LLM 模型（GGUF） | 放 `models\llm\` 并改 `llm.model_path` | 无法对话 |
+| ASR 模型 | whisper 的 `ggml-base.bin` → `models\asr\ggml-base.bin` | 无法识别语音 |
+| Piper（可选） | 二进制度放 `tools\piper\`、模型放 `models\piper\` | 自动降级到系统 SAPI（系统装有中文语音包即可） |
+| Live2D 模型（可选） | 解压到 `Hiyori\`，保持 `Hiyori.model3.json` 这个路径 | 降级为静态立绘；再没有立绘则纯色块 |
+
+> 版本号取自构建时所用源码的 `CMakeLists.txt`（whisper.cpp 的 `WHISPER_VERSION`、llama.cpp 的 `LLAMA_VERSION`）。
+> `ai_asr` 直接调用 whisper.cpp 的 C API，上游大改接口后需要同步适配，所以版本尽量对上。
+
+补齐上述依赖后，按顺序执行：
 
 ```bat
 REM 1) 构建托管代码
@@ -79,6 +103,7 @@ E:\DEEPSEEK
 ├── start_all.bat                   # 启动脚本 (GBK 编码)
 ├── build_native.bat                # 原生组件构建 (GBK 编码)
 ├── game_list.txt                   # GameMonitor 的游戏列表
+├── Live2DCubismCore.dll            # Live2D 原生库（不入库，需自备，见 2.1）
 ├── LICENSE                         # GNU AGPL-3.0 许可证正文
 ├── LICENSING.md                    # 双授权说明（AGPL / 商业许可）与第三方组件清单
 ├── src
@@ -143,7 +168,7 @@ E:\DEEPSEEK
 ├── Hiyori                          # Live2D 模型（不入库，需自备，见下文"素材与隐私"）
 ├── bin                             # 原生产物：ai_asr.dll / llama-server.exe / ggml-cuda.dll / libfvad.dll
 │   └── cpu-backup                  # CUDA 构建前的 CPU 版备份，用于回退
-├── models                          # LLM 与 ASR 模型（不进版本库）
+├── models                          # LLM / ASR 模型（不进版本库）；Piper 语音模型可选
 ├── Knowledge                       # 知识库（+ .pending 待审核目录）
 ├── logs                            # app / gamemonitor / chat 日志（不进版本库）
 ├── dist                            # 打包产物：分发目录 + 安装包（不进版本库）
@@ -324,9 +349,10 @@ E:\DEEPSEEK
    本机可用，但换到没装 CUDA 工具包的机器上会因缺 DLL 启动失败。
    分发时需把 CUDA 运行时 DLL 一并复制到 `bin\`，或要求目标机安装对应版本。
 
-3. **Live2D 为静态图降级**
-   决策 Q4 已确认。三级兜底链（角色图片 → 全局默认贴图 → 纯色背景+角色名）完整实现；
-   上游给出的动画指令在降级模式下表现为**表情贴图切换 + 角标提示**，因此仍可验证。
+3. **Live2D 模型与原生库需要自备**
+   渲染链路已打通（真实 Cubism 渲染，见 VERIFICATION §19–§20），但模型（如 Hiyori）与
+   `Live2DCubismCore.dll` 属第三方素材/专有库，不随仓库分发。缺模型时逐级降级：
+   Live2D → `Assets\Default` 静态立绘 → 纯色块，启动日志写明降到了哪一级。
 
 4. **Piper C API 未接入**
    决策 Q9 已确认后置。当前 `PiperEngine` 走进程外 `piper.exe`，需要该可执行文件存在。
@@ -338,10 +364,6 @@ E:\DEEPSEEK
    （RTX 3060 12GB）上以正式 7B 模型验证。本轮开发机为 RTX 5060 Laptop 8GB，
    且 GPU 推理是部分卸载（ngl=10/28，受实时空闲显存限制）。
 
-6. **摘要压缩未触发**
-   手册 §3.2 的压缩逻辑需要 RecentMessages 超过 `max_recent_rounds`（默认 30 轮）才会启动，
-   本轮验证的对话量不足以走到该分支。代码路径已实现（含三级摘要栈与归档），
-   但尚未有实测记录。
 
 ---
 
@@ -615,4 +637,5 @@ powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1
 > 注意：**Live2D 的 SDK 与模型不在本项目的双授权范围内**，使用它们需自行遵守 Live2D 的许可。
 > 模型文件（LLM / ASR / Piper）同样各自独立授权，均不随本仓库分发。
 
-商业授权咨询请在 [Issues](https://github.com/ZHO2008/AICompanion/issues) 中标注 `commercial-license`。
+商业授权咨询：**[2075306213@qq.com](mailto:2075306213@qq.com)**（标题注明「AICompanion 商业授权」）；
+技术问题、缺陷反馈请走 [GitHub Issues](https://github.com/ZHO2008/AICompanion/issues)。
