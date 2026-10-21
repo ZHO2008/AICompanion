@@ -516,27 +516,42 @@ WPF 按新 DPI 重新布局，不会被 Windows 位图拉伸（变模糊）也�
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
-默认就是**「带所有环境」**的包：
+默认是**「带所有环境、但不带需要授权的素材」**的包：
 
 | 开关 | 默认 | 含义 |
 | --- | --- | --- |
 | `-SelfContained` | `true` | 自带 .NET 8 桌面运行时，目标机不用装任何东西 |
 | `-IncludeModels` | `true` | 把 `models\`（LLM 1.04 GB + ASR 141 MB）一起打进去，装完即可对话 |
+| `-IncludeLicensedAssets` | 关 | 把 Live2D 的 `Live2DCubismCore.dll` 与 `Hiyori\` 也打进去。**公开分发必须保持关闭** |
 | `-ReadyToRun` | `true` | 预编译，启动更快（体积略增） |
 | `-ExcludeSymbols` | `true` | 剔除 `.pdb` |
 | `-Zip` | `false` | 是否额外生成 zip（有了安装包一般不需要） |
 
+> `powershell -File` 传不了布尔值（`-IncludeModels:$false` 会绑定失败），所以另给了三个
+> 不带值的开关：`-NoModels`、`-NoLicensedAssets`、`-FrameworkOnly`。
+
+**分发包里不放需要单独授权的素材。** Live2D 的 Cubism Core 与模型得用户自己按 Live2D 的
+条款取得，包里只附一份 `素材说明.md` 写明缺什么、去哪下、放哪里。
+缺了不会崩，程序逐级降级（Live2D → 静态立绘 → 纯色块），启动日志写明降到了哪一级。
+
 产物：
 
 ```
-dist\AICompanion-0.9.0-win-x64\              可直接运行的分发目录（约 1.43 GB）
-dist\AICompanion-0.9.0-full-setup.exe        安装包（约 1.27 GB）
+dist\AICompanion-0.9.0-win-x64\              可直接运行的分发目录（默认含模型，约 1.42 GB）
+dist\AICompanion-0.9.0-win-x64.zip           加 -Zip 才生成
+dist\AICompanion-0.9.0-full-setup.exe        安装包（约 1.27 GB；-NoInstaller 则不生成）
 ```
 
-想只出不含模型的轻量包：
+只出不含模型的轻量包（约 249 MB）：
 
 ```bat
-powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeModels:$false
+powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -NoModels
+```
+
+自己用、想把 Live2D 素材一起打包（**别拿去分发**）：
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeLicensedAssets
 ```
 
 ### 10.2 安装包
@@ -561,12 +576,20 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeModels:$false
 万一真被装到受保护目录，`LogRoot` 会按
 「当前目录 → 程序目录 → `%LOCALAPPDATA%\AICompanion`」找第一个**可写**位置写日志，日志不会丢。
 
-### 10.4 打包时的两个坑（都已处理）
+### 10.4 打包时的三个坑（都已处理）
 
 1. **exe 被占用**：`dotnet publish` 默认往 `src\...\bin\Release\` 写，程序运行时会被锁。
    `pack.ps1` 把发布输出重定向到 `artifacts\pkgbin`，所以**程序开着也能打包**。
 2. **GameMonitor 必须与主程序同目录**：`AppHost` 只在 `AppPaths.Root` 与
    `AppContext.BaseDirectory` 找 `GameMonitor.exe`，放进子目录会「启动正常但一直重连失败」。
+3. **`powershell -File` 传不了布尔值**：`-IncludeModels:$false` 这种写法在 `-File` 模式下
+   会被当成字符串，报 `Cannot convert value "System.String" to type "System.Boolean"`。
+   所以脚本另给了不带值的开关（`-NoModels` / `-NoLicensedAssets` / `-FrameworkOnly`），
+   cmd 里也能直接写。
+
+> 顺带一条给改脚本的人：本仓库的 `.ps1` 一律存成 **UTF-8 带 BOM**。
+> PowerShell 5.1 会把无 BOM 的 UTF-8 按 GBK 读，中文字符串全成乱码、脚本直接语法错误，
+> 而 `PSParser` 还报 0 个错误 —— 极容易误判成逻辑 bug。
 
 ### 10.5 精简项
 
@@ -574,7 +597,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeModels:$false
 | --- | --- | --- |
 | `.pdb` | 删除 | 约 0.2 MB（另有 `bin\` 里的符号约 24 MB） |
 | WPF 卫星程序集 | 只留 `zh-Hans` / `zh-Hant`，删掉 11 种语言 | 约 13 MB |
-| 模型 | 默认打包（可用 `-IncludeModels:$false` 关掉） | 决定安装包量级 |
+| 模型 | 默认打包（可用 `-NoModels` 关掉） | 决定安装包量级 |
 
 ### 10.6 分发包里有什么
 
@@ -584,18 +607,26 @@ AICompanion.dll / Core.dll   托管程序集
 GameMonitor.exe              游戏检测子进程（必须与主程序同目录）
 <运行时文件>                  self-contained 的 .NET 8 + WPF 程序集
 bin\                         llama.cpp（含 CUDA）/ whisper 桥接 / VAD 原生库
-Assets\                      默认形象、图标、外观设置
-Hiyori\                      Live2D 模型（含 AvatarProfile.json）
+Assets\                      图标、外观设置（第三方立绘不含，见下）
 Knowledge\                   知识库目录（热重载）
-Live2DCubismCore.dll         Live2D 官方原生库
 config.yaml                  配置（用户可改；程序不会改写它）
 config.default.yaml          配置模板
 models\                      模型（默认含 LLM + ASR）
+素材说明.md                  缺哪些需要授权的素材、去哪下、放哪里
 install.ps1                  免 Inno Setup 的部署脚本
 VERSION.txt                  版本与构建时间
 ```
 
-### 10.7 免安装工具的部署方式
+**不含**下面这些——它们要按各自的授权自己取得（`素材说明.md` 里写了下载位置）：
+
+```
+Live2DCubismCore.dll         Live2D 官方原生库（Cubism SDK for Native）
+Hiyori\                      Live2D 示例模型（Live2D 的示例素材不许再分发）
+Assets\Default\character.png 第三方立绘
+```
+
+缺这些**不影响程序启动**：形象逐级降级（Live2D → 静态立绘 → 纯色块），
+启动日志会写明缺什么、降到哪一级、去哪补。
 
 分发包根目录自带 `install.ps1`，做的事与安装包一致（复制、快捷方式、注册卸载项、
 生成 `uninstall.ps1`），只是没有图形界面：

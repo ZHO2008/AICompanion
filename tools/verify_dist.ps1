@@ -50,7 +50,6 @@ $required = @(
     'AICompanion.Core.dll',
     'GameMonitor.exe',
     'config.yaml',
-    'Live2DCubismCore.dll',
     'bin\llama-server.exe',
     'bin\ai_asr.dll'
 )
@@ -68,6 +67,35 @@ foreach ($item in $required) {
 if ($missing.Count -gt 0) {
     throw "分发包缺少 $($missing.Count) 个必需文件，先修 pack.ps1。"
 }
+
+# ---------------------------------------------------------------- 1.5 授权素材
+Write-Host ''
+Write-Host '==> 检查授权素材（应当由用户自行提供，不在包里）'
+
+$licensed = @(
+    'Live2DCubismCore.dll',
+    'Hiyori',
+    'Assets\Default\character.png',
+    'Assets\source'
+)
+
+$stillThere = @()
+foreach ($item in $licensed) {
+    if (Test-Path (Join-Path $DistDir $item)) {
+        Write-Host "    [不该有] $item —— 该项目需单独授权，不应随包分发" -ForegroundColor Red
+        $stillThere += $item
+    }
+}
+
+if ($stillThere.Count -gt 0) {
+    throw "分发包里仍含 $($stillThere.Count) 个需单独授权的组件，先修 pack.ps1（自用版可加 -IncludeLicensedAssets）。"
+}
+Write-Host '    [OK] 未包含需单独授权的素材' -ForegroundColor Green
+
+# 素材说明必须存在，否则用户不知道要自己下什么
+$notes = Join-Path $DistDir '素材说明.md'
+if (-not (Test-Path $notes)) { throw '分发包缺少 素材说明.md，用户会不知道要自行下载哪些素材。' }
+Write-Host '    [OK] 含 素材说明.md'
 
 # ---------------------------------------------------------------- 2. 复制到临时目录
 Write-Host ''
@@ -163,9 +191,31 @@ $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
 $content = $sr.ReadToEnd()
 $sr.Close(); $fs.Close()
 
-$errors = ($content -split "`n" | Where-Object { $_ -match '\[ERR\]' })
+$errLines = @($content -split "`n" | Where-Object { $_ -match '\[ERR\]' })
+
+# 轻量包（-IncludeModels:$false）本来就不带模型，"模型缺失"是预期状态，不该算缺陷；
+# 否则官方分发包每次首启都会看起来像坏了。
+$hasLlm = @(Get-ChildItem (Join-Path $tempApp 'models\llm') -Filter '*.gguf' -ErrorAction SilentlyContinue).Count -gt 0
+$hasAsr = Test-Path (Join-Path $tempApp 'models\asr\ggml-base.bin')
+$expectedPatterns = @()
+if (-not $hasLlm) { $expectedPatterns += 'LLM 模型文件缺失' }
+if (-not $hasAsr) { $expectedPatterns += '语音识别模型缺失' }
+
+function Test-ExpectedMissing([string]$line) {
+    foreach ($k in $expectedPatterns) {
+        if ($line -match [regex]::Escape($k)) { return $true }
+    }
+    return $false
+}
+
+$errors = @($errLines | Where-Object { -not (Test-ExpectedMissing $_) })
+$expectedHits = @($errLines | Where-Object { Test-ExpectedMissing $_ })
+
 Write-Host "    [$(if ($errors.Count -eq 0) { 'OK' } else { '注意' })] 错误行：$($errors.Count)"
 $errors | Select-Object -First 3 | ForEach-Object { Write-Host "        $($_.Trim())" -ForegroundColor Yellow }
+if ($expectedHits.Count -gt 0) {
+    Write-Host "    [预期] 另有 $($expectedHits.Count) 行属于'模型未随包附带'（轻量包的正常状态）" -ForegroundColor DarkGray
+}
 
 $startup = ($content -split "`n" | Where-Object { $_ -match '启动完成' } | Select-Object -First 1)
 if ($startup) { Write-Host "    $($startup.Trim())" }
@@ -178,6 +228,15 @@ Get-Process -Id $proc.Id -ErrorAction SilentlyContinue | Stop-Process -Force
 Get-Process GameMonitor -ErrorAction SilentlyContinue | Where-Object {
     $_.Path -and $_.Path.StartsWith($tempApp)
 } | Stop-Process -Force
+
+# llama-server 是程序的子进程，杀主进程不会连带杀掉它——漏了会留下一个占着模型和显存的进程
+$strays = @(Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and $_.Path.StartsWith($tempApp)
+})
+if ($strays.Count -gt 0) {
+    $strays | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Host "    已清理 $($strays.Count) 个 llama-server 子进程"
+}
 Start-Sleep -Seconds 2
 
 Remove-Item $tempParent -Recurse -Force -ErrorAction SilentlyContinue

@@ -5,12 +5,14 @@
 #    - self-contained：自带 .NET 8 桌面运行时，目标机器不需要装任何东西
 #    - ReadyToRun：启动更快（体积略增）
 #    - 含模型：LLM + ASR 一起打进安装包，装完即可对话
+#    - 不含授权素材：Live2D 的 Cubism Core 与模型要用户自己下载并接受其授权，默认不打进包
 #
 #  用法：
 #    powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 #    powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeModels:$false   （约 190 MB）
 #    powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -SelfContained:$false   （约 60 MB）
 #    powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -NoInstaller            只出目录与 zip
+#    powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeLicensedAssets   （本机自用，把 Live2D 素材也打进去）
 #
 #  产物：
 #    dist\AICompanion-<版本>-win-x64\        可直接运行的分发目录
@@ -25,12 +27,24 @@ param(
 
     [bool]$SelfContained = $true,
     [bool]$IncludeModels = $true,
+    [switch]$IncludeLicensedAssets,
     [bool]$ReadyToRun = $true,
     [bool]$ExcludeSymbols = $true,
 
     [bool]$Zip = $false,
-    [switch]$NoInstaller
+    [switch]$NoInstaller,
+
+    # 下面三个是"不带值的开关"，因为 powershell -File 传不了布尔值
+    # （-File 会把 $false 当字符串，绑定到 [bool] 直接报错）。
+    [switch]$NoModels,
+    [switch]$NoLicensedAssets,
+    [switch]$FrameworkOnly
 )
+
+# 开关覆盖（开关写法对 cmd / -File 都友好）
+if ($NoModels) { $IncludeModels = $false }
+if ($NoLicensedAssets) { $IncludeLicensedAssets = $false }
+if ($FrameworkOnly) { $SelfContained = $false }
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -72,7 +86,7 @@ $zipPath = Join-Path $root "dist\$distName.zip"
 
 Write-Host "    版本：$version"
 Write-Host "    自带运行时：$SelfContained　ReadyToRun：$ReadyToRun"
-Write-Host "    含模型：$IncludeModels　分发目录：$distName"
+Write-Host "    含模型：$IncludeModels　含授权素材：$IncludeLicensedAssets　分发目录：$distName"
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -110,16 +124,82 @@ Copy-Item 'config.yaml' $stage -Force
 $defaultCfg = 'src\AICompanion.Core\Configuration\config.default.yaml'
 if (Test-Path $defaultCfg) { Copy-Item $defaultCfg (Join-Path $stage 'config.default.yaml') -Force }
 
-foreach ($dir in @('Assets', 'Hiyori', 'Knowledge')) {
-    if (Test-Path $dir) {
-        Copy-Item $dir $stage -Recurse -Force
-        Write-Host "    + $dir\ ($(SizeOf $dir))"
+# 授权素材：Live2D 的 Cubism Core 与模型需要用户自己接受 Live2D 的授权条款，
+# 默认不随包分发（-IncludeLicensedAssets 只给"本机自用"留个后门）。
+# 立绘原图与裁切稿同理：它们是从第三方作品来的，也不分发。
+foreach ($dir in @('Assets', 'Knowledge', 'Hiyori')) {
+    if (-not (Test-Path $dir)) { continue }
+    if ($dir -eq 'Hiyori' -and -not $IncludeLicensedAssets) {
+        Write-Host '    - Hiyori\ 未打包（Live2D 示例模型需自行下载并接受其授权）'
+        continue
     }
+    Copy-Item $dir $stage -Recurse -Force
+    Write-Host "    + $dir\ ($(SizeOf $dir))"
+}
+
+if (-not $IncludeLicensedAssets) {
+    foreach ($p in @('Assets\source', 'Assets\Default\character.png')) {
+        $target = Join-Path $stage $p
+        if (Test-Path $target) { Remove-Item $target -Recurse -Force }
+    }
+    Write-Host '    - 第三方立绘（Assets\source、character.png）未打包'
 }
 
 if (Test-Path 'game_list.txt') { Copy-Item 'game_list.txt' $stage -Force }
 if (Test-Path 'README.md') { Copy-Item 'README.md' $stage -Force }
-if (Test-Path 'Live2DCubismCore.dll') { Copy-Item 'Live2DCubismCore.dll' $stage -Force }
+
+if ($IncludeLicensedAssets) {
+    if (Test-Path 'Live2DCubismCore.dll') {
+        Copy-Item 'Live2DCubismCore.dll' $stage -Force
+        Write-Host '    + Live2DCubismCore.dll'
+    }
+} else {
+    # publish 会把这个 DLL 从仓库根目录自动拷进产物（csproj 里有复制规则），必须显式移除
+    $core = Join-Path $stage 'Live2DCubismCore.dll'
+    if (Test-Path $core) { Remove-Item $core -Force }
+    Write-Host '    - Live2DCubismCore.dll 已从发布产物中移除（需自行从 Live2D 官网取得）'
+}
+
+# 包里放一份"自己下素材"的说明，免得用户看到降级的纯色块不知道怎么办
+$noteLines = @(
+    '# 本包不含需要单独授权的第三方素材',
+    '',
+    'AICompanion 自己的代码是 AGPL-3.0 / 商业许可双授权（见 LICENSE、LICENSING.md）。',
+    '下面这些组件需要你**自己从官方渠道取得并接受其授权**，所以没有打进包：',
+    '',
+    '## 1. Live2D Cubism Core（**必需**，否则没有 Live2D 形象）',
+    '',
+    '- 来源：Live2D 官网 → Cubism SDK for Native（Windows x64）',
+    '- 放到：**本目录**，文件名 Live2DCubismCore.dll（与 AICompanion.exe 同级）',
+    '- 注意：Live2D 有自己的授权条款，**商业用途可能需要另行付费**；本项目的许可不能替代它',
+    '',
+    '## 2. Live2D 模型（可选）',
+    '',
+    '- 来源：Live2D 官方示例模型，或你自己的 Cubism 3/4 模型',
+    '- 放到：Hiyori\ 下，保持 Hiyori\Hiyori.model3.json 这个路径',
+    '  （或改 config.yaml 的 live2d.default_model_path 指向你的模型）',
+    '',
+    '## 3. 角色立绘（可选，Live2D 不可用时的替代）',
+    '',
+    '- 任意 PNG / JPG → Assets\Default\（程序自动挑选，规则见 README）',
+    '- 建议用带透明通道的 PNG，否则角色会显示成一块矩形',
+    '',
+    '## 4. 对话与语音模型',
+    '',
+    '- 见 models\README.txt',
+    '',
+    '## 放好后重启程序即可',
+    '',
+    '程序不会因为缺这些而崩溃，而是逐级降级：',
+    '',
+    '- 形象：Live2D → Assets\Default 静态立绘 → 纯色块',
+    '- 语音合成：Piper → 系统 SAPI',
+    '',
+    '启动日志会写明每一项是就位还是降级，照着日志补即可。',
+    ''
+)
+$noteLines | Set-Content -Path (Join-Path $stage '素材说明.md') -Encoding UTF8
+Write-Host '    + 素材说明.md（告诉用户自己下哪些、放哪里）'
 
 if (Test-Path 'bin') {
     $runtimeDir = Join-Path $stage 'bin'
@@ -136,6 +216,10 @@ if ($IncludeModels) {
         $modelStage = Join-Path $stage 'models'
         New-Item -ItemType Directory -Path $modelStage -Force | Out-Null
         Get-ChildItem 'models' -Directory | ForEach-Object {
+            if (@(Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue).Count -eq 0) {
+                Write-Host "    - models\$($_.Name) 是空目录，跳过"
+                return
+            }
             Copy-Item $_.FullName $modelStage -Recurse -Force
             Write-Host "    + models\$($_.Name) ($(SizeOf $_.FullName))"
         }

@@ -13,8 +13,8 @@ tools\
 
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
-| `pack.ps1` | 打包：发布主程序 + GameMonitor、复制资源与模型、调 Inno Setup 出安装包 | `powershell -File tools\pack.ps1` |
-| `verify_dist.ps1` | 分发包校验：复制到临时目录、**换工作目录**启动，查进程/窗口/日志/错误行 | `powershell -File tools\verify_dist.ps1` |
+| `pack.ps1` | 打包：发布主程序 + GameMonitor、复制资源与模型、调 Inno Setup 出安装包。默认**不打包需授权的 Live2D 素材**（`-IncludeLicensedAssets` 才打） | `powershell -File tools\pack.ps1 [-NoModels \| -NoLicensedAssets]` |
+| `verify_dist.ps1` | 分发包校验：复制到临时目录、**换工作目录**启动，查进程/窗口/日志/错误行；并断言包里**没有**需授权的素材、清理 llama-server 子进程 | `powershell -File tools\verify_dist.ps1` |
 | `soak_test.ps1` | 长时间连续运行采样：每分钟记内存、句柄、线程、CPU，并做 UI 交互压测 | `powershell -File tools\soak_test.ps1` |
 | `ptt_smoke.ps1` | 按住说话冒烟：模拟按住按键，按时间戳筛日志，判断是"出字/误触/没收到音频" | `powershell -File tools\ptt_smoke.ps1 -HoldMs 1500` |
 | `make_speech_wav.ps1` | 用 SAPI 合成中文语音到 WAV（**只写文件、不播放**，不吵人），供真实语音探针使用 | `powershell -File tools\make_speech_wav.ps1` |

@@ -211,7 +211,18 @@ public partial class MainWindow : Window
         }
         else
         {
+            // 官方的公开分发包**不含** Live2D 的模型与原生库（它们需各自授权），
+            // 所以"刚解压完就启动"必然落到这里。直接说清缺什么、去哪补，比只说"没解析到"有用。
+            var hasCore = File.Exists(Path.Combine(AppContext.BaseDirectory, "Live2DCubismCore.dll"));
             _host.Logger.Info($"未解析到 Live2D 模型（{modelPath}），动作存在性检查降级为「只看映射是否存在」。");
+
+            if (!hasCore)
+            {
+                _host.Logger.Warn(
+                    "未启用 Live2D：既没有模型文件，也没有 Live2DCubismCore.dll。" +
+                    "二者都需按 Live2D 的授权自行取得（不随包分发），放到程序目录后重启即可启用；" +
+                    "缺省会用静态立绘或纯色背景代替，功能不受影响。详见同目录的「素材说明.md」。");
+            }
         }
 
         /*
@@ -260,7 +271,19 @@ public partial class MainWindow : Window
             }
             else
             {
-                _host.Logger.Info("Live2D 渲染器创建失败，继续使用静态图。");
+                // 最常见的失败原因是缺 Live2DCubismCore.dll——它由 Live2D 授权、不随包分发，
+                // 用户拿到的是"没有 Live2D 的包"，所以这里要说清怎么补，而不只是"失败了"。
+                var corePath = Path.Combine(AppContext.BaseDirectory, "Live2DCubismCore.dll");
+                if (!File.Exists(corePath))
+                {
+                    _host.Logger.Warn(
+                        "Live2D 不可用：程序目录缺少 Live2DCubismCore.dll（该文件需按 Live2D 授权自行取得，不随包分发）。" +
+                        "从 Live2D 官网的 Cubism SDK for Native 取 x64 版放到程序目录即可启用，详见同目录的「素材说明.md」。");
+                }
+                else
+                {
+                    _host.Logger.Info("Live2D 渲染器创建失败，继续使用静态图。");
+                }
             }
         }
 

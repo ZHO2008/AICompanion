@@ -2162,3 +2162,86 @@ asr:
 | `AsrPttProbe`（按住说话） | 27 | 全部通过 |
 | `AsrRecoveryProbe`（设备自愈） | 12 | 全部通过（Stopped→Running→Faulted→Stopped→Running→Stopped） |
 | `AnimationProbe`（形象动作） | 46 | 全部通过 |
+
+---
+
+## 26. 分发策略：需授权的素材不由我们分发（2026-10-21）
+
+起因：用户明确要求"有些需要授权的你不放进去，让他们自己下载，比如 live2d 的 dll"。
+仓库里早就排除了这些，但**打包脚本没排除** —— `dist\` 里照样有 `Live2DCubismCore.dll`、
+`Hiyori\`、`Assets\source` 与 `Assets\Default\character.png`。也就是说"仓库干净、
+发出去的二进制不干净"，这个口子必须堵。
+
+### 26.1 改了什么
+
+| 位置 | 改动 |
+| --- | --- |
+| `tools/pack.ps1` | 新增 `-IncludeLicensedAssets`（默认关）；关着时不打 `Hiyori\`、`Live2DCubismCore.dll`，并从 `Assets\` 里剔掉 `source\` 与 `Default\character.png`；包里生成 `素材说明.md` |
+| `tools/pack.ps1` | 新增不带值的开关 `-NoModels` / `-NoLicensedAssets` / `-FrameworkOnly`（原因见 26.3） |
+| `tools/verify_dist.ps1` | 断言包里**没有**那四样东西，且必须有 `素材说明.md`；`Live2DCubismCore.dll` 从"必需文件"降级为"用户自备" |
+| `src/AICompanion.App/MainWindow.xaml.cs` | 缺 `Live2DCubismCore.dll` 或缺模型时各给一条 WRN，写清"授权原因 + 去哪取 + 见素材说明.md"，不再只记一句"创建失败" |
+
+关键一点：`Live2DCubismCore.dll` 是 **publish 自动带进来的**（`AICompanion.App.csproj` 里有复制规则），
+光"不主动拷"没用，必须显式从产物里删掉。第一版就漏在这里 —— 体积表上看不出来，
+是逐项核对 `dist` 内容才发现的。
+
+### 26.2 四次打包实验（都真跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `-NoModels -NoLicensedAssets -NoInstaller` | 249.0 MB；四样授权素材全不在；`素材说明.md` 在 |
+| `-NoLicensedAssets -NoInstaller`（默认+模型） | 1.42 GB；LLM/ASR 已打进去；授权素材仍不在 |
+| `-NoModels -IncludeLicensedAssets -NoInstaller` | 262.6 MB；DLL 与 Hiyori 都进了包，证明开关方向正确 |
+| 回到干净状态重打 | 1.42 GB；`verify_dist` 通过 |
+
+`tools\verify_dist.ps1` 的输出：
+
+```
+[OK] 未包含需单独授权的素材
+[OK] 含 素材说明.md
+[OK] 错误行：0
+启动完成：… LLM 就绪=True，TTS=sapi（降级=True），ASR=Stopped，知识库 0 条，启动问题 0 项。
+=== 验证通过 ===
+```
+
+轻量包首启会多两行 `[ERR]`（缺 LLM / ASR 模型）——这是**没带模型的必然结果**。
+所以校验脚本改成：模型不在包里时这两行归为「预期」，不计入错误行；否则官方轻量包
+每次首启都像坏了。实测输出 `[OK] 错误行：0` 加一行 `[预期] 另有 2 行属于"模型未随包附带"`。
+
+另外手动跑了一次不带 DLL 的包，确认日志有可照做的提示：
+
+```
+[INF] [App] 未解析到 Live2D 模型（…\Hiyori\Hiyori.model3.json），动作存在性检查降级为「只看映射是否存在」。
+[WRN] [App] 未启用 Live2D：既没有模型文件，也没有 Live2DCubismCore.dll。二者都需按 Live2D 的
+            授权自行取得（不随包分发），放到程序目录后重启即可启用；缺省会用静态立绘或纯色背景
+            代替，功能不受影响。详见同目录的「素材说明.md」。
+[WRN] [App] 角色形象全部缺失（…），已降级为纯色背景。
+[INF] [Bubble] [气泡/Warning] 未找到任何角色形象素材，已使用纯色背景显示。把图片放进 Assets\Default 目录即可。
+```
+
+错误行为 0 —— 缺授权素材是**预期状态**，不是故障。
+
+### 26.3 顺带修掉的两个坑
+
+1. **`powershell -File` 传不了布尔值。** 文档里那句 `-IncludeModels:$false` 一跑就报
+   `Cannot convert value "System.String" to type "System.Boolean"`。实测四种写法，
+   只有 `-Command "& script -IncludeModels $false"` 可行。与其在文档里教转义，
+   不如给脚本加不带值的开关（`-NoModels` 等），cmd 与 `-File` 都能直接写。
+2. **`verify_dist.ps1` 漏杀 `llama-server`。** 它只杀主程序与 GameMonitor，
+   而 llama-server 是主程序的子进程、不随父进程退出。清理时发现**堆了 4 个**
+   临时目录里的 llama-server 还在跑，各占一份模型与显存。已补：按 `$tempApp` 前缀清理并打印数量。
+
+### 26.4 一个自己踩的坑（记下来防复发）
+
+改 `.ps1` 时用工具直接编辑，工具写回的是**无 BOM 的 UTF-8**；Windows PowerShell 5.1
+按系统代码页（GBK）读无 BOM 文件，中文全成乱码，脚本直接语法错误 —— 而且
+`PSParser` 报 0 个错误、`powershell -File` 却报一堆，很容易误判成逻辑问题。
+规矩：**改完 `.ps1` 必须确认前三字节是 `EF BB BF`**。
+
+### 26.5 仍未做的
+
+- `dist\AICompanion-0.9.0-full-setup.exe`（1.27 GB，旧包）里**还带着** Live2D 素材，
+  是这次变更之前打的。没有删（属于本机产物），但它**不能拿去分发**；
+  要发布就用 `-NoLicensedAssets` 重打。
+- Inno Setup 那条路径这次没重跑，只验证了分发目录。`.iss` 是整目录递归打包
+  （`Source: {#StageDir}\*`），所以目录干净它自然干净。
