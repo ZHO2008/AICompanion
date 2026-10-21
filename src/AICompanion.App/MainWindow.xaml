@@ -1,0 +1,167 @@
+<Window x:Class="AICompanion.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AI 伴侣"
+        Width="340" Height="460"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SnapsToDevicePixels="True"
+        MouseLeftButtonDown="OnWindowMouseLeftButtonDown"
+        MouseLeftButtonUp="OnWindowMouseLeftButtonUp"
+        MouseMove="OnWindowMouseMove"
+        MouseRightButtonUp="OnWindowMouseRightButtonUp"
+        MouseWheel="OnWindowMouseWheel">
+
+    <!--
+      RootGrid 是"角色大小"的挂载点：ApplyScale 会把一个 ScaleTransform 装到它的
+      LayoutTransform 上，整棵可视树按倍率缩放（文字、气泡、输入框一起等比变化），
+      而不是只把图片拉大。
+
+      变换对象刻意**不在 XAML 里声明**：XAML 里内联的 Freezable 会被 WPF 冻结，
+      之后改 ScaleX 会抛 "Cannot modify a frozen object"。代码里 new 出来的不会。
+    -->
+    <Grid x:Name="RootGrid" Background="Transparent">
+        <Grid.RowDefinitions>
+            <!--
+              第一行留空且高度为 0：气泡改为"叠加"在角色之上，不再占用布局行高。
+
+              为什么必须这样：气泡行原来是 Auto，气泡出现/消失会改变这一行的高度，
+              于是角色所在的 * 行随之伸缩，图片被 Uniform 拉伸 —— 表现为
+              "随便弹个气泡，角色就变大变小一下"。叠加之后角色尺寸恒定。
+            -->
+            <RowDefinition Height="0" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 角色形象：静态图降级方案（决策 Q4）+ 最后的纯色背景兜底 -->
+        <Grid Grid.Row="1" Margin="6,6,6,0">
+            <Border x:Name="FallbackBackground"
+                    Background="#FF2B2B3C"
+                    CornerRadius="12"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="FallbackText"
+                           Foreground="#FFF0F0F0"
+                           FontSize="16"
+                           TextAlignment="Center"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap" />
+            </Border>
+
+            <Image x:Name="AvatarImage"
+                   Stretch="Uniform"
+                   RenderOptions.BitmapScalingMode="HighQuality" />
+
+            <!--
+              Live2D 渲染宿主：模型可用时把 GL 控件塞进这里，静态图保持为降级后备。
+              默认 Collapsed —— 没有模型/模型加载失败时完全不影响原来的静态图路径。
+            -->
+            <!--
+              Background 给一个 alpha=1/255 的近透明色：
+              不能是 Transparent（alpha=0，那块在分层窗口里等于不存在，点击会穿到桌面），
+              也不能是更明显的东西（会遮住模型）。1/255 肉眼不可见，但足以让这块参与命中测试。
+            -->
+            <Border x:Name="Live2DHost" Background="#01000000" Visibility="Collapsed" />
+
+            <!-- 表情/动画指令的角标，让"动画指令"在静态图降级下也可见 -->
+            <Border x:Name="AnimationBadge"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Background="#99000000"
+                    CornerRadius="8"
+                    Padding="6,2"
+                    Margin="4"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="AnimationText" Foreground="#FFFFE08A" FontSize="11" />
+            </Border>
+        </Grid>
+
+        <!--
+          状态提示气泡（手册 §1.1）：叠加在角色上方，与角色同处 Grid.Row=1，
+          因此**不参与布局**，气泡出现/消失不会改变角色所在行的高度，角色尺寸恒定。
+
+          IsHitTestVisible=False：气泡只是信息展示，不能挡住对角色本身的点击
+          （左键开功能栏、右键切换模式都依赖点击落到窗口上）。
+        -->
+        <ScrollViewer Grid.Row="1"
+                      Panel.ZIndex="1"
+                      MaxHeight="120"
+                      VerticalAlignment="Top"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Margin="6,6,6,0"
+                      Background="Transparent"
+                      IsHitTestVisible="False">
+            <ItemsControl x:Name="BubbleList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Style="{StaticResource BubbleBorder}">
+                            <TextBlock Style="{StaticResource BubbleText}" Text="{Binding Message}" />
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <!--
+          交互区：鼠标穿透时用 Hidden 隐藏 —— 保留占位，否则角色会被拉伸变形。
+
+          背景必须是**近乎不透明**的实心面板：之前的做法是让状态文字与输入框直接浮在
+          角色图上（只有 20% 白底），一旦角色立绘是浅色（白发/白衣服），
+          白字完全看不清。参考桌宠的做法：所有文字都放在实心面板上，与底图无关。
+        -->
+        <Border Grid.Row="2"
+                x:Name="InputPanel"
+                Margin="6"
+                Padding="8,6"
+                Background="#F2141720"
+                BorderBrush="#3DFFFFFF"
+                BorderThickness="1"
+                CornerRadius="10"
+                Visibility="Collapsed">
+            <StackPanel>
+                <TextBlock x:Name="StageText"
+                           Foreground="#FFE6EBF5"
+                           FontSize="12"
+                           Margin="2,0,0,5"
+                           Text="待机" />
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBox x:Name="InputBox"
+                             Grid.Column="0"
+                             Height="26"
+                             VerticalContentAlignment="Center"
+                             Background="#33FFFFFF"
+                             Foreground="#FFFFFFFF"
+                             BorderBrush="#66FFFFFF"
+                             CaretBrush="#FFFFFFFF"
+                             KeyDown="OnInputBoxKeyDown" />
+
+                    <Button x:Name="SendButton"
+                            Grid.Column="1"
+                            Content="发送"
+                            Style="{StaticResource SmallButton}"
+                            Click="OnSendClick" />
+
+                    <Button x:Name="StopButton"
+                            Grid.Column="2"
+                            Content="停止生成"
+                            Style="{StaticResource SmallButton}"
+                            Visibility="Collapsed"
+                            Click="OnStopClick" />
+                </Grid>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

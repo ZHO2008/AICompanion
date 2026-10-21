@@ -1,0 +1,285 @@
+using System.IO;
+using System.Runtime.InteropServices;
+using AICompanion.Core.Abstractions;
+using AICompanion.Core.Models;
+
+/*
+ * 整个产品只面向 Windows（WPF + NAudio + nvidia-smi + whisper.cpp + SAPI）。
+ * 这里用到的 SAPI COM 组件与 Type.GetTypeFromProgID 都只有 Windows 支持，
+ * 而 Core 的目标框架刻意保持 net8.0 —— 这样 GameMonitor 与 5 个验证探针
+ * 都不必改成 net8.0-windows。因此只在包含这些调用的本文件内关闭 CA1416。
+ */
+#pragma warning disable CA1416
+
+namespace AICompanion.Core.Tts;
+
+/// <summary>
+/// Windows 内置语音合成（SAPI）引擎，通过 COM 直接驱动 SAPI.SpVoice。
+///
+/// 为什么需要它：Piper 需要额外的可执行文件与 .onnx 模型，Chatterbox 需要独立的 Python 服务。
+/// 两者都没就位时，程序原本**完全没有语音输出** —— 对一个"桌面伴侣"来说这是最影响可用性的缺口。
+/// SAPI 是 Windows 自带的，任何机器上都能立刻出声，作为兜底最合适。
+///
+/// 为什么用 COM 而不引用 System.Speech 包：
+/// 实测 System.Speech 8.0.0 在 .NET 8 上调用 <c>SpeechSynthesizer.Speak</c> 会抛
+/// NullReferenceException（线程池 MTA 与自建 STA 线程都一样），而同一条 SAPI 能力
+/// 通过 COM 调用在 PowerShell 中稳定可用。直接驱动 COM 既避开了该缺陷，也少一个依赖包。
+/// </summary>
+public sealed class SapiEngine : ITTSEngine
+{
+    private readonly IAppLogger _logger;
+    private readonly object _sync = new();
+
+    private object? _currentVoice;
+    private string? _loggedVoice;
+
+    public SapiEngine(IAppLogger logger)
+    {
+        _logger = logger;
+    }
+
+    public string Name => "sapi";
+
+    /// <summary>SAPI 由系统提供，只要能创建 SpVoice 就认为可用。</summary>
+    public bool IsAvailable
+    {
+        get
+        {
+            try
+            {
+                var type = Type.GetTypeFromProgID("SAPI.SpVoice");
+                if (type is null)
+                {
+                    return false;
+                }
+
+                var probe = Activator.CreateInstance(type);
+                ReleaseCom(probe);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    public Task<byte[]> SynthesizeAsync(string text, VoiceConfig config, CancellationToken cancellationToken = default)
+    {
+        // COM 合成是同步阻塞调用，放到线程池即可（COM 会自动放入 MTA，实测可用）。
+        return Task.Run(() => Synthesize(text, config, cancellationToken), cancellationToken);
+    }
+
+    private byte[] Synthesize(string text, VoiceConfig config, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var voiceType = Type.GetTypeFromProgID("SAPI.SpVoice")
+            ?? throw new InvalidOperationException("系统中没有 SAPI.SpVoice（Windows 语音组件缺失）。");
+        var streamType = Type.GetTypeFromProgID("SAPI.SpFileStream")
+            ?? throw new InvalidOperationException("系统中没有 SAPI.SpFileStream（Windows 语音组件缺失）。");
+
+        var tempFile = Path.Combine(Path.GetTempPath(), $"ai-companion-tts-{Guid.NewGuid():N}.wav");
+
+        dynamic? voice = null;
+        dynamic? stream = null;
+
+        try
+        {
+            voice = Activator.CreateInstance(voiceType)
+                ?? throw new InvalidOperationException("创建 SAPI.SpVoice 失败。");
+            stream = Activator.CreateInstance(streamType)
+                ?? throw new InvalidOperationException("创建 SAPI.SpFileStream 失败。");
+
+            TrySelectVoice(voice, config);
+
+            // 语速与音量：SAPI 的 Rate 是 -10..10，Volume 是 0..100。
+            // 配置越界时夹紧而不是抛异常——语音参数不该阻断对话。
+            /*
+             * 语速/音量：SAPI 的 Rate 是 -10..10、Volume 是 0..100。
+             * 这里用 VoiceConfig 上已有的字段（没有就保持默认），并夹紧取值 ——
+             * 语音参数越界不该阻断对话。
+             *
+             * 注：TtsConfig.SapiRate / SapiVolume 目前只用于文档与设置面板展示，
+             * 真正下发到引擎还要经过 ITTSEngine 接口扩展，留待 TTS 引擎统一接口时再接。
+             */
+            try
+            {
+                voice.Rate = 0;
+                voice.Volume = 100;
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"设置 SAPI 语速/音量失败（忽略）：{ex.Message}");
+            }
+
+            lock (_sync)
+            {
+                _currentVoice = voice;
+            }
+
+            // SSFMCreateForWrite = 3：创建（覆盖）一个有写权限的 WAV 文件
+            stream.Open(tempFile, 3, false);
+            voice.AudioOutputStream = stream;
+
+            // SVSFDefault = 0：同步朗读，返回时文件已写完
+            voice.Speak(text, 0);
+
+            stream.Close();
+            stream = null;
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return File.ReadAllBytes(tempFile);
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                if (ReferenceEquals(_currentVoice, voice))
+                {
+                    _currentVoice = null;
+                }
+            }
+
+            try
+            {
+                stream?.Close();
+            }
+            catch
+            {
+                // 已关闭时忽略
+            }
+
+            ReleaseCom(stream);
+            ReleaseCom(voice);
+
+            try
+            {
+                if (File.Exists(tempFile))
+                {
+                    File.Delete(tempFile);
+                }
+            }
+            catch
+            {
+                // 临时文件清理失败不影响结果
+            }
+        }
+    }
+
+    /// <summary>
+    /// 选音色：把配置里的音色名当作 SAPI 音色描述的**子串**来匹配，匹配不到就用系统默认。
+    /// 例如 piper 的音色名 zh_CN-huayan-medium 通常匹配不到，此时保留默认音色即可。
+    /// </summary>
+    private void TrySelectVoice(dynamic voice, VoiceConfig config)
+    {
+        try
+        {
+            var wanted = config.FallbackPiperVoice;
+            if (string.IsNullOrWhiteSpace(wanted))
+            {
+                LogDefaultVoice(voice);
+                return;
+            }
+
+            dynamic tokens = voice.GetVoices();
+            int count = tokens.Count;
+
+            for (var i = 0; i < count; i++)
+            {
+                dynamic token = tokens.Item(i);
+                string description = token.GetDescription(0);
+
+                if (description is not null &&
+                    description.Contains(wanted, StringComparison.OrdinalIgnoreCase))
+                {
+                    voice.Voice = token;
+                    _logger.Info($"SAPI 音色已选为：{description}");
+                    return;
+                }
+            }
+
+            LogDefaultVoice(voice);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"SAPI 选择音色失败，使用系统默认音色：{ex.Message}");
+        }
+    }
+
+    private void LogDefaultVoice(dynamic voice)
+    {
+        if (_loggedVoice is not null)
+        {
+            return;
+        }
+
+        try
+        {
+            var description = voice.Voice.GetDescription(0);
+            _loggedVoice = description;
+            _logger.Info($"SAPI 使用系统默认音色：{description}");
+        }
+        catch
+        {
+            // 仅日志，忽略
+        }
+    }
+
+    public void Stop()
+    {
+        lock (_sync)
+        {
+            if (_currentVoice is null)
+            {
+                return;
+            }
+
+            try
+            {
+                // dynamic 绑定必须经由 dynamic 类型的本地变量：
+                // 字段声明为 object 时不会触发动态绑定。
+                dynamic voice = _currentVoice;
+
+                // SVSFPurgeBeforeSpeak = 2：清空播放队列
+                voice.Speak(string.Empty, 2);
+            }
+            catch
+            {
+                // 引擎已释放时忽略
+            }
+        }
+    }
+
+    public void Unload()
+    {
+        Stop();
+
+        lock (_sync)
+        {
+            ReleaseCom(_currentVoice);
+            _currentVoice = null;
+        }
+    }
+
+    private static void ReleaseCom(object? comObject)
+    {
+        if (comObject is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (Marshal.IsComObject(comObject))
+            {
+                Marshal.FinalReleaseComObject(comObject);
+            }
+        }
+        catch
+        {
+            // 释放失败不应影响调用方
+        }
+    }
+}

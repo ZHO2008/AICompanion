@@ -1,0 +1,17 @@
+# AI 伴侣 · 游戏检测列表
+#
+# 每行一个游戏主进程名（含或不含 .exe 都可以，大小写不敏感）。
+# 以 # 开头的行与空行会被忽略。
+#
+# 触发 unload 需要同时满足（手册 §3.9 的双重判断）：
+#   1. 下面列出的任一进程正在运行；
+#   2. GPU 使用率高于 config.yaml 里 monitor.unload_gpu_threshold_percent（默认 80%）。
+#
+# 恢复条件：所有列出的进程都已退出，且 GPU 使用率持续低于
+#   monitor.restore_gpu_threshold_percent（默认 50%）超过 monitor.restore_low_gpu_minutes（默认 3 分钟）。
+#
+# 示例（取消注释并改成你实际玩的游戏）：
+# GenshinImpact.exe
+# YuanShen.exe
+# starrail.exe
+# cs2.exe

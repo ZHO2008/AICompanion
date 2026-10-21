@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    测试专用：假的 llama-server，用于可控地注入"显存不足"场景。
+    不属于产品代码，不加入 AICompanion.sln。
+
+    行为由它自己 exe 目录下的两个文件控制：
+      fake_oom_count.txt —— 前 N 次启动应该报 OOM 并退出
+      fake_attempts.txt  —— 启动次数计数器（由本程序自增）
+      fake_ngl_log.txt   —— 每次启动收到的 -ngl 追加记录（供验证回退步长）
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>FakeLlamaServer</AssemblyName>
+    <RootNamespace>FakeLlamaServer</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

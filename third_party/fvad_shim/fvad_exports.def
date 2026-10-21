@@ -1,0 +1,17 @@
+; ============================================================================
+;  fvad_exports.def —— 声明 fvad_shim.dll 要导出的公开函数
+;
+;  这 6 个名字与 libfvad 的 include/fvad.h 完全一致，因此
+;  AICompanion.Core 的 FvadDetector 无需改动即可解析它们。
+;
+;  libfvad 本身不带导出宏，所以必须在这里显式声明；否则 MSVC 产出的 DLL
+;  没有任何导出符号，C# 侧 NativeLibrary.TryGetExport 会逐个失败。
+; ============================================================================
+LIBRARY libfvad
+EXPORTS
+    fvad_new
+    fvad_free
+    fvad_reset
+    fvad_set_mode
+    fvad_set_sample_rate
+    fvad_process

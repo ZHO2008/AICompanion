@@ -1,0 +1,134 @@
+# ============================================================================
+#  AI 伴侣 · 默认配置模板
+#  本文件由程序在首次启动发现 config.yaml 缺失时自动生成（手册 §5.1）。
+#  每一行都可以改；程序对任何缺失或为空的字段都会回退到本文件里的默认值，
+#  因此删掉某个键不会导致崩溃，只会在启动气泡里提示用了兜底值。
+#  路径可以写相对路径，相对于本文件所在目录解析（准则 8）。
+# ============================================================================
+
+llm:
+  # 手册基准是 7B Q4_K_M；本机（开发机 RTX 5060 8GB）建议先用 1.5B 跑通链路。
+  model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  host: "127.0.0.1"
+  port: 8080
+  context_length: 4096
+  # 模型层数 L。0 = 启动时自动从 GGUF 元数据探测，无需手填。
+  layer_count: 0
+  # 由主程序自行拉起 llama-server（决策 Q5），因此 bat 里不再启动它。
+  # 构建产物由 build_native.bat 统一复制到 bin\ 目录。
+  server_executable_path: "bin/llama-server.exe"
+  threads: 0
+  startup_timeout_seconds: 180
+
+tts:
+  engine: "piper"                # 可选 "chatterbox" 或 "piper"
+  default_voice: "zh_CN-default" # 全局默认音色，角色缺失配置时使用
+  soft_restart_hours: 4.0
+  soft_restart_idle_minutes: 5.0
+  chatterbox:
+    host: "127.0.0.1"
+    port: 5000
+    launch_command: ""
+    # 手册未规定 chatterbox-api 的路由，做成配置项以便按部署版本调整。
+    synthesize_path: "/synthesize"
+    restart_path: "/restart"
+  piper:
+    model_path: "models/piper/zh_CN/model.onnx"
+    library_path: "third_party/piper/build/piper.dll"
+    executable_path: "tools/piper/piper.exe"
+    espeak_data_path: "third_party/piper/espeak-ng-data"
+
+asr:
+  capture: "microphone"          # microphone=麦克风，loopback=系统音频（识别电脑播放的声音）
+  auto_start: true               # 启动即开始监听
+  # 按住说话：按住按键才录音，松开后整段识别。
+  # 开启时 auto_start 不再生效（不会常开监听）：避免收进环境音、旁人对话与 TTS 回声。
+  push_to_talk: true
+  push_to_talk_key: "Home"       # 单键：Home / F2；组合：Alt+Q / Ctrl+Alt+Q
+  push_to_talk_min_ms: 300       # 短于此时长视为误触
+  push_to_talk_max_seconds: 60   # 单次录音上限
+  # 手册模板此处写作 "models/asr/..."，那是占位符；这里给出可用默认值。
+  model_path: "models/asr/ggml-base.bin"
+  # ASR 引擎动态库：third_party/ai_asr 构建出的桥接层（内部静态链接 whisper.cpp）。
+  library_path: "bin/ai_asr.dll"
+  language: "zh"
+  threads: 0                     # 0 = 由引擎决定
+  sample_rate: 16000
+  vad_mode: "auto"               # auto / webrtc / energy
+  # WebRTC VAD 动态库（libfvad）。文件不存在时 auto 模式会自动回退到能量 VAD。
+  vad_library_path: "bin/libfvad.dll"
+  vad_aggressiveness: 2
+  energy_threshold: 0.02
+  silence_milliseconds: 700
+  min_speech_milliseconds: 250
+  max_segment_seconds: 15
+
+live2d:
+  # 三级兜底：角色模型 → 全局默认模型 → 静态贴图 → 纯色背景+角色名
+  default_model_path: "./Hiyori/Hiyori.model3.json"
+  default_texture_path: "./Assets/Default/default.png"
+  expression_directory: "./Assets/Default/Expressions"
+
+knowledge:
+  directory: "./Knowledge"
+  pending_directory_name: ".pending"
+  notify_threshold: 10
+  pending_retention_days: 90
+  notify_state_file_name: ".notify_state.json"
+
+logging:
+  chat_log_dir: "./logs/chat"
+  app_log_dir: "./logs/app"
+  max_log_days: 90
+  minimum_level: "Info"
+
+# ---------------------------- 以下为手册正文常量的外提 ----------------------------
+# 手册把这些数值写死在描述里；按准则 8 不得硬编码，故集中到此处。
+# 默认值等于手册正文的取值，因此行为与手册一致。
+
+monitor:
+  host: "127.0.0.1"
+  port: 47777                    # 决策 Q10：GameMonitor TCP 端口
+  heartbeat_interval_seconds: 10
+  disconnect_timeout_seconds: 30
+  cooldown_minutes: 5.0          # 决策 Q11：恢复后的冷却期
+  game_list_file: "game_list.txt"
+  scan_interval_idle_seconds: 60
+  scan_interval_active_seconds: 10
+  unload_gpu_threshold_percent: 80
+  restore_gpu_threshold_percent: 50
+  restore_low_gpu_minutes: 3.0
+
+gpu:
+  reserved_mb: 4096              # 系统预留 4GB
+  kv_cache_reserved_mb: 1024     # KV Cache 预留 1GB
+  per_layer_mb: 150              # 每层约 150MB
+  safety_factor: 0.9
+  max_oom_retries: 2
+  oom_ngl_step: 4
+  oom_retry_delay_seconds: 5
+
+context:
+  max_recent_rounds: 30
+  send_recent_rounds: 10
+  summary_token_limit: 500
+  anchor_limit: 30
+  refine_window_size: 200
+  archive_file_name: "chat_log_archive.jsonl"
+  personality_entry_limit: 10
+
+idle:
+  poll_interval_ms: 500
+  idle_minutes: 5.0
+  cpu_low_percent: 50.0
+  cpu_high_percent: 70.0
+  refine_gpu_memory_percent: 60.0
+
+ui:
+  fallback_display_name: "AI 伴侣"
+  fallback_background_color: "#FF2B2B3C"
+  pet_image_path: "./Assets/Default/default.png"
+  always_on_top: true
+  click_through: false
+  bubble_duration_seconds: 5
+  idle_expression_seconds: 20

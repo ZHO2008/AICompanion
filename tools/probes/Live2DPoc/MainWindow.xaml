@@ -1,0 +1,23 @@
+<Window x:Class="Live2DPoc.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Live2D PoC — Hiyori"
+        Width="520" Height="680"
+        WindowStartupLocation="CenterScreen"
+        Background="Black">
+
+    <Grid>
+        <!-- GL 控件由代码塞进这个 Border -->
+        <Border x:Name="GlHost" />
+
+        <!-- 叠在上面的诊断文字（先证明 WPF 元素能盖在 GL 上） -->
+        <Border VerticalAlignment="Top" HorizontalAlignment="Left"
+                Margin="10" Padding="8,5"
+                Background="#CC000000" CornerRadius="6">
+            <TextBlock x:Name="StatusText"
+                       Foreground="#FFE8E8E8"
+                       FontSize="12"
+                       Text="初始化…" />
+        </Border>
+    </Grid>
+</Window>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    开发期工具，不属于产品代码，因此**不加入 AICompanion.sln**。
+    用途：在本机网络受限（GitHub 仅 20KB/s、HuggingFace 不可达）的情况下，
+    用多镜像轮换 + HTTP Range 断点续传把构建所需的外部资源取回来。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Fetcher</AssemblyName>
+    <RootNamespace>Fetcher</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="AICompanion.app" />
+
+  <!--
+    高 DPI 感知（手册虽未提，但这是"换机器就错位"的根因）。
+
+    开发机是 2560x1440 @ 175% 缩放，逻辑分辨率只有 1463x823。
+    如果进程只做 System DPI 感知，把窗口拖到另一块不同缩放率的显示器上时，
+    Windows 会做位图拉伸 —— 角色会变模糊、实际尺寸和期望尺寸对不上，
+    鼠标命中判定也会偏。
+
+    PerMonitorV2 让 WPF 在跨屏时自己按新 DPI 重新布局（内容仍是 DIP 单位）。
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+    </windowsSettings>
+  </application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+</assembly>

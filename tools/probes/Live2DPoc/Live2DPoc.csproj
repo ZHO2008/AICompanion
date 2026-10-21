@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Live2D 最小可行性验证（PoC）—— 对任何 Cubism 3/4 模型通用。
+
+    用法：
+      Live2DPoc.exe "<模型目录 或 *.model3.json>" [&#45;&#45;transparent]
+
+    验证内容：渲染 / 连续帧 / 口型参数回读 / 点击命中 / 透明背景。
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>Live2DPoc</AssemblyName>
+    <RootNamespace>Live2DPoc</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Live2DCSharpSDK.OpenGL.WPF" Version="1.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Cubism Core 原生库：必须落在 exe 同目录，SDK 内部按 DllImport("Live2DCubismCore") 加载。
+
+      用 Exists 条件包一层：这个 DLL 是 Live2D 的专有库，不入 git（见 .gitignore），
+      clone 下来必须先自己放一份到仓库根目录，否则编译会因为找不到文件而失败 ——
+      这里让缺失时只是不复制、并用警告提示，而不是直接崩构建。
+    -->
+    <None Include="..\..\..\Live2DCubismCore.dll"
+          Link="Live2DCubismCore.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('$(MSBuildProjectDirectory)\..\..\..\Live2DCubismCore.dll')" />
+  </ItemGroup>
+
+  <Target Name="WarnIfCubismCoreMissing" BeforeTargets="Build"
+          Condition="!Exists('$(MSBuildProjectDirectory)\..\..\..\Live2DCubismCore.dll')">
+    <Warning Text="缺少 Live2DCubismCore.dll（x64）。请从 Live2D 官方 Cubism SDK for Native 取得后放到仓库根目录，否则运行时会因找不到原生库而失败。" />
+  </Target>
+
+</Project>

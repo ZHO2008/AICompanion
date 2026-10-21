@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\AICompanion.Core\AICompanion.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Live2D 渲染：托管封装 + OpenGL 后端，TFM 正好是 net8.0-windows7.0。
+      原生库 Live2DCubismCore.dll（x64）不入库，需放在仓库根目录，下面的 ItemGroup 会复制到输出目录。
+    -->
+    <PackageReference Include="Live2DCSharpSDK.OpenGL.WPF" Version="1.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\Live2DCubismCore.dll"
+          Link="Live2DCubismCore.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('$(MSBuildProjectDirectory)\..\..\Live2DCubismCore.dll')" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!--
+      启用 WinForms 只为用 NotifyIcon 做系统托盘（手册 §1.1）。
+      WPF 本身没有托盘图标 API，而引入第三方托盘库不如直接用框架自带的实现可靠。
+      同时在 MainWindow 里用 System.Windows.Forms.Screen 做贴边定位。
+    -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>AICompanion</AssemblyName>
+    <RootNamespace>AICompanion.App</RootNamespace>
+    <!-- 高 DPI 感知清单：换到不同缩放率的屏幕时，角色不应被位图拉伸、命中判定不应偏移。 -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!--
+      WFAC010：WinForms 分析器建议"删掉清单里的 DPI 设置，改用 ApplicationHighDpiMode"。
+      本项目的入口是 WPF Application（WinForms 只为托盘 NotifyIcon 和 Screen），
+      ApplicationHighDpiMode 只对 WinForms 的 ApplicationConfiguration.Initialize 生效，
+      对 WPF 入口不生效 —— 进程级 DPI 感知仍由清单决定。因此保留清单并抑制该警告。
+    -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+  </PropertyGroup>
+  <PropertyGroup>
+    <Version>0.9.0</Version>
+    <AssemblyVersion>0.9.0.0</AssemblyVersion>
+    <FileVersion>0.9.0.0</FileVersion>
+    <Product>AI 桌面伴侣</Product>
+    <AssemblyTitle>AI 桌面伴侣</AssemblyTitle>
+    <Description>本地运行的 AI 桌面伴侣：Live2D 形象、语音对话、知识库与游戏感知</Description>
+    <Company>AICompanion</Company>
+    <ApplicationIcon>..\..\Assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!--
+    WinForms 的隐式 using 会让 Application / Color / KeyEventArgs 等类型与 WPF 同名类型冲突，
+    因此显式移除它；托盘相关代码统一用 `WF = System.Windows.Forms` 别名访问。
+  -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+</Project>

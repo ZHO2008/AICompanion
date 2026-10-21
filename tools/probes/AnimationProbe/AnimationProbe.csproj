@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    动画调度 / 角色包映射 / 口型同步的实验探针。
+
+    引用 AICompanion.App 是因为 AnimationManager、AvatarProfile、LipSyncDriver
+    都在表现层（它们直接操作 WPF Dispatcher）。因此本项目必须是 net8.0-windows + WPF。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>AnimationProbe</AssemblyName>
+    <RootNamespace>AnimationProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\AICompanion.App\AICompanion.App.csproj" />
+  </ItemGroup>
+
+</Project>

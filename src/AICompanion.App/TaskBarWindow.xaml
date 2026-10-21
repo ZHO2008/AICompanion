@@ -1,0 +1,77 @@
+<Window x:Class="AICompanion.App.TaskBarWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="功能栏"
+        Width="360" Height="52"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SnapsToDevicePixels="True"
+        Focusable="False">
+
+    <Window.Resources>
+        <Style x:Key="BarButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#FFF0F0F0" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="Margin" Value="3,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="#33FFFFFF"
+                                BorderBrush="#55FFFFFF"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#66FFFFFF" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#99FFFFFF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <!-- 一条贴在小窗下方的小工具栏。
+         缩放变换由代码挂到 RootBorder.LayoutTransform 上（XAML 内联的会被冻结）。 -->
+    <Border x:Name="RootBorder"
+            Background="#E61E1E28"
+            BorderBrush="#66FFFFFF"
+            BorderThickness="1"
+            CornerRadius="10"
+            Padding="4">
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Button x:Name="SettingsButton"   Content="设置"     Style="{StaticResource BarButton}" Click="OnSettingsClick" />
+            <Button x:Name="AppearanceButton" Content="更换外观" Style="{StaticResource BarButton}" Click="OnAppearanceClick" />
+            <Button x:Name="ChatButton"       Content="对话"     Style="{StaticResource BarButton}" Click="OnChatClick" />
+            <Button x:Name="SmallerButton"
+                    Content="−"
+                    Style="{StaticResource BarButton}"
+                    ToolTip="缩小角色（Ctrl+滚轮 也可）"
+                    Click="OnSmallerClick" />
+            <Button x:Name="LargerButton"
+                    Content="＋"
+                    Style="{StaticResource BarButton}"
+                    ToolTip="放大角色（Ctrl+滚轮 也可）"
+                    Click="OnLargerClick" />
+            <Button x:Name="ResetButton"
+                    Content="↺"
+                    Style="{StaticResource BarButton}"
+                    ToolTip="恢复默认外观与大小"
+                    Click="OnResetAppearanceClick" />
+        </StackPanel>
+    </Border>
+</Window>

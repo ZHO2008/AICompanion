@@ -1,0 +1,56 @@
+# ---- 构建产物 ----
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+# ---- 运行时数据（不入库）----
+logs/
+models/
+
+# ---- 原生 / 专有库 ----
+# Live2D Cubism Core 是专有库，必须自行从官方 SDK 取得后放仓库根目录
+Live2DCubismCore.dll
+*.lib
+*.exp
+
+# ---- 第三方大体积源码树 ----
+# llama.cpp / whisper.cpp 是上游代码（合计约 200 MB），按版本自行拉取即可，不重复入库。
+# 需要它们才能跑 build_native.bat；缺了就从上游重新 clone 对应版本。
+third_party/llama.cpp/
+third_party/whisper.cpp/
+
+# 仅排除这两个树的构建产物，源码里我们自己的部分（ai_asr / fvad_shim / libfvad）照常入库
+third_party/ai_asr/build/
+third_party/fvad_shim/build/
+third_party/libfvad/build/
+
+# ---- 临时文件 ----
+*.tmp
+*.log
+*.zip
+Thumbs.db
+desktop.ini
+
+# ---- 本地构建工具（第三方发行版，可重新下载，不入库）----
+# tools/toolchain 下是本机构建工具（CMake 发行版约 50 MB、8000+ 文件，ninja 约 0.6 MB）。
+# build_native.bat 需要它们在本机存在；clone 后自行解压一份到该路径即可。
+tools/toolchain/cmake/
+
+# ---- 打包产物（可重新生成）----
+dist/
+artifacts/
+# ---- 第三方素材与私人数据（不随公开仓库分发）----
+# Hiyori 是 Live2D 官方示例模型，授权不允许随仓库再分发；自行从 Live2D 官网下载后解压到 Hiyori\。
+Hiyori/
+# 用户自备的角色立绘与其原图（可能是他人作品，不入库）
+Assets/source/
+Assets/Default/character.png
+# 从对话里提取的待审核知识候选，属于个人数据
+Knowledge/.pending/
+# 运行期写入的外观偏好（各人不同，不入库）
+Assets/appearance.json

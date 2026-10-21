@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+  </ItemGroup>
+
+  <!-- 手册 §5.1 要求"从嵌入资源中生成"默认配置，因此把带注释的模板打进程序集。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="Configuration\config.default.yaml" />
+  </ItemGroup>
+
+</Project>

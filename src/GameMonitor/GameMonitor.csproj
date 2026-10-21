@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\AICompanion.Core\AICompanion.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!--
+      WinExe 而不是 Exe：手册 §1.4 要求"后台常驻"，因此不能弹出控制台窗口。
+      注意：手册同时要求内存占用低于 10MB —— .NET 运行时基线工作集在 25-45MB，
+      这个指标在当前技术栈下无法达成。已与用户确认（决策 Q13）：本轮先跑通协议，
+      指标留到阶段 4 再决定是否改用原生 C++ 重写。
+    -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>GameMonitor</AssemblyName>
+    <RootNamespace>GameMonitor</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

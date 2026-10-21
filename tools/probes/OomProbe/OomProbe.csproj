@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    开发期验证工具，不属于产品代码，不加入 AICompanion.sln。
+    用途：配合 tools/FakeLlamaServer 验证手册 §3.3 的 OOM 回退循环
+    （含"回退后成功恢复"与"重试耗尽后放弃"两条路径）。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>OomProbe</AssemblyName>
+    <RootNamespace>OomProbe</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\AICompanion.Core\AICompanion.Core.csproj" />
+  </ItemGroup>
+
+</Project>

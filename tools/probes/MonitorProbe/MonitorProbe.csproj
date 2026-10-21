@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    开发期验证工具，不属于产品代码，不加入 AICompanion.sln。
+    用途：验证手册 §3.9 的 GameMonitor 通信协议与决策 Q11 的冷却期裁决
+    （两端真实 TCP 往返，而不是只做单元测试）。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>MonitorProbe</AssemblyName>
+    <RootNamespace>MonitorProbe</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\AICompanion.Core\AICompanion.Core.csproj" />
+  </ItemGroup>
+
+</Project>

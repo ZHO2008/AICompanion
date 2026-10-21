@@ -1,0 +1,18 @@
+{
+  "avatar_name": "EVA",
+  "motion_map": {
+    "Idle": "idle",
+    "Listen": "listen",
+    "Think": "think",
+    "Speak": "talk",
+    "Confused": "question",
+    "Happy": "happy",
+    "Sad": "sad",
+    "Fallback": "idle"
+  },
+  "parameter_map": {
+    "MouthOpen": "ParamMouthOpenY",
+    "EyeBlink": "ParamEyeLOpen",
+    "BodyAngle": "ParamAngleZ"
+  }
+}

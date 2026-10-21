@@ -1,0 +1,229 @@
+<Window x:Class="AICompanion.App.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AI 伴侣 · 设置"
+        Width="720" Height="560"
+        WindowStartupLocation="CenterScreen"
+        Background="#FF20202A">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#FFE8E8F0" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Margin" Value="0,2" />
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="10,4" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+            <Setter Property="MinWidth" Value="76" />
+        </Style>
+        <Style TargetType="ListBox">
+            <Setter Property="Background" Value="#FF2A2A36" />
+            <Setter Property="Foreground" Value="#FFE8E8F0" />
+            <Setter Property="BorderBrush" Value="#FF3A3A48" />
+        </Style>
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="#FFE8E8F0" />
+            <Setter Property="Background" Value="#FF2A2A36" />
+            <Setter Property="Padding" Value="10,5" />
+        </Style>
+        <Style x:Key="SectionTitle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#FF9CC4FF" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,8,0,4" />
+        </Style>
+    </Window.Resources>
+
+    <TabControl Margin="8" Background="#FF20202A" BorderBrush="#FF3A3A48">
+
+        <!-- ============ 状态 ============ -->
+        <TabItem Header="状态">
+            <ScrollViewer Padding="10">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="运行状态" />
+                    <TextBlock x:Name="ModeText" />
+                    <TextBlock x:Name="LlmText" />
+                    <TextBlock x:Name="TtsText" />
+                    <TextBlock x:Name="AsrText" />
+                    <TextBlock x:Name="KnowledgeText" />
+                    <TextBlock x:Name="GpuText" />
+                    <TextBlock x:Name="PendingText" />
+                    <TextBlock x:Name="MonitorText" />
+
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="配置兜底与启动问题" />
+                    <ListBox x:Name="ProblemList" Height="150" />
+
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="当前告警气泡" />
+                    <ListBox x:Name="BubbleList" Height="120" />
+                </StackPanel>
+            </ScrollViewer>
+        </TabItem>
+
+        <!-- ============ 待审核知识（手册 §3.7） ============ -->
+        <TabItem Header="待审核知识">
+            <Grid Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Style="{StaticResource SectionTitle}"
+                           Text="模型在空闲时整理出的候选记忆。确认后才会进入正式知识库（程序绝不自动写入）。" />
+
+                <ListBox Grid.Row="1" x:Name="CandidateList" DisplayMemberPath="DisplayText" />
+
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="刷新" Click="OnRefreshCandidates" />
+                    <Button Content="确认入库" Click="OnConfirmCandidate" />
+                    <Button Content="丢弃" Click="OnDiscardCandidate" />
+                    <TextBlock x:Name="CandidateStatusText" VerticalAlignment="Center" Margin="10,0,0,0" />
+                </StackPanel>
+            </Grid>
+        </TabItem>
+
+        <!-- ============ 语音（手册 §3.4 / §3.5） ============ -->
+        <TabItem Header="语音">
+            <StackPanel Margin="10">
+                <TextBlock Style="{StaticResource SectionTitle}" Text="语音合成（TTS）" />
+                <TextBlock x:Name="TtsEngineText" />
+                <TextBlock x:Name="TtsVoiceText" />
+                <TextBlock x:Name="TtsPiperText" />
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="重启语音服务" Click="OnRestartVoice" />
+                </StackPanel>
+
+                <TextBlock Style="{StaticResource SectionTitle}" Text="语音识别（ASR）" />
+                <TextBlock x:Name="AsrStateText" />
+                <TextBlock x:Name="AsrModelText" />
+                <TextBlock x:Name="AsrVadText" />
+                <TextBlock x:Name="AsrLastText" />
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="重置 ASR" Click="OnResetAsr" />
+                    <Button Content="开始/停止监听" Click="OnToggleListening" />
+                </StackPanel>
+                <TextBlock x:Name="AsrHintText"
+                           TextWrapping="Wrap"
+                           Foreground="#FFFFC97A"
+                           Margin="0,6,0,0" />
+            </StackPanel>
+        </TabItem>
+
+        <!-- ============ 游戏检测（手册 §3.9） ============ -->
+        <TabItem Header="游戏检测">
+            <StackPanel Margin="10">
+                <TextBlock Style="{StaticResource SectionTitle}" Text="GameMonitor 连接" />
+                <TextBlock x:Name="MonitorStateText" />
+                <TextBlock x:Name="MonitorCooldownText" />
+
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="重连游戏检测" Click="OnReconnectMonitor" />
+                </StackPanel>
+
+                <TextBlock Style="{StaticResource SectionTitle}" Text="游戏列表文件" />
+                <TextBlock x:Name="GameListText" TextWrapping="Wrap" />
+
+                <TextBlock Style="{StaticResource SectionTitle}" Text="协议说明" />
+                <TextBlock TextWrapping="Wrap"
+                           Text="主程序监听 127.0.0.1:47777，GameMonitor 主动连接。消息为一行一个 JSON。冷却期由主程序判定并通过 cooldown 消息回传给 GameMonitor。" />
+            </StackPanel>
+        </TabItem>
+
+        <!-- ============ 外观：气泡时长 + 透明态不透明度 ============ -->
+        <TabItem Header="外观">
+            <StackPanel Margin="10">
+                <TextBlock Style="{StaticResource SectionTitle}" Text="提示气泡" />
+                <TextBlock TextWrapping="Wrap" Foreground="#FFB9C3D6"
+                           Text="提示信息显示多少秒后自动隐藏。所有气泡都受此控制，包括启动提示、降级提示与模式切换提示。" />
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Slider x:Name="BubbleSecondsSlider"
+                            Width="240"
+                            Minimum="1" Maximum="30"
+                            TickFrequency="1"
+                            IsSnapToTickEnabled="True"
+                            VerticalAlignment="Center"
+                            ValueChanged="OnBubbleSecondsChanged" />
+                    <TextBlock x:Name="BubbleSecondsText"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+
+                <TextBlock Style="{StaticResource SectionTitle}" Text="透明态不透明度" Margin="0,16,0,0" />
+                <TextBlock TextWrapping="Wrap" Foreground="#FFB9C3D6"
+                           Text="覆盖态恒为完全不透明；切到「透明」后整体按该不透明度变淡，便于一眼分辨当前是哪种模式。" />
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Slider x:Name="OpacitySlider"
+                            Width="240"
+                            Minimum="0.1" Maximum="1.0"
+                            TickFrequency="0.05"
+                            IsSnapToTickEnabled="True"
+                            VerticalAlignment="Center"
+                            ValueChanged="OnTransparentOpacityChanged" />
+                    <TextBlock x:Name="OpacityText"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+
+                <TextBlock Style="{StaticResource SectionTitle}" Text="模型水平位置" Margin="0,16,0,0" />
+                <TextBlock TextWrapping="Wrap" Foreground="#FFB9C3D6"
+                           Text="Live2D 模型默认会按实际画面自动居中。有些模型自带画布偏移，看起来仍偏一侧，可以在这里微调。0 表示保持自动居中。" />
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Slider x:Name="HorizontalOffsetSlider"
+                            Width="240"
+                            Minimum="-0.30" Maximum="0.30"
+                            TickFrequency="0.01"
+                            IsSnapToTickEnabled="True"
+                            VerticalAlignment="Center"
+                            ValueChanged="OnHorizontalOffsetChanged" />
+                    <TextBlock x:Name="HorizontalOffsetText"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center" />
+                    <Button Content="复位居中" Margin="12,0,0,0" Padding="8,2" Click="OnResetHorizontalOffset" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                    <Button Content="保存并应用" Click="OnSaveAppearance" />
+                    <TextBlock x:Name="AppearanceHintText"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center"
+                               Foreground="#FFFFC97A"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Foreground="#FF8C97AC"
+                           Text="这些偏好保存在 Assets\appearance.json，不会修改 config.yaml。删除该文件即回到配置里的默认值（模型位置回到自动居中）。" />
+            </StackPanel>
+        </TabItem>
+
+        <!-- ============ 日志（手册阶段 3 第 6 项） ============ -->
+        <TabItem Header="日志">
+            <Grid Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0">
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="占用空间" />
+                    <TextBlock x:Name="LogPathText" TextWrapping="Wrap" />
+                    <TextBlock x:Name="LogSizeText" />
+                    <TextBlock x:Name="ChatLogSizeText" />
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="刷新" Click="OnRefreshLogs" />
+                        <Button Content="清理应用日志" Click="OnPurgeAppLogs" />
+                        <Button Content="清理旧聊天日志" Click="OnCleanupChatLogs" />
+                        <Button Content="打开日志目录" Click="OnOpenLogFolder" />
+                    </StackPanel>
+                </StackPanel>
+
+                <TextBlock Grid.Row="1"
+                           Style="{StaticResource SectionTitle}"
+                           Text="最近日志（内存缓冲，最新在前）" />
+
+                <ListBox Grid.Row="2" x:Name="LogList" FontFamily="Consolas" FontSize="11" />
+            </Grid>
+        </TabItem>
+    </TabControl>
+</Window>

@@ -1,0 +1,58 @@
+<Window x:Class="AICompanion.App.CornerButton"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="模式切换"
+        Width="34" Height="34"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SnapsToDevicePixels="True"
+        Focusable="False">
+
+    <Window.Resources>
+        <Style x:Key="ShellButton" TargetType="Button">
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Shell"
+                                Background="#CC1E1E28"
+                                BorderBrush="#80FFFFFF"
+                                BorderThickness="1"
+                                CornerRadius="9">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="#F0353548" />
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="#FFFFFFFF" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="#FF4C4C66" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <!--
+      角色右上角的模式切换按钮。
+
+      刻意做成**独立窗口**而不是主窗口里的一个控件：
+      透明态下主窗口带 WS_EX_TRANSPARENT，鼠标事件会整体穿透，
+      放在里面的按钮根本点不到 —— 那就再也切不回覆盖态了。
+      独立窗口不穿透，因此两种模式下都始终可点（与该桌宠参考实现一致）。
+    -->
+    <Button x:Name="ToggleButton" Style="{StaticResource ShellButton}" Click="OnToggleClick">
+        <TextBlock x:Name="ModeText"
+                   Text="覆"
+                   Foreground="#FFF0F0F0"
+                   FontSize="13"
+                   FontWeight="SemiBold" />
+    </Button>
+</Window>
