@@ -79,6 +79,8 @@ E:\DEEPSEEK
 ├── start_all.bat                   # 启动脚本 (GBK 编码)
 ├── build_native.bat                # 原生组件构建 (GBK 编码)
 ├── game_list.txt                   # GameMonitor 的游戏列表
+├── LICENSE                         # GNU AGPL-3.0 许可证正文
+├── LICENSING.md                    # 双授权说明（AGPL / 商业许可）与第三方组件清单
 ├── src
 │   ├── AICompanion.Core            # 核心逻辑，net8.0，不依赖 WPF
 │   │   ├── Abstractions            # IAppLogger / IBubbleNotifier / ITTSEngine
@@ -596,3 +598,21 @@ powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1
 - [ ] `tools\AsrPttProbe`、`tools\AsrRecoveryProbe`、`tools\AnimationProbe` 全部通过
 - [ ] `config.yaml` 里 `llm.model_path` 指向随包分发的模型
 - [ ] 打包后在**解压/安装目录**里跑一次，确认不依赖仓库环境
+
+## 十一、许可
+
+本项目采用 **AGPL-3.0 与商业许可双授权**，按你的使用场景任选其一：
+
+| | **AGPL-3.0**（默认，免费） | **商业许可**（付费） |
+| --- | --- | --- |
+| 适合 | 个人使用、学习研究、开源项目 | 闭源商业软件、不公开源码的 SaaS、OEM 预装 |
+| 义务 | 分发或以网络服务形式提供时，须以 AGPL-3.0 提供完整对应源码 | 无开源义务，按合同约定 |
+| 费用 | 免费 | 需付费，条款协商 |
+
+- 许可证正文：[`LICENSE`](LICENSE)（GNU AGPL-3.0，仅第 3 版）
+- 双授权细则、第三方组件各自的许可、贡献条款：[`LICENSING.md`](LICENSING.md)
+
+> 注意：**Live2D 的 SDK 与模型不在本项目的双授权范围内**，使用它们需自行遵守 Live2D 的许可。
+> 模型文件（LLM / ASR / Piper）同样各自独立授权，均不随本仓库分发。
+
+商业授权咨询请在 [Issues](https://github.com/ZHO2008/AICompanion/issues) 中标注 `commercial-license`。
