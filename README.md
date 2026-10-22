@@ -585,9 +585,10 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 | `-ReadyToRun` | `true` | 预编译，启动更快（体积略增） |
 | `-ExcludeSymbols` | `true` | 剔除 `.pdb` |
 | `-Zip` | `false` | 是否额外生成 zip（有了安装包一般不需要） |
+| `-NoCudaRuntime` | 关 | 默认把 CUDA 运行库（`cublas64_13` / `cublasLt64_13` / `cudart64_13`，493 MB）打进 `bin\`，见 10.3 |
 
-> `powershell -File` 传不了布尔值（`-IncludeModels:$false` 会绑定失败），所以另给了三个
-> 不带值的开关：`-NoModels`、`-NoLicensedAssets`、`-FrameworkOnly`。
+> `powershell -File` 传不了布尔值（`-IncludeModels:$false` 会绑定失败），所以另给了几个
+> 不带值的开关：`-NoModels`、`-NoLicensedAssets`、`-FrameworkOnly`、`-NoCudaRuntime`。
 
 **分发包里不放需要单独授权的素材。** Live2D 的 Cubism Core 与模型得用户自己按 Live2D 的
 条款取得，包里只附一份 `素材说明.md` 写明缺什么、去哪下、放哪里。
@@ -596,9 +597,9 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 产物：
 
 ```
-dist\AICompanion-0.9.0-win-x64\              可直接运行的分发目录（默认含模型，约 1.42 GB）
+dist\AICompanion-0.9.0-win-x64\              可直接运行的分发目录（默认含模型与 CUDA 运行库，约 1.90 GB）
 dist\AICompanion-0.9.0-win-x64.zip           加 -Zip 才生成
-dist\AICompanion-0.9.0-full-setup.exe        安装包（约 1.27 GB；-NoInstaller 则不生成）
+dist\AICompanion-0.9.0-full-setup.exe        安装包（约 1.62 GB；-NoInstaller 则不生成）
 ```
 
 只出不含模型的轻量包（约 249 MB）：
@@ -612,6 +613,27 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -NoModels
 ```bat
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeLicensedAssets
 ```
+
+### 10.3 目标机器需要什么（越少越好）
+
+只装安装包的话，**目标机器只需要 NVIDIA 驱动 + 约 4 GB 磁盘**：
+
+| 依赖 | 是否需要 | 说明 |
+| --- | --- | --- |
+| .NET 8 桌面运行时 | 不需要 | 自包含发布，运行时在包里 |
+| CUDA Toolkit | 不需要 | `cublas64_13` / `cublasLt64_13` / `cudart64_13` 已打进 `bin\` |
+| Visual C++ 运行库 | 不需要 | 静态链接 |
+| Python / venv / torch | 不需要 | 默认 TTS 走 Windows 自带 SAPI；Piper 音色可选 |
+| NVIDIA 驱动 | **需要** | GPU 推理、`nvidia-smi` 显存查询都靠它 |
+| GPT-SoVITS / CosyVoice | 可选 | 想要更好的音色再单独起服务，App 自动识别、没起就降级 |
+
+**为什么要打 CUDA 运行库**：`bin\ggml-cuda.dll` 依赖 `cublas64_13.dll`。开发机上这些来自
+已装的 CUDA Toolkit 13.3 且在 `PATH` 里，所以"本机能跑"并不等于"别人装上能跑"。
+实测把 `PATH` 里的 CUDA 目录全删掉再启动打包版，仍然是
+`运行模式=GPU 模式（ngl=9/28，空闲显存 6756 MB）` —— 证明目标机不需要 CUDA Toolkit。
+
+体积换来的就是这一条：安装包从 1.26 GB 涨到 1.62 GB（`cublasLt64_13.dll` 单文件 442 MB），
+但省掉了"先装 3 GB CUDA Toolkit"这一步。
 
 ### 10.2 安装包
 

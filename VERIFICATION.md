@@ -2245,6 +2245,34 @@ asr:
   要发布就用 `-NoLicensedAssets` 重打。
 - Inno Setup 那条路径这次没重跑，只验证了分发目录。`.iss` 是整目录递归打包
   （`Source: {#StageDir}\*`），所以目录干净它自然干净。
+
+### 26.4 安装包"装完即用"：把 CUDA 运行库打进去（含 Inno 全流程实测）
+
+**问题**：第一次打出来的 1.26 GB 安装包在开发机上 GPU 正常，但它能跑 GPU 只是因为**这台机器
+装了 CUDA Toolkit 13.3 而且在 `PATH` 里**——`bin\ggml-cuda.dll` 依赖 `cublas64_13.dll`，
+目标机没有就静默退回 CPU。也就是说"本机能跑"骗了人。
+
+**改法**：`pack.ps1` 自动在 CUDA 安装目录里找 `cublas64_13.dll` / `cublasLt64_13.dll` /
+`cudart64_13.dll` 复制进 `bin\`（Windows 优先从 exe 所在目录加载 DLL），加 `-NoCudaRuntime`
+可跳过。三个文件共 493 MB，其中 `cublasLt64_13.dll` 一个就 442 MB。
+
+**验证（每次都真跑）**：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 重打安装包 | 分发目录 1.90 GB，`full-setup.exe` **1621.5 MB**，Inno 编译 212 秒 |
+| 静默安装到临时目录 | 退出码 0，**69 秒**，744 个文件，1460 MB，`unins000.exe` 就位 |
+| 运行安装版 | 进程存活、正常启动 |
+| 静默卸载 | 退出码 0，目录清空（`logs` 与 `appearance.json` 按设计保留） |
+| **删掉 PATH 里所有 CUDA 目录后启动打包版** | `运行模式=GPU 模式（ngl=9/28，空闲显存 6756 MB）` |
+| 同一份包里 TTS | `配置引擎=piper，实际引擎=sapi，降级=True`（Piper 音色未随包，走系统语音） |
+
+倒数第二行是关键：`PATH` 里已经没有任何 CUDA 目录，程序仍然进了 GPU 模式，说明
+**目标机器只需要 NVIDIA 驱动，不需要装 CUDA Toolkit**。这就是"环境不要太复杂"的落点。
+
+顺带修的坑：用编辑器改 `pack.ps1` 后文件丢了 UTF-8 BOM，PowerShell 5.1 按 ANSI 读，
+里面的中文全变乱码，报 `方法调用中缺少")"`。以后改 `.ps1` 都要 `ReadAllBytes` 查 BOM 再补。
+
 ---
 
 ## 27. 语音合成后端：GPT-SoVITS 与 CosyVoice（2026-10-22）
@@ -2413,9 +2441,27 @@ dtype 和算子，能吃它的只有 TensorRT 10.x 的 FP4 engine 或 torchao �
 
 - **vLLM**：PyPI 上只有 sdist（`vllm-0.31.0.tar.gz`），Windows 没有二进制轮子，源码编译要全量 CUDA
   工具链，上游也不支持 Windows。放弃。
-- **TensorRT**：CosyVoice 里有 `load_trt` 路径（只覆盖 flow decoder，需要 onnx 导出 + engine 构建），
-  但 `tensorrt-cu12` 只在 `pypi.nvidia.com`，本机对它的 TLS 一律失败（加 `--trusted-host` 也无效），
-  清华源只有 sdist。放弃。
+- **TensorRT**：CosyVoice 里有 `load_trt` 路径（只换 flow 的 `decoder.estimator`，需要 onnx 导出 +
+  engine 构建）。关掉 Steam++（它装了系统代理和根证书，等于中间人）之后 `pypi.nvidia.com` 能直连了，
+  两个版本都装过：
+  - TRT **11.4**：装上了，`trt.DataType.FP4` 存在（说明工具链认得 FP4），但 TRT 11 把
+    `BuilderFlag.FP16/FP8/FP4` 全删了（改成"强类型网络 + Q/DQ 决定精度"），而上游
+    `file_utils.convert_onnx_to_trt` 里是 `config.set_flag(trt.BuilderFlag.FP16)`，在 TRT 11 上直接
+    AttributeError。**上游这条 TRT 路径在 TRT 11 上跑不了。**
+  - TRT **10.16**：装上了、API 对得上，但上游只覆盖 CosyVoice1/2 的 `ConditionalDecoder` 形状
+    （`x/mask/mu/cond`，80 通道）；本机 CosyVoice3 的 flow 是 `CausalMaskedDiffWithDiT`，
+    estimator 是 DiT，输入约定不同，模型目录里也没有预导出的
+    `flow.decoder.estimator.fp32.onnx`，仓库里没有导出脚本。**要在 v3 上用 TRT 得自己写
+    onnx 导出 + 适配 DiT 的输入，等于一次移植，没有现成路径。**
+  - FP4 更远一层：TRT 的 FP4 不是"加个 flag"，要网络里带 NVFP4 的 Q/DQ（权重按 16 元素分组、
+    E4M3 缩放、E2M1 尾数），即先用 ModelOpt 做 PTQ 再建 engine；对"LLM 自回归解码 + flow + hifigan"
+    这种混合管线，等于整条链的 Triton/TRT 移植。
+- **torchao（torch 侧 NVFP4）**：0.18 需要 torch ≥ 2.8（用了 `torch.nn.functional.ScalingType`），
+  装进本机 torch 2.7.1 的环境后，`transformers` 会自动探测并导入 torchao，结果 **整个 CosyVoice 都
+  import 不起来**（`cannot import name 'ScalingType'`）。已卸载并验证环境恢复。要在 torch 侧量 FP4，
+  必须单独装 torch 2.9.1+cu128（另建 venv，不动现有的 2.7.1）。
+  试完已把 `tensorrt-cu12` / `onnxruntime-gpu` 从 `.venv-gpu` 卸载（省 1.5 GB 依赖），回归到
+  `torch 2.7.1+cu128 + onnxruntime 1.18(CPU)` 这套已验证的组合。
 
 #### 流式合成：试过，短句上反而更慢
 

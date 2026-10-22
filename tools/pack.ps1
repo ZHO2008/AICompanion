@@ -38,7 +38,9 @@ param(
     # （-File 会把 $false 当字符串，绑定到 [bool] 直接报错）。
     [switch]$NoModels,
     [switch]$NoLicensedAssets,
-    [switch]$FrameworkOnly
+    [switch]$FrameworkOnly,
+    # 跳过把 CUDA 运行库打进 bin\（默认会打，装完只需要 NVIDIA 驱动）
+    [switch]$NoCudaRuntime
 )
 
 # 开关覆盖（开关写法对 cmd / -File 都友好）
@@ -206,6 +208,46 @@ if (Test-Path 'bin') {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
     Get-ChildItem 'bin' -File | Copy-Item -Destination $runtimeDir -Force
     Write-Host "    + bin\ ($((Get-ChildItem 'bin' -File).Count) 个原生库，$(SizeOf 'bin'))"
+
+    # ggml-cuda.dll 依赖 CUDA 运行库（cublas64_13 / cublasLt64_13 / cudart64_13）。
+    # 开发机上这些来自已安装的 CUDA Toolkit，目标机没有就会静默退回 CPU。
+    # 这里把运行库一起打进 bin\（Windows 优先从 exe 所在目录加载 DLL），
+    # 装完只需要 NVIDIA 驱动，不需要用户装 CUDA Toolkit。
+    if (-not $NoCudaRuntime) {
+        $cudaDlls = @('cublas64_13.dll', 'cublasLt64_13.dll', 'cudart64_13.dll')
+        $cudaSources = @(
+            'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64',
+            'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin',
+            $env:CUDA_PATH,
+            $env:CUDA_HOME
+        ) | Where-Object { $_ -and (Test-Path $_) }
+
+        $cudaSrc = $null
+        foreach ($src in $cudaSources) {
+            if (Test-Path (Join-Path $src 'cublas64_13.dll')) { $cudaSrc = $src; break }
+        }
+
+        if ($cudaSrc) {
+            $copied = @()
+            foreach ($dll in $cudaDlls) {
+                $from = Join-Path $cudaSrc $dll
+                if (Test-Path $from) {
+                    Copy-Item $from $runtimeDir -Force
+                    $copied += $dll
+                }
+            }
+            $bytes = 0
+            foreach ($d in $copied) {
+                $bytes += (Get-Item (Join-Path $runtimeDir $d)).Length
+            }
+            $mb = [Math]::Round($bytes / 1MB, 1)
+            Write-Host "    + CUDA 运行库（$($copied -join ', ')，$mb MB，来自 $cudaSrc）"
+        }
+        else {
+            Write-Host '    ! 没找到 CUDA 运行库，目标机若无 CUDA Toolkit 会退回 CPU 推理' -ForegroundColor Yellow
+            Write-Host '      放宽方式：装 CUDA 13.3 运行时，或用 -NoCudaRuntime 跳过此项' -ForegroundColor Yellow
+        }
+    }
 }
 
 # ---------------------------------------------------------------- 4. 模型
