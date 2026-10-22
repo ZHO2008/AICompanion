@@ -2667,3 +2667,56 @@ fp4 研究环境（`.venv-fp4` 7.7 GB + 下载的轮子 2.7 GB）已删除，回
 
 脚本留在 `E:\cosyvoice-src\`（`trt_prec3.py` 三方对比、`trt_fp4_bench4.py` FP4 单测、
 `bench_nvfp4.py` torchao 版），`.venv-fp4` 只是研究环境，**不进安装包**。
+
+---
+
+## 28. 清理与收尾（2026-10-23 凌晨）
+
+用户要求"删掉测试数据、整理项目、排查内存泄漏和死代码，做完关机"。以下是这一轮做了什么、
+依据是什么。全部是**静态检查 + 构建**，没有跑模型推理。
+
+### 28.1 删掉的测试数据与中间产物（约 6.4 GB，另加之前的 10.4 GB）
+
+| 目标 | 体积 | 为什么 |
+| --- | --- | --- |
+| `artifacts\pkgbin` | 248.6 MB | `pack.ps1` 的发布中间产物，随时可重生成 |
+| `dist\AICompanion-0.9.0-win-x64` | 1949 MB | 分发目录副本，安装包已包含全部内容 |
+| `artifacts\cosyvoice-campplus.onnx` | 27 MB | 研究时下载的模型副本，正本在 `E:\cosyvoice` |
+| `artifacts\tts`、`artifacts\pilot-screenshots` | 9 MB | 探针合成的 wav、试点截图 |
+| `artifacts\speech_zh.wav`、`icon-preview.png`、`app.ico.orig`、`cosyvoice-*.{py,md}`、`wsl-install.ps1` | 0.2 MB | 一次性产物与抄来的上游文件 |
+| `logs\` | 1.9 MB | 运行日志 |
+| 32 个 `obj\` / `bin\` | 229 MB | 编译中间产物（顶层 `bin\` 是原生库，保留） |
+| `E:\cosyvoice-src` | 3983 MB | TRT 的 `.plan` / `.onnx` 与实验草稿 |
+
+保留：`dist\AICompanion-0.9.0-full-setup.exe`（1621.5 MB，交付物）、
+`artifacts\repo-full-history.bundle`（14.8 MB，完整历史备份）。
+
+研究脚本没丢：`trt_prec3.py`、`trt_fp4_bench4.py`、`bench_fp8_torch.py`、
+`cosy_profile_stages.py` 已归档到 `tools\research\`，并附了 `README.md` 说明依赖与结论。
+
+### 28.2 内存泄漏排查（逐个资源看，没有发现需要改的）
+
+| 资源 | 检查结果 |
+| --- | --- |
+| `HttpClient` | 全仓库只有 4 处创建（`HealthMonitor`、`LlamaClient`、`ChatterboxEngine`、`HttpTtsEngineBase`），都是**长生命周期字段**，且各自在 `Dispose()` 里 `_http.Dispose()`；没有"每请求 new" |
+| 定时器 | `LipSync`、`HealthMonitor`、`MonitorServer`、`IdleTaskScheduler`、`ASRManager` 的 `Timer` 都在 `Dispose()` 里 `?.Dispose()`；`MainWindow`/`BubbleNotifier`/`PushToTalkMonitor` 的 `DispatcherTimer` 随 Dispatcher 存活，`PushToTalkMonitor.Dispose()` 还额外退订了 Tick |
+| `CancellationTokenSource` | 只有两处 `new`：`ASRManager._listenCts`（在 `Stop`/`Dispose` 里释放）、`IdleTaskScheduler`（`finally` 里 `cts.Dispose()`） |
+| 会增长的集合 | `ContextManager` 有分层摘要 + `MaxRecentRounds`；`BubbleNotifier` 有过期清理（`PurgeExpired`）；`ASRManager._pttSamples` 有 `MaxSegmentSeconds` 上限；`GameCooldownTracker` / `HealthMonitor` 的字典按进程/探针名索引，规模有限 |
+| 引擎重建 | `TTSManager.ResetAsync()` / 降级路径都是先 `_engine.Unload()` 再建新引擎，`Unload()` 会释放 `HttpClient` |
+
+唯一"不完美但可接受"的：`BubbleNotifier` 没实现 `Dispose`（它的 `DispatcherTimer` 与窗口同生命周期，
+且 Tick 里只做清理，不持有外部对象）。为它加 `IDisposable` 只是在 `App` 退出时省一次 Tick，不值得改动。
+
+### 28.3 死代码扫描
+
+- `dotnet build AICompanion.sln -c Debug` → **0 警告**（没有 CS0169 / CS0414 这类未使用字段警告）。
+- 额外做了一次启发式扫描：把 `src` 下所有 `private`/`internal` 成员名拎出来，在
+  `.cs` + `.xaml` + `.json` 全文里按词边界计数，**只被声明一次**的只有
+  `GameMonitor\Program.cs:26 Main` —— 那是入口点，属于误报。
+- 结论：没有可安全删除的死代码。这一条如实记下来，不为了"看起来整理了"而乱删。
+
+### 28.4 最终状态
+
+- `git status` 干净；构建 0 警告；交付物 `dist\AICompanion-0.9.0-full-setup.exe` 在。
+- E 盘剩余空间 65.1 GB（清理前约 55 GB）。
+- 收尾后执行关机（用户要求）。
