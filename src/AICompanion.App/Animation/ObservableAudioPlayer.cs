@@ -10,7 +10,7 @@ namespace AICompanion.App.Animation;
 /// 核心层只关心"把这段 WAV 播完"，不应该知道 VPet/Live2D 的动作或口型细节。
 /// 表现层的需求通过包装实现，核心接口保持不变。
 /// </summary>
-public sealed class ObservableAudioPlayer : IAudioPlayer
+public sealed class ObservableAudioPlayer : IAudioPlayer, IDisposable
 {
     private readonly IAudioPlayer _inner;
     private readonly IAppLogger _logger;
@@ -69,6 +69,21 @@ public sealed class ObservableAudioPlayer : IAudioPlayer
         catch (Exception ex)
         {
             _logger.Warn($"PlaybackStopped 处理异常：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 把 Dispose 透给内层播放器。
+    /// 之前 AppHost 里写的是 <c>(Audio as IDisposable)?.Dispose()</c>，而本类没实现 IDisposable，
+    /// 那个调用一直是空操作 —— 内层 <c>WaveOutPlayer</c> pinned 的 WAV 缓冲区因此永远不被释放。
+    /// </summary>
+    public void Dispose()
+    {
+        Stop();
+
+        if (_inner is IDisposable disposable)
+        {
+            disposable.Dispose();
         }
     }
 }

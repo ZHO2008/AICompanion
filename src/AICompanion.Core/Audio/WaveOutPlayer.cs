@@ -75,10 +75,11 @@ public sealed class WaveOutPlayer : IAudioPlayer, IDisposable
 
         lock (_sync)
         {
-            ReleasePin();
-
-            // 先掐掉上一段，避免叠音。
+            // 顺序不能反：必须先掐掉上一段（Win32 停止引用这块内存），
+            // 再解 pin，否则缓冲可能被 GC 移动/回收而 winmm 仍在读。
             PlaySound(IntPtr.Zero, IntPtr.Zero, SndPurge);
+
+            ReleasePin();
 
             _pinnedAudio = GCHandle.Alloc(wav, GCHandleType.Pinned);
             var pointer = _pinnedAudio.AddrOfPinnedObject();
@@ -102,6 +103,14 @@ public sealed class WaveOutPlayer : IAudioPlayer, IDisposable
         {
             Stop();
             throw;
+        }
+
+        // 正常播完：这段 WAV 不再需要，立刻解 pin。
+        // 之前只在"下一次 Play/Stop/Dispose"时释放，最后一次播放的缓冲区会一直
+        // 被 GCHandle 钉在固定堆上（进程退出都不一定走到 Dispose）。
+        lock (_sync)
+        {
+            ReleasePin();
         }
     }
 

@@ -169,6 +169,12 @@ public sealed class PiperEngine : ITTSEngine
 
         using var process = new Process { StartInfo = psi };
 
+        // 读流任务在 try 外声明：异常路径也要把它们收掉，否则
+        // （a）它们会在 Process 被 Dispose 后抛 IOException 且无人观察，
+        // （b）piper 卡在写 stderr 时会一直挂着。
+        Task<string>? stderrTask = null;
+        Task<string>? stdoutTask = null;
+
         try
         {
             if (!process.Start())
@@ -181,8 +187,8 @@ public sealed class PiperEngine : ITTSEngine
             await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
             process.StandardInput.Close();
 
-            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
@@ -193,7 +199,6 @@ public sealed class PiperEngine : ITTSEngine
             }
             catch (OperationCanceledException)
             {
-                TryKill(process);
                 throw new TimeoutException("piper.exe 合成超时（60 秒）。");
             }
 
@@ -216,6 +221,35 @@ public sealed class PiperEngine : ITTSEngine
         }
         finally
         {
+            // 任何异常路径都必须把子进程收掉：残留的 piper.exe 会占着 tempOutput，
+            // 下面的删除就会失败，%TEMP% 里按 GUID 一路累积 wav。
+            TryKill(process);
+
+            var pending = new List<Task>(2);
+            if (stderrTask is not null)
+            {
+                pending.Add(stderrTask);
+            }
+
+            if (stdoutTask is not null)
+            {
+                pending.Add(stdoutTask);
+            }
+
+            if (pending.Count > 0)
+            {
+                try
+                {
+                    // 进程已被杀，管道会立刻见了 EOF；给半秒收尾，异常本身不重要（下面统一观察）。
+                    await Task.WhenAny(Task.WhenAll(pending), Task.Delay(500)).ConfigureAwait(false);
+                    GC.KeepAlive(pending);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug($"收尾 piper 输出流时异常（忽略）：{ex.Message}");
+                }
+            }
+
             try
             {
                 if (File.Exists(tempOutput))
@@ -223,9 +257,10 @@ public sealed class PiperEngine : ITTSEngine
                     File.Delete(tempOutput);
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // 临时文件删不掉不影响主流程。
+                // 删不掉通常意味着还有进程占着这个文件，记一条便于排查。
+                _logger.Debug($"临时文件删除失败（{Path.GetFileName(tempOutput)}）：{ex.Message}");
             }
         }
     }

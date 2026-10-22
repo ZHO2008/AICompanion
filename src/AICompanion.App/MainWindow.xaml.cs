@@ -131,6 +131,9 @@ public partial class MainWindow : Window
 
         InitializeComponent();
 
+        // 置顶由 config.yaml 的 ui.always_on_top 控制，默认 true（桌宠常驻最前）。
+        Topmost = _host.Config.Ui.AlwaysOnTop;
+
         // 在代码里挂缩放变换：XAML 内联的 ScaleTransform 会被 WPF 冻结，运行时改不了。
         RootGrid.LayoutTransform = _rootScale;
 
@@ -338,7 +341,7 @@ public partial class MainWindow : Window
         _clickThrough = _host.Config.Ui.ClickThrough;
         ApplyUserAppearanceSettings();
 
-        _taskBar = new TaskBarWindow();
+        _taskBar = new TaskBarWindow { Topmost = _host.Config.Ui.AlwaysOnTop };
         _taskBar.SettingsRequested += (_, _) => OpenSettings();
         _taskBar.AppearanceRequested += (_, _) => ChangeAppearance();
         _taskBar.ResetAppearanceRequested += (_, _) => ResetAppearance();
@@ -347,7 +350,7 @@ public partial class MainWindow : Window
         _taskBar.LargerRequested += (_, _) => AdjustScale(+0.05);
 
         // 右上角模式切换按钮：独立窗口，因此透明态下依然可点
-        _cornerButton = new CornerButton();
+        _cornerButton = new CornerButton { Topmost = _host.Config.Ui.AlwaysOnTop };
         _cornerButton.ToggleRequested += (_, _) => ToggleClickThrough();
         _cornerButton.ApplyScale(_scale);
         _cornerButton.SetMode(_clickThrough);
@@ -747,6 +750,14 @@ public partial class MainWindow : Window
     /// <summary>窗口关闭时释放渲染资源。GL 上下文与模型不释放会留下线程/显存。</summary>
     protected override void OnClosed(EventArgs e)
     {
+        // 定时器必须先停：它们会在窗口关闭后继续 tick，去碰已经 Dispose 的控件/渲染器。
+        _hoverTimer.Stop();
+        _expressionTimer.Stop();
+        _asrResumeTimer?.Stop();
+
+        // 动作调度里的 hold 定时器也要停，否则关窗后它还会回调到已释放的渲染器上。
+        _animations?.Dispose();
+
         try
         {
             _live2d?.Dispose();
@@ -755,6 +766,17 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             _host.Logger.Warn($"关闭时释放渲染资源失败：{ex.Message}");
+        }
+
+        // 子窗口是独立 HWND，不关掉的话应用退出前它们还挂在桌面上。
+        try
+        {
+            _taskBar?.Close();
+            _cornerButton?.Close();
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Warn($"关闭子窗口失败：{ex.Message}");
         }
 
         base.OnClosed(e);
@@ -1174,6 +1196,10 @@ public partial class MainWindow : Window
             var note = Math.Abs(clamped - requested) > 0.001 ? "（已受屏幕尺寸限制）" : string.Empty;
             _bubbles.Show("scale", $"角色大小：{clamped:P0}{note}", BubbleLevel.Info, TimeSpan.FromSeconds(2));
         }
+
+        // 缩放后窗口可能超出工作区（尤其贴着屏幕边缘时），拉回可见范围。
+        // 这个方法原先写了却没人调用（死代码），而注释里承诺的正是"改大小时用"。
+        ClampIntoWorkArea();
 
         _host.Logger.Info(
             $"角色大小设为 {clamped:P0}，窗口 {Width:F0}×{Height:F0} DIP（{(persist ? "已记住" : "未持久化")}）");

@@ -98,7 +98,8 @@ public sealed class FvadDetector : IVadDetector
 {
     private const int FrameMilliseconds = 20;
 
-    private readonly IntPtr _instance;
+    // 非 readonly：Dispose 需要把句柄清零以保证幂等（见 Dispose 注释）。
+    private IntPtr _instance;
     private readonly FvadProcessDelegate _process;
     private readonly FvadResetDelegate _reset;
     private readonly FvadFreeDelegate _free;
@@ -107,7 +108,7 @@ public sealed class FvadDetector : IVadDetector
     private readonly int _sampleRate;
     private readonly int _mode;
     private readonly short[] _int16Frame;
-    private readonly IntPtr _pinnedFrame;
+    private IntPtr _pinnedFrame;
 
     private FvadDetector(
         IntPtr instance,
@@ -373,21 +374,30 @@ public sealed class FvadDetector : IVadDetector
 
     public void Dispose()
     {
-        try
+        // 必须幂等：InitializeAsync 会先 Dispose 再重建，若重建中途抛异常，
+        // 下一次 Dispose 就会对同一个 fvad 实例再 free 一次（原生堆破坏），
+        // FreeHGlobal 同理。所以释放后立刻把句柄清零。
+        var instance = _instance;
+        _instance = IntPtr.Zero;
+
+        if (instance != IntPtr.Zero)
         {
-            if (_instance != IntPtr.Zero)
+            try
             {
-                _free(_instance);
+                _free(instance);
+            }
+            catch
+            {
+                // 忽略。
             }
         }
-        catch
-        {
-            // 忽略。
-        }
 
-        if (_pinnedFrame != IntPtr.Zero)
+        var frame = _pinnedFrame;
+        _pinnedFrame = IntPtr.Zero;
+
+        if (frame != IntPtr.Zero)
         {
-            Marshal.FreeHGlobal(_pinnedFrame);
+            Marshal.FreeHGlobal(frame);
         }
     }
 

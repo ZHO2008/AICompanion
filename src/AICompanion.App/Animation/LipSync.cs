@@ -65,6 +65,13 @@ public sealed class LipSyncDriver : IDisposable
         {
             try
             {
+                // 计算包络期间可能已经被 Stop/Dispose 掉（播放被打断、窗口关闭）：
+                // 这时再落地就是给一个没人持有的定时器，它会每 50ms 空转到进程结束。
+                if (_disposed)
+                {
+                    return;
+                }
+
                 var envelope = BuildEnvelope(wav, IntervalMs);
                 if (envelope.Length == 0)
                 {
@@ -73,6 +80,11 @@ public sealed class LipSyncDriver : IDisposable
 
                 lock (_sync)
                 {
+                    if (_disposed)
+                    {
+                        return;
+                    }
+
                     _envelope = envelope;
                     _startedUtc = DateTime.UtcNow;
                     _timer = new Timer(OnTick, null, IntervalMs, IntervalMs);

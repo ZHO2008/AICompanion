@@ -15,7 +15,6 @@ public static class MonitorMessageTypes
     public const string Unload = "unload";
     public const string Restore = "restore";
     public const string Ping = "ping";
-    public const string Pong = "pong";
 
     /// <summary>主程序 → GameMonitor：某进程在指定时间前处于冷却期，不要发 unload。</summary>
     public const string Cooldown = "cooldown";
@@ -46,8 +45,6 @@ public sealed class MonitorMessage
 
     [JsonPropertyName("timestampUtc")]
     public DateTime TimestampUtc { get; set; } = DateTime.UtcNow;
-
-    public bool IsPing => string.Equals(Type, MonitorMessageTypes.Ping, StringComparison.OrdinalIgnoreCase);
 
     public override string ToString() =>
         $"{Type}(process={Process ?? "-"}, until={Until?.ToString("O") ?? "-"})";

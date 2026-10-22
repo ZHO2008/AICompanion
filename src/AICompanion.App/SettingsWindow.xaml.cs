@@ -24,6 +24,9 @@ public partial class SettingsWindow : Window
     private readonly BubbleNotifier _bubbles;
     private readonly DispatcherTimer _refreshTimer;
     private readonly Action? _onAppearanceChanged;
+
+    /// <summary>显存查询是否在飞行中（防止 2 秒定时器叠加 nvidia-smi 子进程）。</summary>
+    private bool _gpuQuerying;
     private IReadOnlyList<PendingCandidate> _candidates = Array.Empty<PendingCandidate>();
 
     /// <summary>初始化滑块期间不响应 ValueChanged，避免把默认值当成用户修改。</summary>
@@ -320,6 +323,15 @@ public partial class SettingsWindow : Window
 
     private async Task UpdateGpuTextAsync()
     {
+        // 防重入：一次查询要起两个 nvidia-smi 子进程，而定时器每 2 秒就调一次。
+        // 显卡忙或驱动慢时查询可能超过 2 秒，没有这个门就会不断叠加子进程。
+        if (_gpuQuerying)
+        {
+            return;
+        }
+
+        _gpuQuerying = true;
+
         try
         {
             var text = await _host.Gpu.DescribeCurrentMemoryAsync().ConfigureAwait(true);
@@ -328,6 +340,10 @@ public partial class SettingsWindow : Window
         catch
         {
             GpuText.Text = "显存：不可用";
+        }
+        finally
+        {
+            _gpuQuerying = false;
         }
     }
 

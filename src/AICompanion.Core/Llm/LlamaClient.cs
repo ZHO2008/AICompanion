@@ -183,7 +183,13 @@ public sealed class LlamaClient : IDisposable
     {
         try
         {
-            using var response = await _http.PostAsync("/slots/0?action=erase", content: null, cancellationToken)
+            // HttpClient 的 Timeout 是 InfiniteTimeSpan（对话本身要能长跑），
+            // 所以这种"顺带清一下槽位"的请求必须自带超时：
+            // 否则 llama-server 卡住时这里会永久挂住整条对话流程。
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+            using var response = await _http.PostAsync("/slots/0?action=erase", content: null, cts.Token)
                 .ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)

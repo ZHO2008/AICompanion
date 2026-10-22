@@ -124,6 +124,17 @@ public sealed class MonitorServer : IAsyncDisposable
 
                 lock (_sync)
                 {
+                    // 旧的 writer 必须先释放：只 Dispose 旧 client 而不处理 writer，
+                    // 那个 StreamWriter 仍持有已关闭的流，且会一直被字段覆盖后交给 GC。
+                    try
+                    {
+                        _writer?.Dispose();
+                    }
+                    catch
+                    {
+                        // 忽略。
+                    }
+
                     _client?.Dispose();
                     _client = client;
                     _writer = new StreamWriter(client.GetStream(), MonitorProtocol.LineEncoding) { AutoFlush = true };
@@ -200,7 +211,18 @@ public sealed class MonitorServer : IAsyncDisposable
         }
         finally
         {
-            HandleDisconnect("连接已关闭");
+            // 只清理自己这一条连接：新客户端接入时旧的会被 Dispose，
+            // 旧读循环随即走到这里；若无条件清理，会把刚建立的新连接和新 writer 一起关掉。
+            bool isCurrent;
+            lock (_sync)
+            {
+                isCurrent = ReferenceEquals(_client, client);
+            }
+
+            if (isCurrent)
+            {
+                HandleDisconnect("连接已关闭");
+            }
         }
     }
 
@@ -307,7 +329,7 @@ public sealed class MonitorServer : IAsyncDisposable
         HandleDisconnect($"{silentSeconds:N0} 秒未收到心跳");
     }
 
-    private void HandleDisconnect(string reason)
+    private void HandleDisconnect(string reason, bool notify = true)
     {
         bool wasConnected;
 
@@ -342,6 +364,12 @@ public sealed class MonitorServer : IAsyncDisposable
         }
 
         _disconnectNotified = true;
+
+        if (!notify)
+        {
+            _logger.Info($"GameMonitor 已断开：{reason}");
+            return;
+        }
         _logger.Warn($"GameMonitor 断开：{reason}");
         _bubble.Show(
             "gamemonitor-offline",
@@ -406,7 +434,8 @@ public sealed class MonitorServer : IAsyncDisposable
             // 忽略。
         }
 
-        HandleDisconnect("服务停止");
+        // 自己在停止，不该给用户弹"游戏检测服务已断开"的告警气泡。
+        HandleDisconnect("服务停止", notify: false);
     }
 
     private static string Truncate(string value) => value.Length <= 200 ? value : value[..200] + "...";

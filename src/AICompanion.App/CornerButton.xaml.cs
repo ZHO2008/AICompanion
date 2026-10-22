@@ -24,7 +24,6 @@ public partial class CornerButton : Window
     private const double MinFontSize = 9.5;
 
     /// <summary>当前是否处于透明（穿透）态，决定按钮显示的文字。</summary>
-    private bool _clickThrough;
 
     public event EventHandler? ToggleRequested;
 
@@ -111,7 +110,6 @@ public partial class CornerButton : Window
     /// <summary>更新按钮上的模式标记：覆盖态显示「覆」，透明态显示「透」。</summary>
     public void SetMode(bool clickThrough)
     {
-        _clickThrough = clickThrough;
 
         ModeText.Text = clickThrough ? "透" : "覆";
         ModeText.Foreground = clickThrough

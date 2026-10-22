@@ -52,14 +52,34 @@ public static class ProcessRunner
         var exitTask = process.WaitForExitAsync(cancellationToken);
 
         var all = Task.WhenAll(stdoutTask, stderrTask, exitTask);
-        var finished = await Task.WhenAny(all, Task.Delay(timeout, cancellationToken)).ConfigureAwait(false);
+
+        // 计时任务必须可取消：进程正常结束时如果不 Cancel，这个 Task.Delay 的计时器
+        // 会一直活到 timeout（nvidia-smi 是 10 秒），每次调用都留一个。
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var delayTask = Task.Delay(timeout, timeoutCts.Token);
+
+        var finished = await Task.WhenAny(all, delayTask).ConfigureAwait(false);
 
         if (finished != all)
         {
             TryKill(process);
+
+            // 进程被杀后管道立刻 EOF；给半秒把两个读流任务收掉，
+            // 否则它们会在 using 释放流之后以 ObjectDisposedException 结束且无人观察。
+            try
+            {
+                await Task.WhenAny(Task.WhenAll(stdoutTask, stderrTask), Task.Delay(500)).ConfigureAwait(false);
+            }
+            catch
+            {
+                // 忽略。
+            }
+
             return new ProcessResult(true, -1, SafeResult(stdoutTask), SafeResult(stderrTask), true,
                 $"超时（{timeout.TotalSeconds:N0} 秒）未返回。");
         }
+
+        timeoutCts.Cancel();
 
         try
         {

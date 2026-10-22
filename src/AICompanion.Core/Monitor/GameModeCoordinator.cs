@@ -52,7 +52,6 @@ public sealed class GameModeCoordinator
     public bool IsYielded => _yielded;
 
     /// <summary>是否因为让路而停掉了 Chatterbox（恢复时需要按需拉起）。</summary>
-    public bool ChatterboxWasStopped => _chatterboxStopped;
 
     /// <summary>重启 Chatterbox 的动作由表现层注入（它知道启动命令）。</summary>
     public Func<CancellationToken, Task<bool>>? RestartChatterboxCallback { get; set; }

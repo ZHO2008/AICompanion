@@ -27,6 +27,7 @@ public sealed class GameCooldownTracker
         var until = DateTime.UtcNow + duration;
         lock (_sync)
         {
+            PruneExpiredLocked();
             _untilByProcess[processName] = until;
         }
     }
@@ -41,6 +42,7 @@ public sealed class GameCooldownTracker
 
         lock (_sync)
         {
+            PruneExpiredLocked();
             _untilByProcess[processName] = untilUtc.Kind == DateTimeKind.Utc ? untilUtc : untilUtc.ToUniversalTime();
         }
     }
@@ -71,6 +73,25 @@ public sealed class GameCooldownTracker
     }
 
     /// <summary>返回剩余冷却时间，供日志与气泡说明。</summary>
+    /// <summary>
+    /// 清掉已过期的冷却项。原先只在 <see cref="IsInCooldown"/> 命中时惰性删除，
+    /// 那些"设过一次就再没被查询过"的进程名会一直留在字典里（长驻进程的慢泄漏）。
+    /// </summary>
+    private void PruneExpiredLocked()
+    {
+        if (_untilByProcess.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var expired = _untilByProcess.Where(kv => now >= kv.Value).Select(kv => kv.Key).ToList();
+        foreach (var key in expired)
+        {
+            _untilByProcess.Remove(key);
+        }
+    }
+
     public TimeSpan RemainingCooldown(string? processName)
     {
         if (string.IsNullOrWhiteSpace(processName))

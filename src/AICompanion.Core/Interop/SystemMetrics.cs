@@ -61,23 +61,6 @@ public sealed class CpuUsageSampler
         }
     }
 
-    public static bool IsOnBattery()
-    {
-        try
-        {
-            if (!NativeMethods.GetSystemPowerStatus(out var status))
-            {
-                return false;
-            }
-
-            // ACLineStatus: 0 = 离线（电池供电），1 = 在线，255 = 未知
-            return status.ACLineStatus == 0;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 }
 
 /// <summary>
@@ -140,16 +123,6 @@ public sealed class SuspendDetector
             }
 
             return DateTime.UtcNow - _lastSuspendDetectedUtc < window;
-        }
-    }
-
-    /// <summary>标记一次外部通知的休眠恢复（SystemEvents.PowerModeChanged 的 Resume）。</summary>
-    public void MarkResumed()
-    {
-        lock (_sync)
-        {
-            _lastSuspendDetectedUtc = DateTime.UtcNow;
-            _initialized = false;
         }
     }
 }

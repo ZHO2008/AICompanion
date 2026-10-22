@@ -38,6 +38,9 @@ public static class GgufMetadataReader
     /// <summary>数组中单个元素的读取也设上限，防止损坏文件导致巨量循环。</summary>
     private const ulong MaxArrayLength = 10_000_000;
 
+    /// <summary>数组最大嵌套层数（防止损坏文件用嵌套数组打爆线程栈）。</summary>
+    private const int MaxArrayDepth = 32;
+
     public static bool TryReadBlockCount(string path, out int blockCount, out string? error)
     {
         blockCount = 0;
@@ -131,7 +134,7 @@ public static class GgufMetadataReader
         return Encoding.UTF8.GetString(reader.ReadBytes((int)length));
     }
 
-    private static void SkipValue(BinaryReader reader, GgufValueType type, bool wide)
+    private static void SkipValue(BinaryReader reader, GgufValueType type, bool wide, int depth = 0)
     {
         switch (type)
         {
@@ -188,9 +191,16 @@ public static class GgufMetadataReader
                     throw new InvalidDataException($"数组长度异常：{count}");
                 }
 
+                // 深度上限：GGUF 允许嵌套数组，若文件损坏或恶意构造
+                // Array<Array<...>>，递归会直接打爆线程栈（StackOverflowException 无法 catch）。
+                if (depth >= MaxArrayDepth)
+                {
+                    throw new InvalidDataException($"数组嵌套过深（>{MaxArrayDepth} 层）。");
+                }
+
                 for (ulong i = 0; i < count; i++)
                 {
-                    SkipValue(reader, elementType, wide);
+                    SkipValue(reader, elementType, wide, depth + 1);
                 }
 
                 break;

@@ -41,6 +41,9 @@ public sealed class AnimationManager
     private DateTime _lastAppliedUtc = DateTime.MinValue;
     private DispatcherTimer? _holdTimer;
 
+    /// <summary>当前 hold 对应的请求（复用 timer 时用字段传，避免每次 new 委托）。</summary>
+    private AnimationRequest? _pendingHold;
+
     public AnimationManager(
         Dispatcher dispatcher,
         IAppLogger logger,
@@ -266,33 +269,61 @@ public sealed class AnimationManager
     /// <summary>HoldFor 到期自动回落 Idle，避免角色停在某个中间动作上。</summary>
     private void ScheduleHold(AnimationRequest request)
     {
-        _holdTimer?.Stop();
-
         if (request.HoldFor is not { } hold || hold <= TimeSpan.Zero)
+        {
+            _holdTimer?.Stop();
+            return;
+        }
+
+        // 复用一个 timer：每次动作都 new 一个的话，旧 timer 只 Stop 不退订，
+        // Tick 委托连同它捕获的 request 会一直挂在 Dispatcher 上（动作做越多次堆得越多）。
+        if (_holdTimer is null)
+        {
+            _holdTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher);
+            _holdTimer.Tick += (_, _) => OnHoldExpired();
+        }
+
+        _pendingHold = request;
+        _holdTimer.Interval = hold;
+        _holdTimer.Stop();
+        _holdTimer.Start();
+    }
+
+    /// <summary>停掉 hold 定时器。窗口关闭时必须调用，否则它会继续 tick 并回调已释放在的渲染器。</summary>
+    public void Dispose()
+    {
+        _pendingHold = null;
+
+        var timer = _holdTimer;
+        _holdTimer = null;
+
+        if (timer is null)
         {
             return;
         }
 
-        _holdTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
-        {
-            Interval = hold,
-        };
+        timer.Stop();
+        timer.Tick -= (_, _) => OnHoldExpired();
+    }
 
-        _holdTimer.Tick += (_, _) =>
-        {
-            _holdTimer?.Stop();
+    private void OnHoldExpired()
+    {
+        _holdTimer?.Stop();
 
-            lock (_sync)
+        var request = _pendingHold;
+        if (request is null)
+        {
+            return;
+        }
+
+        lock (_sync)
+        {
+            if (!ReferenceEquals(_current, request))
             {
-                if (!ReferenceEquals(_current, request))
-                {
-                    return;
-                }
+                return;
             }
+        }
 
-            ResetToIdle("hold-expired");
-        };
-
-        _holdTimer.Start();
+        ResetToIdle("hold-expired");
     }
 }

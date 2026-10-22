@@ -74,6 +74,19 @@ public sealed class NAudioCapture : IAudioCapture
             catch (Exception ex)
             {
                 _logger.Error($"启动麦克风失败：{ex.Message}", ex);
+
+                // 启动失败必须自己收尾：此时 IsCapturing 还是 false，
+                // Stop() 会在 "!IsCapturing" 处直接返回，waveIn 的原生句柄就再也释放不掉了。
+                try
+                {
+                    _waveIn?.Dispose();
+                }
+                catch
+                {
+                    // 忽略。
+                }
+
+                _waveIn = null;
                 RaiseError(ex);
             }
         }
@@ -143,10 +156,22 @@ public sealed class NAudioCapture : IAudioCapture
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
     {
+        // 设备侧停了就必须把状态复位，否则 IsCapturing 永远为 true：
+        // 上层自愈时 Start() 会在 "if (IsCapturing) return;" 处直接退出，
+        // 表现为"状态显示正在监听、但再也收不到音频"。
+        lock (_sync)
+        {
+            IsCapturing = false;
+        }
+
         if (e.Exception is not null)
         {
             _logger.Error($"录音设备异常终止：{e.Exception.Message}", e.Exception);
             RaiseError(e.Exception);
+        }
+        else
+        {
+            _logger.Warn("录音设备已停止（没有异常信息）。");
         }
     }
 

@@ -560,12 +560,58 @@ public sealed class AppHost : IAsyncDisposable
             // 忽略。
         }
 
+        // 每个组件独立 try：任何一个 Dispose 抛异常，后面的都不能被跳过。
+        // （之前四行挤在一个 try 里，ASR 抛一次就漏掉 TTS/知识库/音频的释放。）
+        try
+        {
+            // 先停 PTT：它的 60ms 定时器会调 Asr.BeginPushToTalk，必须在 ASR 释放前停。
+            _pushToTalk?.Dispose();
+            _pushToTalk = null;
+        }
+        catch
+        {
+            // 忽略。
+        }
+
         try
         {
             Asr?.Dispose();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        try
+        {
             Tts?.Dispose();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        try
+        {
             Knowledge?.Dispose();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        try
+        {
             (Audio as IDisposable)?.Dispose();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        try
+        {
+            Idle?.Dispose();
         }
         catch
         {

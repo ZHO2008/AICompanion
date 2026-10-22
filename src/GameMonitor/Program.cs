@@ -22,6 +22,7 @@ internal static class Program
 {
     private static readonly ManualResetEventSlim Shutdown = new(false);
     private static LogSink? _sink;
+    private static MonitorClient? _client;
 
     private static async Task<int> Main(string[] args)
     {
@@ -38,11 +39,12 @@ internal static class Program
         // 前缀用 "gamemonitor" 而不是默认的 "app"：GameMonitor 与主程序写同一个
         // logs\app 目录，若文件名相同（都是 app-yyyyMMdd.log），两个进程各持一个写句柄，
         // 缓冲刷盘时会把两行日志交错成一行。实测确实出现过。
-        var bootstrap = FileLogger.CreateRoot(
+        var bootstrapSink = new LogSink(
             Path.Combine(AppContext.BaseDirectory, "logs", "app"),
             LogLevel.Info,
             30,
             "gamemonitor");
+        var bootstrap = new FileLogger(bootstrapSink, "GameMonitor");
 
         bootstrap.Info("================ GameMonitor 启动 ================");
         bootstrap.Info($"可执行文件目录：{AppContext.BaseDirectory}");
@@ -56,6 +58,11 @@ internal static class Program
             // 用配置里的日志目录重建日志器。
             _sink = new LogSink(AppPaths.Resolve(config.Logging.AppLogDir), LogLevel.Info, config.Logging.MaxLogDays, "gamemonitor");
             var logger = new FileLogger(_sink, "GameMonitor");
+
+            // 引导日志器与正式日志器的目录、前缀完全相同（发布后都是 logs\app\gamemonitor-yyyyMMdd.log）。
+            // 同进程两个 StreamWriter 写同一文件会把行交错（主程序里有过实测记录），
+            // 所以正式日志器一就绪就关掉引导句柄。
+            bootstrapSink.Close();
 
             logger.Info($"配置：{config.ConfigFilePath}");
             logger.Info($"游戏列表：{ResolveGameListPath(config)}");
@@ -74,6 +81,7 @@ internal static class Program
 
             var client = new MonitorClient(config, logger, cooldown);
             client.Start();
+            _client = client;
 
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
@@ -90,6 +98,41 @@ internal static class Program
         {
             bootstrap.Error($"GameMonitor 异常退出：{ex.Message}", ex);
             return 1;
+        }
+        finally
+        {
+            // 连接循环、TcpClient、心跳 CTS 都在 MonitorClient 里，不 Dispose 会活到进程结束。
+            if (_client is not null)
+            {
+                try
+                {
+                    await _client.DisposeAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // 忽略。
+                }
+            }
+
+            try
+            {
+                _sink?.Close();
+            }
+            catch
+            {
+                // 忽略。
+            }
+
+            try
+            {
+                bootstrapSink.Close();
+            }
+            catch
+            {
+                // 忽略。
+            }
+
+            Shutdown.Dispose();
         }
     }
 
@@ -192,7 +235,6 @@ internal sealed class MonitorRunner
         if (running.Count > 0)
         {
             _lastRunningGame = running[0];
-            _lastExitedGame ??= null;
         }
         else if (_lastRunningGame is not null)
         {

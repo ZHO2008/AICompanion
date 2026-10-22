@@ -91,7 +91,18 @@ public sealed class MonitorClient : IAsyncDisposable
     private async Task ConnectOnceAsync(CancellationToken cancellationToken)
     {
         var client = new TcpClient { NoDelay = true };
-        await client.ConnectAsync(_config.Monitor.Host, _config.Monitor.Port, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await client.ConnectAsync(_config.Monitor.Host, _config.Monitor.Port, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // 连接失败时 _client 还没赋值，上层 HandleDisconnect 释放不到这个局部 client，
+            // 不在这里 Dispose 就是每 5 秒漏一个 socket。
+            client.Dispose();
+            throw;
+        }
 
         lock (_sync)
         {

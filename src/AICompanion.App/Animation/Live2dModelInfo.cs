@@ -22,7 +22,6 @@ public sealed class Live2dModelInfo
     {
         ModelPath = modelPath;
         _motionGroups = new HashSet<string>(motionGroups, StringComparer.OrdinalIgnoreCase);
-        ParameterGroups = parameterGroups;
 
         // Live2D 规范里由 model3.json 的 Groups.Name="LipSync" 指定口型参数
         LipSyncParameter = parameterGroups.TryGetValue("LipSync", out var ids) && ids.Length > 0
@@ -41,7 +40,6 @@ public sealed class Live2dModelInfo
     public IReadOnlyCollection<string> MotionGroups => _motionGroups;
 
     /// <summary>参数组：LipSync / EyeBlink 等 → 参数 id 列表（仅本类内部使用）。</summary>
-    private IReadOnlyDictionary<string, string[]> ParameterGroups { get; }
 
     /// <summary>口型参数名（来自 model3.json 的 LipSync 组），没有则为 null。</summary>
     public string? LipSyncParameter { get; }

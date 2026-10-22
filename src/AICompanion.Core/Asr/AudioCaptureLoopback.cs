@@ -25,9 +25,7 @@ public sealed class WasapiLoopbackCapture : IAudioCapture
     private readonly List<float> _pending = new();
 
     private NAudio.Wave.WasapiLoopbackCapture? _capture;
-    private double _ratio = 1;
     private double _position;
-    private int _emitted;
 
     public WasapiLoopbackCapture(IAppLogger logger)
     {
@@ -44,6 +42,9 @@ public sealed class WasapiLoopbackCapture : IAudioCapture
 
     public void Start(int sampleRate)
     {
+        // 声明在 lock 外：失败后要在锁外 StopRecording/Dispose（锁内会与采集线程互等）。
+        NAudio.Wave.WasapiLoopbackCapture? failedCapture = null;
+
         lock (_sync)
         {
             if (IsCapturing)
@@ -64,10 +65,8 @@ public sealed class WasapiLoopbackCapture : IAudioCapture
                         $"系统音频格式不是 32 位浮点（实际 {format.Encoding}/{format.BitsPerSample}bit），无法采集。");
                 }
 
-                _ratio = (double)format.SampleRate / sampleRate;
                 _position = 0;
                 _pending.Clear();
-                _emitted = 0;
 
                 _capture.DataAvailable += OnDataAvailable;
                 _capture.RecordingStopped += OnRecordingStopped;
@@ -80,14 +79,26 @@ public sealed class WasapiLoopbackCapture : IAudioCapture
             catch (Exception ex)
             {
                 _logger.Error($"启动系统音频采集失败：{ex.Message}", ex);
+
+                // 锁内只摘引用，真正的 StopRecording/Dispose 放到锁外做：
+                // 采集线程可能正卡在 OnDataAvailable 的 lock(_sync) 上，
+                // 持锁等采集线程退出就是典型互等死锁。
+                failedCapture = _capture;
+                _capture = null;
                 RaiseError(ex);
-                CleanupCapture();
             }
+        }
+
+        if (failedCapture is not null)
+        {
+            CleanupCapture(failedCapture);
         }
     }
 
     public void Stop()
     {
+        NAudio.Wave.WasapiLoopbackCapture? capture;
+
         lock (_sync)
         {
             if (!IsCapturing)
@@ -95,44 +106,48 @@ public sealed class WasapiLoopbackCapture : IAudioCapture
                 return;
             }
 
-            CleanupCapture();
             IsCapturing = false;
+            capture = _capture;
+            _capture = null;
 
             // 尾巴丢掉，避免下次启动拼到旧数据
             _pending.Clear();
-
-            _logger.Info("系统音频采集已停止。");
         }
+
+        CleanupCapture(capture);
+        _logger.Info("系统音频采集已停止。");
     }
 
-    private void CleanupCapture()
+    /// <summary>
+    /// 停止并释放一个采集器。**必须在锁外调用**：
+    /// StopRecording 会等采集线程收尾，而采集线程在 OnDataAvailable 里要拿 _sync。
+    /// </summary>
+    private void CleanupCapture(NAudio.Wave.WasapiLoopbackCapture? capture)
     {
+        if (capture is null)
+        {
+            return;
+        }
+
         try
         {
-            if (_capture is not null)
+            capture.DataAvailable -= OnDataAvailable;
+            capture.RecordingStopped -= OnRecordingStopped;
+
+            try
             {
-                _capture.DataAvailable -= OnDataAvailable;
-                _capture.RecordingStopped -= OnRecordingStopped;
-
-                try
-                {
-                    _capture.StopRecording();
-                }
-                catch
-                {
-                    // 忽略
-                }
-
-                _capture.Dispose();
+                capture.StopRecording();
             }
+            catch
+            {
+                // 忽略
+            }
+
+            capture.Dispose();
         }
         catch (Exception ex)
         {
             _logger.Warn($"释放系统音频采集时异常：{ex.Message}");
-        }
-        finally
-        {
-            _capture = null;
         }
     }
 
@@ -220,7 +235,6 @@ public sealed class WasapiLoopbackCapture : IAudioCapture
                 Array.Copy(output, index, chunk, 0, size);
                 index += size;
 
-                _emitted += size;
                 SamplesAvailable?.Invoke(this, chunk);
             }
         }

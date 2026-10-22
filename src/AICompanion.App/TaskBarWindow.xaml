@@ -54,20 +54,20 @@
             CornerRadius="10"
             Padding="4">
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-            <Button x:Name="SettingsButton"   Content="设置"     Style="{StaticResource BarButton}" Click="OnSettingsClick" />
-            <Button x:Name="AppearanceButton" Content="更换外观" Style="{StaticResource BarButton}" Click="OnAppearanceClick" />
-            <Button x:Name="ChatButton"       Content="对话"     Style="{StaticResource BarButton}" Click="OnChatClick" />
-            <Button x:Name="SmallerButton"
+            <Button   Content="设置"     Style="{StaticResource BarButton}" Click="OnSettingsClick" />
+            <Button Content="更换外观" Style="{StaticResource BarButton}" Click="OnAppearanceClick" />
+            <Button       Content="对话"     Style="{StaticResource BarButton}" Click="OnChatClick" />
+            <Button
                     Content="−"
                     Style="{StaticResource BarButton}"
                     ToolTip="缩小角色（Ctrl+滚轮 也可）"
                     Click="OnSmallerClick" />
-            <Button x:Name="LargerButton"
+            <Button
                     Content="＋"
                     Style="{StaticResource BarButton}"
                     ToolTip="放大角色（Ctrl+滚轮 也可）"
                     Click="OnLargerClick" />
-            <Button x:Name="ResetButton"
+            <Button
                     Content="↺"
                     Style="{StaticResource BarButton}"
                     ToolTip="恢复默认外观与大小"

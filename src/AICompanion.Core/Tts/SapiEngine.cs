@@ -33,6 +33,10 @@ public sealed class SapiEngine : ITTSEngine
     private object? _currentVoice;
     private string? _loggedVoice;
 
+    // 选中的 SAPI 音色 token（COM 对象），首次合成时解析一次后复用。
+    private object? _voiceToken;
+    private bool _voiceResolved;
+
     public SapiEngine(IAppLogger logger)
     {
         _logger = logger;
@@ -126,7 +130,6 @@ public sealed class SapiEngine : ITTSEngine
             voice.Speak(text, 0);
 
             stream.Close();
-            stream = null;
 
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -174,6 +177,22 @@ public sealed class SapiEngine : ITTSEngine
     /// </summary>
     private void TrySelectVoice(dynamic voice, VoiceConfig config)
     {
+        // 音色每台机器固定，只在第一次合成时枚举一次：每次合成都遍历
+        // ISpeechObjectTokens 会不断产生新的 COM RCW（且中途 return 时更难释放），
+        // 这里把结果缓存下来，后续直接复用选中的 token。
+        if (_voiceResolved)
+        {
+            if (_voiceToken is not null)
+            {
+                voice.Voice = _voiceToken;
+            }
+
+            return;
+        }
+
+        _voiceResolved = true;
+
+        object? tokens = null;
         try
         {
             var wanted = config.FallbackPiperVoice;
@@ -183,18 +202,20 @@ public sealed class SapiEngine : ITTSEngine
                 return;
             }
 
-            dynamic tokens = voice.GetVoices();
-            int count = tokens.Count;
+            tokens = voice.GetVoices();
+            dynamic collection = tokens;
+            int count = collection.Count;
 
             for (var i = 0; i < count; i++)
             {
-                dynamic token = tokens.Item(i);
+                dynamic token = collection.Item(i);
                 string description = token.GetDescription(0);
 
                 if (description is not null &&
                     description.Contains(wanted, StringComparison.OrdinalIgnoreCase))
                 {
                     voice.Voice = token;
+                    _voiceToken = (object)token;
                     _logger.Info($"SAPI 音色已选为：{description}");
                     return;
                 }
@@ -205,6 +226,10 @@ public sealed class SapiEngine : ITTSEngine
         catch (Exception ex)
         {
             _logger.Warn($"SAPI 选择音色失败，使用系统默认音色：{ex.Message}");
+        }
+        finally
+        {
+            ReleaseCom(tokens);
         }
     }
 

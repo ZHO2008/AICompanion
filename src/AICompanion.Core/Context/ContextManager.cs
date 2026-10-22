@@ -111,6 +111,15 @@ public sealed class ContextManager
         lock (_sync)
         {
             _recent.Add(message);
+
+            // 硬上限：压缩只发生在空闲维护里，若用户一直不空闲（连续对话），
+            // _recent 就会无止境地涨。这里按"轮数上限的 2 倍 + 余量"兜底裁剪，
+            // 保证即使长时间不触发维护，内存窗口也不会失控（被裁掉的消息仍在聊天日志里）。
+            var hardCap = Math.Max(64, MaxRecentRounds * 4);
+            while (_recent.Count > hardCap)
+            {
+                _recent.RemoveAt(0);
+            }
         }
 
         AppendChatLog(message);

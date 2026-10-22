@@ -60,6 +60,15 @@ public static class PortProcessLocator
                 continue;
             }
 
+            // 只认回环地址：同一个端口号在 0.0.0.0 / [::] 上也可能是别的程序，
+            // 按端口号乱杀进程的代价太大（注释里承诺的就是"严格限定在 127.0.0.1"）。
+            var host = local[..colon].Trim();
+            if (!(host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+                  host.Equals("[::1]", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
             // PID 是最后一列。
             if (int.TryParse(fields[^1], out var pid) && pid > 0)
             {

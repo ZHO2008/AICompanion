@@ -47,8 +47,6 @@ public sealed class TTSManager : IDisposable
         _engine = TTSEngineFactory.Create(config.Tts.Engine, _context);
     }
 
-    public ITTSEngine CurrentEngine => _engine;
-
     public string CurrentEngineName => _engine.Name;
 
     /// <summary>是否因为 Chatterbox 不可用而降级到了 Piper。</summary>
@@ -65,8 +63,6 @@ public sealed class TTSManager : IDisposable
     /// <summary>配置里用户选择的引擎。</summary>
     public string ConfiguredEngine => _config.Tts.Engine;
 
-    public DateTime LastRequestUtc => _lastRequestUtc;
-
     /// <summary>Chatterbox 是否正在被实际使用（HealthMonitor 用它决定要不要探活 5000 端口）。</summary>
     public bool IsChatterboxActive => _engine is ChatterboxEngine;
 
@@ -77,7 +73,6 @@ public sealed class TTSManager : IDisposable
     public IHttpTtsEngine? ActiveHttpEngine => _engine as IHttpTtsEngine;
 
     /// <summary>是否正在使用外部 HTTP 语音服务。</summary>
-    public bool IsHttpEngineActive => _engine is IHttpTtsEngine;
 
     /// <summary>引擎标识 → 给人看的名字（日志与气泡用）。</summary>
     public static string EngineLabel(string name) => name switch

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using AICompanion.Core.Abstractions;
 using AICompanion.Core.Configuration;
@@ -90,10 +90,7 @@ public sealed class ASRManager : IDisposable
 
     public AsrFaultReason FaultReason => _faultReason;
 
-    public string? FaultMessage => _faultMessage;
-
     /// <summary>识别器当前状态说明（设置面板展示用）。</summary>
-    public string RecognizerStatus => _recognizer.IsReady ? "就绪" : _recognizer.StatusMessage ?? "未就绪";
 
     /// <summary>VAD 实现名称（webrtc / energy），设置面板展示用。</summary>
     public string VadName => _vad?.Name ?? "未初始化";
@@ -237,16 +234,27 @@ public sealed class ASRManager : IDisposable
     {
         lock (_sync)
         {
-            if (_state != AsrState.Running)
+            // 注意：不能因为 "状态不是 Running" 就提前返回。
+            // 走到 Faulted 之后正是用户点"重启语音服务/重置 ASR"的时机，
+            // 若这里直接 return，采集器会继续采、事件不退订、队列不收尾，
+            // 麦克风指示灯常亮且每 20ms 分配一个 float[] 后被丢掉。
+            var wasRunning = _state == AsrState.Running;
+            var hasResources = _captureHooked || _listenCts is not null || _sampleQueue is not null;
+
+            if (!wasRunning && !hasResources)
             {
                 return;
             }
 
             try
             {
-                _capture.SamplesAvailable -= OnSamplesAvailable;
-                _capture.CaptureError -= OnCaptureError;
-                _captureHooked = false;
+                if (_captureHooked)
+                {
+                    _capture.SamplesAvailable -= OnSamplesAvailable;
+                    _capture.CaptureError -= OnCaptureError;
+                    _captureHooked = false;
+                }
+
                 _capture.Stop();
 
                 _listenCts?.Cancel();
@@ -258,8 +266,11 @@ public sealed class ASRManager : IDisposable
                 _logger.Warn($"停止监听时异常：{ex.Message}");
             }
 
-            SetState(_faultReason == AsrFaultReason.None ? AsrState.Stopped : AsrState.Faulted);
-            _logger.Info("ASR 已停止监听。");
+            if (wasRunning || _state == AsrState.Faulted)
+            {
+                SetState(_faultReason == AsrFaultReason.None ? AsrState.Stopped : AsrState.Faulted);
+                _logger.Info("ASR 已停止监听。");
+            }
         }
     }
 
@@ -272,6 +283,22 @@ public sealed class ASRManager : IDisposable
         _logger.Info("正在重置 ASR。");
 
         StopListening();
+
+        // 顺序很重要：VAD 必须等音频线程退出之后才能释放。
+        // 之前是先 _vad.Dispose() 再 Join，音频线程可能仍在 vad.IsSpeech() 里，
+        // 那就是对已释放的 fvad 实例做调用（原生堆破坏，非受管异常）。
+        try
+        {
+            _audioThread?.Join(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        // 识别任务也要等：whisper 的 ai_asr_shutdown 会 whisper_free 全局 ctx，
+        // 与在飞的 whisper_full 并发会直接踩内存。
+        WaitRecognitionTask(TimeSpan.FromSeconds(2));
 
         try
         {
@@ -292,18 +319,7 @@ public sealed class ASRManager : IDisposable
             _logger.Warn($"释放 VAD 时异常：{ex.Message}");
         }
 
-        // 释放上一轮的线程与队列，避免反复重置后线程堆积。
-        try
-        {
-            _audioThread?.Join(TimeSpan.FromSeconds(2));
-        }
-        catch
-        {
-            // 忽略。
-        }
-
         _audioThread = null;
-        _recognitionTask = null;
 
         _sampleQueue?.Dispose();
         _segmentQueue?.Dispose();
@@ -859,6 +875,10 @@ public sealed class ASRManager : IDisposable
             // 忽略。
         }
 
+        // 识别线程必须等：whisper 的 shutdown 会释放全局 ctx，
+        // 与仍在跑的 whisper_full 并发会踩内存（原生崩溃，无法 catch）。
+        WaitRecognitionTask(TimeSpan.FromSeconds(2));
+
         _sampleQueue?.Dispose();
         _segmentQueue?.Dispose();
         _listenCts?.Dispose();
@@ -867,11 +887,44 @@ public sealed class ASRManager : IDisposable
         try
         {
             _capture.Dispose();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        try
+        {
             _recognizer.Dispose();
         }
         catch
         {
             // 忽略。
+        }
+    }
+
+    /// <summary>尽力等待识别任务收尾，超时就放弃（不能让退出流程卡死）。</summary>
+    private void WaitRecognitionTask(TimeSpan timeout)
+    {
+        var task = _recognitionTask;
+        _recognitionTask = null;
+
+        if (task is null || task.IsCompleted)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!task.Wait(timeout))
+            {
+                _logger.Warn($"识别任务在 {timeout.TotalSeconds:0.#} 秒内未退出，继续释放资源。");
+            }
+        }
+        catch (Exception ex)
+        {
+            // 任务本身以异常结束时这里是 AggregateException；只记一条，不再抛出。
+            _logger.Debug($"等待识别任务结束时异常（忽略）：{ex.GetBaseException().Message}");
         }
     }
 }

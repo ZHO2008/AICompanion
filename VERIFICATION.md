@@ -2720,3 +2720,137 @@ fp4 研究环境（`.venv-fp4` 7.7 GB + 下载的轮子 2.7 GB）已删除，回
 - `git status` 干净；构建 0 警告；交付物 `dist\AICompanion-0.9.0-full-setup.exe` 在。
 - E 盘剩余空间 65.1 GB（清理前约 55 GB）。
 - 收尾后执行关机（用户要求）。
+---
+
+## 29. 逐行死代码 / 内存泄漏审计（第二轮）
+
+### 29.0 先纠正 §28 的结论
+
+§28.2 / §28.3 当时写的是"没有泄漏、没有可删的死代码"。那一轮只做了构建 + 词边界计数两种机器扫描，
+**不足以发现"写了但没接线""Dispose 了但对象不对""异常路径漏释放"这类问题**。
+这一轮按用户要求逐行读（`src` 下 78 个 `.cs`、约 1.96 万行，分 6 个子任务并行通读并互相 grep 复核），
+实际找到 **30 处**问题，其中 6 处是真实资源泄漏、4 处是原生层风险（会崩或会死锁）。
+§28 的结论作废，以本节为准。
+
+### 29.1 已修：ASR / 音频采集
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `ASRManager.cs` `StopListening()` | 状态不是 `Running` 时直接 `return`（Faulted/Idle 态都算），导致采集不停、事件不退订、CTS 不取消、队列不 `CompleteAdding` → 状态机卡在"正在监听"且资源不回收 | 改为按"曾经在跑"和"有资源可收"两个条件收尾，不再依赖当前状态 |
+| `ASRManager.cs` `ResetAsync()` | 先 `_vad?.Dispose()` 再停音频线程；音频线程还在 `ProcessFrame` 里用 VAD → 原生 use-after-free | 顺序改为：停采集 → `_audioThread.Join(2s)` → 等识别任务 → `_recognizer.Reset()` → 释放 VAD |
+| `ASRManager.cs` `Dispose()` | 不等识别任务就 `_recognizer.Dispose()`；whisper 的 shutdown 会释放全局 ctx，与在飞的 `whisper_full` 并发是原生崩溃（不可 catch） | 新增 `WaitRecognitionTask(TimeSpan)`，释放前限时等 2 秒；`_capture` / `_recognizer` 各自独立 try，互不连坐 |
+| `AudioCapture.cs` `Start()` | 启动抛异常时 `IsCapturing` 仍是 false，于是 `Stop()` 在 `if (!IsCapturing)` 处提前返回 → waveIn 原生句柄永久泄漏 | catch 里自行 `Dispose()` 并置 null |
+| `AudioCapture.cs` `OnRecordingStopped` | 设备侧停录后不复位 `IsCapturing`，上层自愈再 `Start()` 会被 `if (IsCapturing) return` 挡掉 → "显示正在监听但收不到声音" | 复位 `IsCapturing`，无异常时也记一条 Warn |
+| `AudioCaptureLoopback.cs` `Stop()` / `Start()` 失败路径 | 在 `lock (_sync)` 内调 `StopRecording()`：`StopRecording` 要等采集线程退出，而采集线程在 `OnDataAvailable` 里正等同一把锁 → 自锁死 | 锁内只摘引用（`_capture = null`），`StopRecording/Dispose` 全部挪到锁外；`CleanupCapture` 改为接参数 |
+| `AudioCaptureLoopback.cs` | 只写不读的 `_ratio`、`_emitted` | 删除 |
+
+### 29.2 已修：音频播放
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `WaveOutPlayer.cs` `PlayAsync` | 顺序反了：先 `ReleasePin()` 再 `PlaySound(..., SndPurge)`。Win32 还在读这块内存时 pin 已经解掉，GC 可以移动/回收它 | 先 purge（停掉引用），再解 pin |
+| `WaveOutPlayer.cs` `PlayAsync` | 正常播完不解 pin：只在下一次 Play/Stop/Dispose 时才释放，最后一次播放的 WAV 会一直被 `GCHandle` 钉在固定堆上 | 播放结束后立即在锁内 `ReleasePin()` |
+| `ObservableAudioPlayer.cs` | 没实现 `IDisposable`，于是 `AppHost` 里的 `(Audio as IDisposable)?.Dispose()` **是永远不成立的分支**，内层 `WaveOutPlayer` 从不被释放 | 实现 `IDisposable`，先 `Stop()` 再转发给内层 |
+
+### 29.3 已修：TTS
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `SapiEngine.cs` `Speak` | `stream = null;` 之后才 `ReleaseCom(stream)` —— RCW 引用计数永远不归零，每次合成漏一个 COM 对象 | 删掉置空，直接 `ReleaseCom(stream)` |
+| `SapiEngine.cs` `TrySelectVoice` | 每次合成重新枚举全部 voice token（COM 对象泄漏 + 明显变慢） | 进程内解析一次并缓存（`_voiceToken` / `_voiceResolved`），`ISpeechObjectTokens` 在 `finally` 里释放 |
+| `PiperEngine.cs` `SynthesizeAsync` | 异常路径不 `TryKill` 子进程；`stderr`/`stdout` 读任务不观察（异常被丢、管道句柄不关）；临时文件删除失败完全静默 | `TryKill` 移入 `finally`；读任务限时 `WhenAny(WhenAll, Delay(500))`；删除失败记 Debug |
+
+### 29.4 已修：GameMonitor / LLM / 外部进程
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `MonitorServer.cs` | 新连接接入时只 `Dispose` 旧 `_client`，旧 `_writer` 不释放 | 换连接前先 `_writer?.Dispose()` |
+| `MonitorServer.cs` | 旧读循环的 `finally` 无条件 `HandleDisconnect`：新客户端接入后，旧循环收尾会把**刚建好的新连接和新 writer** 一起关掉（"重连后立刻又断开"） | `finally` 里先 `ReferenceEquals(_client, client)` 确认自己仍是当前连接 |
+| `MonitorServer.cs` `Stop()` | 程序自己退出时仍弹"游戏检测服务已断开，可点重连"的告警气泡 | `HandleDisconnect(reason, notify: false)`，只记日志 |
+| `MonitorClient.cs` `ConnectOnceAsync` | 连接失败时 `_client` 还没赋值，局部 `TcpClient` 无人释放 → 每 5 秒漏一个 socket | 失败分支自己 `Dispose()` 后再抛 |
+| `GameMonitor\Program.cs` | `client.Start()` 之后从不 `Stop()/DisposeAsync()`：`TcpClient`、心跳 CTS、后台任务全部活到进程结束 | 退出路径统一 `DisposeAsync` |
+| `GameMonitor\Program.cs` | 引导日志器与正式日志器**目录、前缀完全相同**（发布后都是 `logs\app\gamemonitor-yyyyMMdd.log`），同进程两个 `StreamWriter` 写同一文件 → 行交错（主程序里已实测过） | 用显式 `LogSink` 建引导日志器，正式日志器一就绪就关掉引导句柄 |
+| `GameMonitor\Program.cs` | `_lastExitedGame ??= null;` 是无操作语句 | 删除 |
+| `LlamaServerController.cs` `StartAsync` | 启动被取消（用户退出/重启）时已拉起的 llama-server 变孤儿进程，**继续占着显存且无人能管** | `catch (OperationCanceledException)` 里 `StopProcessAsync(CancellationToken.None)` 再抛出 |
+| `LlamaServerController.cs` `StartProcessAsync` | `Process.Start()` 返回 false 时 `_process` 仍指向该对象且不 `Dispose` | 清字段 + `Dispose` |
+| `LlamaServerController.cs` | `_intentionalStop` 在 `Process.Exited` 事件线程上无锁读 | 加 `volatile` |
+| `LlamaServerController.cs` | `_stderrHistory` 跨尝试累积，OOM 重试时诊断串混入上一次进程输出 | 每次尝试前清空 |
+| `ProcessRunner.cs` | 超时用的 `Task.Delay(timeout, ct)` 在进程正常结束时不会取消 → 每次调用留一个活到 `timeout`（nvidia-smi 是 10 秒）的计时器 | 用 linked CTS，成功路径 `Cancel()`；kill 后限时收掉两个读流任务 |
+| `LlamaClient.cs` `TryEraseSlotsAsync` | `HttpClient.Timeout` 是无限（对话要能长跑），清槽请求没有自己的超时 → llama-server 卡住时永久挂住整条流程 | `CancelAfter(5s)` |
+
+### 29.5 已修：进程生命周期与窗口关闭
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `AppHost.cs` `DisposeAsync` | 四个组件挤在一个 `try`：ASR 抛一次异常，TTS / 知识库 / 音频全部跳过释放 | 每个组件独立 `try` |
+| `AppHost.cs` | `PushToTalkMonitor` 全生命周期不释放：退出后 60ms 的 `DispatcherTimer` 仍在轮询键盘，还可能对已释放的 ASR 调 `BeginPushToTalk` | 在释放 ASR **之前** `Dispose()` 并置 null |
+| `AppHost.cs` | `IdleTaskScheduler` 的 `Dispose()` 从未被调用 | 补调用 |
+| `MainWindow.xaml.cs` `OnClosed` | `_hoverTimer` / `_expressionTimer` / `_asrResumeTimer` 从不 `Stop()`；`_taskBar` / `_cornerButton` 从不 `Close()`；`AnimationManager` 的 hold 定时器不停 | 全部补上 |
+| `AnimationManager.cs` | 每次动作都 `new DispatcherTimer`，旧 timer 只 `Stop()` 不退订 → Tick 委托（连同捕获的请求）在 Dispatcher 上越堆越多 | 复用单个 timer + `Dispose()`；`MainWindow.OnClosed` 调用 |
+| `LipSync.cs` `Start` | 包络在后台线程算完就无条件 `new Timer`；期间若已 `Stop`/`Dispose`（播放被打断、窗口关闭），就留下一个没人持有的定时器，每 50ms 空转到进程结束 | `_disposed` 双重检查（任务入口 + 锁内） |
+| `VadDetectors.cs` `Dispose` | 不幂等：`InitializeAsync` 是"先 Dispose 再重建"，重建若中途失败，下一次 Dispose 会二次 `free` 同一个 fvad（原生堆破坏） | 释放后把句柄清零，相关字段改为可写 |
+
+### 29.6 已修：正确性与安全
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `PortProcessLocator.cs` | 只按端口号匹配就返回 PID 并杀进程，不校验监听地址；同端口号在 `0.0.0.0` / `[::]` 上可能是别的程序 | 只认 `127.0.0.1` / `[::1]`，与类注释承诺一致 |
+| `GgufMetadataReader.cs` `SkipValue` | 数组嵌套无深度限制，损坏/恶意 GGUF 可用 `Array<Array<...>>` 打爆线程栈（`StackOverflowException` 无法捕获，直接杀进程） | 深度上限 32 |
+| `ContextManager.cs` `AddMessage` | `_recent` 没有硬上限；压缩只在空闲维护里跑，用户连续对话时会无限增长 | 硬上限 `max(64, MaxRecentRounds * 4)`，裁掉的消息仍在聊天日志里 |
+| `GameCooldownTracker.cs` | `PruneExpired()` 全仓零调用，字典只增不减（长驻进程慢泄漏） | 设冷却时先清理过期项 |
+| `SettingsWindow.xaml.cs` | 2 秒定时器每轮发起显存查询，每次查询起 2 个 `nvidia-smi` 子进程，且无防重入 → 查询慢于 2 秒就并发叠加 | `_gpuQuerying` 门控 |
+| `MainWindow.xaml.cs` | 配置项 `ui.always_on_top` 从未生效（死配置）：主窗口、功能栏、角按钮都没设 `Topmost` | 三处都按配置设置 |
+
+### 29.7 死代码：删除 13 项，接线 1 项
+
+删除（全仓按词边界计数，含 `tools/probes`，均只剩声明本身）：
+
+- `TTSManager`：`CurrentEngine`、`LastRequestUtc`、`IsHttpEngineActive`
+- `MonitorMessageTypes.Pong`、`MonitorMessage.IsPing`
+- `GameModeCoordinator.ChatterboxWasStopped`
+- `SystemMetrics.IsOnBattery()`（连同只被它使用的 `SYSTEM_POWER_STATUS` / `GetSystemPowerStatus`）、`SuspendDetector.MarkResumed()`
+- `ASRManager.FaultMessage`、`ASRManager.RecognizerStatus`
+- `CornerButton._clickThrough`（只写不读）
+- `TaskBarWindow.xaml` 的 6 个零引用 `x:Name`（只为生成无用字段）
+- `Live2dModelInfo.ParameterGroups`（私有属性，构造函数直接用参数）
+- `GameMonitor\Program.cs` 的 `_lastExitedGame ??= null;`
+
+接线而非删除：
+
+- `MainWindow.ClampIntoWorkArea()`：注释承诺"改大小时把窗口拉回工作区"，但从来没人调用。
+  在 `ApplyScale()` 末尾接上——这是漏接线，不是多余代码。
+
+### 29.8 复核后**保留**的（附证据，避免下一轮又当成 bug）
+
+| 位置 | 为什么保留 |
+| --- | --- |
+| `WhisperCppRecognizer` 不调 `NativeLibrary.Free` | 实测会触发 `0xC0000005`（whisper 内部仍有线程/回调引用该模块） |
+| `MonitorServer` 用 `_listener.Stop()` 而非 `Dispose()` | 二者等效，`Stop()` 还能让 `AcceptTcpClientAsync` 正常抛出而不是 `ObjectDisposedException` |
+| `LlamaServerController.StopProcessAsync` 的 `process.Dispose()` | 在 `finally` 里，扫描工具看不见 → 误报 |
+| `LipSync` 用 `Timer.Stop()` 而非 `Dispose()` | 其 `Dispose()` 路径就是 `Stop()` + 置空引用，再加一层没有收益 |
+| `BubbleNotifier` / `LogSink` 的 `DispatcherTimer` / `StreamWriter` | 与进程同生命周期；为省一次 Tick 去改接口不划算。但 GameMonitor 的**双 sink 同文件**是真 bug，已修 |
+| `tools/probes` 引用的公开成员（`ComputeRms`、`EyeBlinkParameters`、`LastRawResult`、`IHttpTtsEngine.BaseUrl` 等） | 探针不在解决方案里，但属于可运行验证资产，删了会破坏探针编译 |
+
+### 29.9 本轮**未修**的（如实登记原因）
+
+1. `Live2DRenderer.TryCreate` / `Dispose` 的异常路径不释放 GL 上下文、lapp、control（正常路径正确）。
+   要改必须重排 GL 线程上的释放顺序，风险高于收益；等有真实复现再动。
+2. `TrayIcon` / `MainWindow` 的事件订阅与 `ContextMenuStrip` 不退订、不 `Dispose`。
+   两者寿命 = 进程寿命（`BubbleNotifier` 是单例），退订不改变实际释放行为，只是增加空引用风险。
+3. `MainWindow` 的 8 个 lambda 事件订阅没有 `-=`：同上，窗口关闭即退出。
+4. `GameListProvider.ReloadIfChanged` 的热重载分支不可达（只在构造时 `force: true` 调用）。
+   这是"未实现能力"（要接 `FileSystemWatcher`），不是清理项。
+5. `LogSink` 没有单文件大小上限（只按天轮转 + 保留天数）。属功能增强，不是泄漏。
+6. `ConversationPipeline` 在构造锚点前覆盖 `_lastUserMessage`：属行为时序问题，要改对话上下文构造，本轮不动。
+7. `ContextManager.MaxRecentRounds` 的"轮 vs 条"语义不一致：已用硬上限兜底，语义重命名留待下一轮。
+8. 未使用的配置键 `tts.gpt_sovits.launch_command`、`tts.cosyvoice.launch_command`、`ui.idle_expression_seconds`：
+   配置校验是严格的，删键会让用户现有的 `config.yaml` 报"未知键"，保留并在此登记。
+9. `KnowledgeImporter` 子系统（约 390 行）目前零消费者：它是知识导入的设计入口，删掉会丢失功能面，
+   登记为"未接线"，等真正接上再决定去留。
+
+### 29.10 最终状态
+
+- `dotnet build AICompanion.sln -c Debug` → **0 Warning / 0 Error**。
+- 改动 30 个文件；行尾统一（ASRManager 恢复 CRLF，其余保持 LF），没有混入 EOF 换行噪声。
+- 本轮全部为静态代码修改，**没有跑任何模型推理**（遵守"低负载"要求）。
+- 机器**没有关机**：用户中途回来继续提要求，关机前需再确认。

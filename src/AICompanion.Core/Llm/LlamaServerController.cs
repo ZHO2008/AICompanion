@@ -50,7 +50,8 @@ public sealed class LlamaServerController : IAsyncDisposable
     private readonly CancellationTokenSource _lifetime = new();
 
     private Process? _process;
-    private bool _intentionalStop;
+    // 在 Process.Exited 事件线程上无锁读取，必须 volatile，否则可能读到旧值而误报"服务已离线"。
+    private volatile bool _intentionalStop;
     private volatile bool _oomDetected;
 
     /// <summary>
@@ -158,6 +159,8 @@ public sealed class LlamaServerController : IAsyncDisposable
         var maxRetries = Math.Max(0, _config.Gpu.MaxOomRetries);
         LlamaStartResult? lastResult = null;
 
+        try
+        {
         for (var attempt = 0; attempt <= maxRetries; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -166,6 +169,7 @@ public sealed class LlamaServerController : IAsyncDisposable
             _oomEvidence = null;
             _gpuOffloadUnsupported = false;
             _handlingOom = false;
+            ClearStderrHistory();
 
             _logger.Info($"启动 llama-server（第 {attempt + 1} 次尝试，ngl={ngl}）...");
 
@@ -269,6 +273,23 @@ public sealed class LlamaServerController : IAsyncDisposable
         var final = lastResult ?? new LlamaStartResult(LlamaStartOutcome.Failed, ngl, "启动失败。", plan);
         _bubble.Show("llm-offline", "LLM 服务未就绪。可查看日志后手动重启程序。", BubbleLevel.Error);
         return final;
+        }
+        catch (OperationCanceledException)
+        {
+            // 启动过程被取消（例如用户退出程序）：必须把已经拉起来的子进程收掉，
+            // 否则 llama-server 会变成一个占着显存的孤儿进程，而且没人再能管它。
+            _logger.Warn("LLM 启动被取消，正在终止已启动的 llama-server。");
+            try
+            {
+                await StopProcessAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"取消启动时终止 llama-server 失败：{ex.Message}");
+            }
+
+            throw;
+        }
     }
 
     /// <summary>轮询 /health 直到就绪或超时（手册 §1.6 步骤 4）。</summary>
@@ -431,6 +452,15 @@ public sealed class LlamaServerController : IAsyncDisposable
         {
             if (!process.Start())
             {
+                lock (_sync)
+                {
+                    if (ReferenceEquals(_process, process))
+                    {
+                        _process = null;
+                    }
+                }
+
+                process.Dispose();
                 return (false, "Process.Start 返回 false。");
             }
 
@@ -451,6 +481,15 @@ public sealed class LlamaServerController : IAsyncDisposable
 
             process.Dispose();
             return (false, ex.Message);
+        }
+    }
+
+    /// <summary>每次启动尝试前清空上一轮的 stderr，避免诊断串混入上一次进程的输出。</summary>
+    private void ClearStderrHistory()
+    {
+        lock (_sync)
+        {
+            _stderrHistory.Clear();
         }
     }
 
