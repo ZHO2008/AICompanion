@@ -2416,6 +2416,28 @@ dtype 和算子，能吃它的只有 TensorRT 10.x 的 FP4 engine 或 torchao �
   但 `tensorrt-cu12` 只在 `pypi.nvidia.com`，本机对它的 TLS 一律失败（加 `--trusted-host` 也无效），
   清华源只有 sdist。放弃。
 
+#### 流式合成：试过，短句上反而更慢
+
+上游 `server.py` 所有端点都是 `stream=False`，必须整句合成完才吐第一个字节。本机加了
+`/inference_*_stream` 变体（`stream=True`），并把"第一块到达时间"逐块记下来：
+
+| | 首块到达 | 首块音频 | 整句结束 |
+| --- | --- | --- | --- |
+| 非流式 | 4.75 秒 | 4.08 秒（整句） | 4.77 秒 |
+| 流式 | **4.05 秒** | 1.04 秒 | 6.91 秒 |
+
+模型层（不走 HTTP）的同样对照：首块 3.05 秒 / 1.04 秒音频，三块分别在 3.05、5.29、5.97 秒。
+
+结论是"能流，但不划算"：LLM 要先产出 `token_min_hop_len`（50 个 token ≈ 2 秒音频）才做第一块
+flow，而分块 flow 推理比整段推理效率低，**短句总延迟反而从 4.8 秒涨到 6.9 秒**。所以 App 侧
+没有接入流式播放，端点保留给长文本试验（长文本时首块收益才明显）。
+
+#### 想靠环境变量压低那 8.5 GB 提交量：压不动
+
+`CUDA_MODULE_LOADING=LAZY` + `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 重启后，
+提交量 8947 MB → 8810 MB（噪声级），合成速度不变。说明这 8.5 GB 是 torch/CUDA 上下文的固有
+开销，不是缓存造成的，所以"两个服务同开"的内存压力没法靠调参解决。
+
 **坑三：wetext 的 FST 要联网拉。** 前端初始化时会 `snapshot_download("pengzhendong/wetext")`，
 本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），于是 `text_frontend` 退化成空字符串——
 数字不念出来，比如"我有 3 个苹果"会读成"我有三个苹果"之外的怪结果。

@@ -106,6 +106,52 @@ async def inference_instruct2(tts_text: str = Form(), instruct_text: str = Form(
     return StreamingResponse(_stream_and_cleanup(cosyvoice.inference_instruct2(tts_text, instruct_text, path), path))
 
 
+# ---- 本地补丁（非上游代码）：流式合成 --------------------------------------
+# 上游所有端点都是 stream=False：必须等整句合成完（约 5 秒）才吐第一个字节。
+# 这里加 *_stream 变体，传入 stream=True 后 model.tts 会边解码边 yield。
+#
+# 实测（20 字 / 约 4.1 秒音频，fp16，预热后）：
+#   非流式：首块 4.75 秒，总 4.77 秒
+#   流式：  首块 4.05 秒（1.04 秒音频），总 6.91 秒
+# 原因是 LLM 要先产出 token_min_hop_len（50 个 token ≈ 2 秒音频）才做第一块 flow，
+# 而分块 flow 推理比整段推理效率低。**短句用流式反而更慢**，所以 App 侧没有接入，
+# 端点保留给长文本/以后做首句加速的试验。
+@app.get("/inference_sft_stream")
+@app.post("/inference_sft_stream")
+async def inference_sft_stream(tts_text: str = Form(), spk_id: str = Form()):
+    return StreamingResponse(generate_data(cosyvoice.inference_sft(tts_text, spk_id, stream=True)))
+
+
+@app.get("/inference_zero_shot_stream")
+@app.post("/inference_zero_shot_stream")
+async def inference_zero_shot_stream(tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()):
+    path = await _save_upload(prompt_wav)
+    return StreamingResponse(_stream_and_cleanup(
+        cosyvoice.inference_zero_shot(tts_text, prompt_text, path, stream=True), path))
+
+
+@app.get("/inference_cross_lingual_stream")
+@app.post("/inference_cross_lingual_stream")
+async def inference_cross_lingual_stream(tts_text: str = Form(), prompt_wav: UploadFile = File()):
+    path = await _save_upload(prompt_wav)
+    return StreamingResponse(_stream_and_cleanup(
+        cosyvoice.inference_cross_lingual(tts_text, path, stream=True), path))
+
+
+@app.get("/inference_instruct_stream")
+@app.post("/inference_instruct_stream")
+async def inference_instruct_stream(tts_text: str = Form(), spk_id: str = Form(), instruct_text: str = Form()):
+    return StreamingResponse(generate_data(cosyvoice.inference_instruct(tts_text, spk_id, instruct_text, stream=True)))
+
+
+@app.get("/inference_instruct2_stream")
+@app.post("/inference_instruct2_stream")
+async def inference_instruct2_stream(tts_text: str = Form(), instruct_text: str = Form(), prompt_wav: UploadFile = File()):
+    path = await _save_upload(prompt_wav)
+    return StreamingResponse(_stream_and_cleanup(
+        cosyvoice.inference_instruct2(tts_text, instruct_text, path, stream=True), path))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port',

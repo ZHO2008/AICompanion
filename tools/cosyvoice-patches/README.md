@@ -41,6 +41,12 @@ onnxruntime EP 初始化），预热把这笔开销挪到启动阶段：服务�
 同开会爆显存，且收益只有约 0.9 秒。改为：只有 `COSYVOICE_ORT_GPU=1` 才用 CUDA EP，
 默认仍 `CPUExecutionProvider`。
 
+## 6. server.py：`/inference_*_stream` 流式端点（App 未接入）
+
+`stream=True` 的五个变体，返回仍是裸 PCM。实测短句首块 4.05 秒（非流式 4.75 秒），但整句
+总时长 6.91 秒（非流式 4.77 秒）——分块 flow 推理更慢，**短句用流式反而亏**，所以 App 侧没有
+接入，端点留着给长文本试验。详见 `VERIFICATION.md` §27.4。
+
 ## 验证
 
 - `python -m py_compile` 两个文件；
