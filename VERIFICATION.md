@@ -2566,3 +2566,64 @@ flow，而分块 flow 推理比整段推理效率低，**短句总延迟反而�
 - `COSYVOICE_ORT_GPU=1` 只在大批量、单独跑 CosyVoice 时值得开；没做"根据剩余显存自动决定"的逻辑。
 - GPT-SoVITS 的 `/control` 接口未使用，软重启只重建本地连接池。
 - 下拉框只覆盖四个引擎标识，各自的细项（权重路径、参考音频、指令文本）仍然要改 `config.yaml`。
+
+### 27.10 FP4 实测（关掉 Steam++ 后真做了一遍）
+
+用户要求"必须试验 fp4"。上一轮被 TLS 挡在门外，这轮 Steam++ 关掉后能装到真东西，
+于是建了一个**独立环境** `.venv-fp4`（`torch 2.9.1+cu128` + `torchao 0.14` + `tensorrt 10.16`），
+不碰能用的 `.venv-gpu`。三条路线都试了：
+
+**一、torch 侧的 NVFP4（torchao）**
+
+- `float4_e2m1fn_x2` 只在 torch ≥ 2.8 里有（2.7.1 没有）；torchao **0.18 实际要求 torch ≥ 2.11**
+  （报错原文 `Please upgrade to torch >= 2.11.0`），0.14 才能在 2.9.1 上导入，但会
+  `Skipping import of cpp extensions`，原生内核不可用。
+- 0.14 的 `NVFP4Tensor.to_nvfp4()` 能用，`F.linear(a_bf16, w_nvfp4)` 跑通，**相对误差 9.5%**（W4A4 为 13.4%）。
+- 但看源码 `nvfp4_tensor.py:722 nvfp4_linear` 就是 `weight.to_dtype()` + `F.linear`：
+  **先反量化回 bf16 再算**，不是 FP4 张量核。
+- 实测（RTX 5060 Laptop, sm_120, M/K/N=4096）：
+
+  | 方式 | 时延 | 算力 | 相对 bf16 |
+  | --- | --- | --- | --- |
+  | bf16 | 4.98 ms | 27.6 TFLOPS | 1.00× |
+  | NVFP4 权重-only | 12.88 ms | 10.7 TFLOPS | **0.39×（更慢）** |
+  | NVFP4 权重+激活 | 21.43 ms | 6.4 TFLOPS | 0.23×（更慢） |
+
+- 直接调 `torch._scaled_mm` 传 FP4 一律 `Invalid scaling configuration`（各种打包/缩放布局都试过，
+  含 e4m3 缩放与 e8m0+block32 的 MXFP4），说明 **torch 2.9.1 这个 cu128 构建在 sm_120 上没有 FP4 GEMM 路径**。
+  同一接口的 **fp8 是 53.6 TFLOPS**（比 bf16 快 1.9×），证明 `_scaled_mm` 本身很快，问题只在 FP4。
+
+**二、TensorRT 10.16 的 NVFP4（真 FP4 引擎）**
+
+ONNX 里 `FLOAT4E2M1` 权重 + 每 16 元素一个 fp32 块缩放 → `DequantizeLinear(axis=1, block_size=16)`
+→ `Transpose` → `MatMul`，TRT 编译出 engine（fp16 版 33.6 MB，fp4 版 12.6 MB）。
+
+踩到四个坑，都记下来：
+
+1. **ONNX 的 FP4 是沿最后一维打包的**。先按第 0 维打包，小规模测（K=64,N=2、所有 nibble 相同）
+   居然"通过"，到 4096×4096 就变成 141% 误差 —— 因为小样例里怎么打包都一样。改成
+   `[N,K]` 沿 K 打包 + 转置后，误差降到 13%。
+2. `IBuilderConfig` 没有 `create_optimization_profile()`，要用 `builder.` 那个。
+3. 事件计时必须 record 在**同一个 stream** 上，否则测出 4837 TFLOPS 这种假数字。
+4. e4m3 缩放会被拒绝（`Scale coefficients must all be positive`），fp32 缩放才收。
+
+结果（同一张图、同一套计时）：
+
+| M（批量） | fp16 | fp8(E4M3) | NVFP4 | NVFP4 误差 |
+| --- | --- | --- | --- | --- |
+| 4096 | 9.17 ms / 15.0 TF | 9.01 ms / 15.3 TF | 8.16 ms / 16.9 TF | 13.0% |
+| 512 | 0.93 ms / 18.5 TF | 1.06 ms / 16.2 TF | 1.34 ms / 12.8 TF | 13.0% |
+| **1** | **0.087 ms** | 0.101 ms | **0.268 ms（3.1× 慢）** | 12.9% |
+| 数值误差 | 0.2% | 2.7% | 13.0% | — |
+
+**结论（回答"为什么不用 fp4"）**：
+
+- FP4 在**大批量**（M=4096）只是和 fp16 打平、略好一点点，代价是 13% 数值误差；
+  fp8 在同场景误差只有 2.7%、吞吐与 fp4 相当 —— **要省显存/提吞吐，fp8 才是这一代的正解**。
+- 语音合成是 **batch=1 的自回归解码**，正好落在 FP4 最差的那一档：**比 fp16 慢 3.1 倍**。
+  把 CosyVoice 换成 FP4 只会更慢。
+- 这台 8 GB 显存 / 16 GB 内存的机器上，真正有效的优化是把 fp16 用对（已做：RTF 1.30→1.00）、
+  只跑一个服务、开启动预热 —— 不是换数据类型。
+
+脚本留在 `E:\cosyvoice-src\`（`trt_prec3.py` 三方对比、`trt_fp4_bench4.py` FP4 单测、
+`bench_nvfp4.py` torchao 版），`.venv-fp4` 只是研究环境，**不进安装包**。
