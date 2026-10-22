@@ -368,17 +368,24 @@ E:\DEEPSEEK
 
 6. **CosyVoice 有 GPU 与 CPU 两条路，速度差 5 倍多**
    CosyVoice3 在 Windows 原生**可以**跑（Python 3.10，依赖里已经没有 `pynini`，
-   换成了纯 Python 的 `wetext`），本机实测通过。有三件事得说清楚：
+   换成了纯 Python 的 `wetext`），本机实测通过。有四件事得说清楚：
    - **速度**：同一句 20 字（约 4.2 秒音频），CPU 上要 39 秒（RTF 7.2），
-     GPU（`torch 2.7.1+cu128`）只要 4.6–5.7 秒（RTF 1.1–1.3）。
-     服务进程刚起的**第一句**会多花 20 秒左右（CUDA 预热），之后才是 5 秒。
+     GPU（`torch 2.7.1+cu128` + fp16）只要 4.7–5.2 秒（RTF 1.0–1.1）。
+     **fp16 默认开**（约快 20%）；fp8/fp4 走不通——PyTorch 里 fp4 根本没有对应 dtype，
+     fp8 的 `addmm_cuda` 也没实现（详见 VERIFICATION §27.4）。
      `tools\start-cosyvoice.ps1` 会自动优先用带 CUDA 的 `.venv-gpu`，没有才回退 CPU。
+   - **启动预热**：服务启动时会先合成一句丢掉，把 CUDA kernel 与 onnxruntime EP 的一次性
+     初始化（20–70 秒）提前付掉。代价是启动慢一点，换来**服务就绪后第一句就是 5 秒**，
+     而不是卡 20 多秒。`--warmup 0` 可关。
    - **上游 bug**：官方 `runtime/python/fastapi/server.py` 把上传的 wav 先读成 tensor 再传给
      `inference_*`，而 `frontend.load_wav` 只接受路径，必然抛
      `TypeError: Invalid file: tensor([...])`。本机副本已就地改成"上传落地成临时文件再传路径"，
      重新 clone 上游后需要照 VERIFICATION §27.4 重打补丁。
-   - **前置依赖**：GPT-SoVITS 与 CosyVoice 同时开时显存合计约 6.6 / 8.1 GB，两个都能跑；
-     如果是 6 GB 显存的机器，建议只留一个。
+   - **显存/内存边界**：两个服务同开时显存 6.4 / 8.1 GB 能跑，但 CosyVoice 会从 5 秒劣化到
+     8–14 秒；更麻烦的是两个 python 服务各提交约 8.5 GB 内存，16 GB 机器上会把页面文件逼到
+     8 GB、任务管理器显示 98%，合成直接掉到 12–30 秒。**8 GB 显卡 + 16 GB 内存的机器，
+     同一时间只跑一个 TTS 服务**（没跑的那个由 App 自动降级到 Piper），另外关掉 NVIDIA App
+     的浮层还能多让出约 1 GB 显存。
 
 
 ---

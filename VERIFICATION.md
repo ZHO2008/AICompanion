@@ -2352,18 +2352,69 @@ GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
 
 | 项目 | CPU（py310，torch 2.3.1） | GPU（.venv-gpu，torch 2.7.1+cu128） |
 | --- | --- | --- |
-| 模型加载 | 11.4 秒 | 10.6 秒（fp32）/ 11.3 秒（fp16） |
-| 首句（含预热） | 38.9 秒 | 23–26 秒 |
-| 稳定态单句 | 约 39 秒（RTF 7.2） | **4.6–5.7 秒（RTF 1.1–1.3）** |
-| 显存 | 0 | 3.2 GB（fp32）/ 3.3 GB（fp16） |
+| 模型加载 | 11.4 秒 | 10.4–13.9 秒（fp32）/ 9.9–10.7 秒（fp16） |
+| 首句（无预热） | 38.9 秒 | 23–26 秒 |
+| 稳定态单句 | 约 39 秒（RTF 7.2） | **4.7–5.2 秒（RTF 1.0–1.1）** |
+| 显存 | 0 | 3.2–3.4 GB |
 
-几点结论：
-- GPU 比 CPU 快约 **5.5 倍**，RTF 从 7.2 降到 1.2（20 字一句话 5 秒出结果）；
-- **fp16 收益很小**（RTF 1.11 vs 1.27，噪声级别），所以没改上游默认值，避免引入音质风险；
-- 每个进程**第一次**推理要多花约 20 秒（CUDA kernel 预热），之后才是 5 秒；
-- 服务端装的 onnxruntime 是 CPU 版，语音 tokenizer 仍在 CPU 上跑（`frontend_zero_shot` 约占
-  5 秒里的 1 秒）；换 `onnxruntime-gpu` 还能再快一点，但收益不大，没动；
-- 与 GPT-SoVITS 同时开：显存合计 6.6 / 8.1 GB，两个服务都正常，探针仍是 49/49。
+#### 精度对比：为什么停在 fp16，为什么不用 fp4
+
+| 精度 | 可行性 | 单句（约 4.2 秒音频） | RTF |
+| --- | --- | --- | --- |
+| fp32（上游默认） | — | 5.5–5.7 秒 | 1.30–1.34 |
+| fp16（`--fp16 1`，autocast） | 可用，已设为 GPU 默认 | 4.2–4.7 秒 | **1.00–1.11** |
+| bf16 | 可用（把 autocast 的 dtype 换成 bf16） | 5.5–5.7 秒 | 1.30–1.33 |
+| fp8 | **不可用** | `RuntimeError: "addmm_cuda" not implemented for 'Float8_e4m3fn'` | — |
+| fp4 | **不可用** | torch 2.7.1 里没有 `float4_e2m1fn_x2` 这个 dtype | — |
+
+fp4 在 Blackwell 上确实是硬件能力（sm_120 有 FP4 tensor core），但 PyTorch eager 里没有对应
+dtype 和算子，能吃它的只有 TensorRT 10.x 的 FP4 engine 或 torchao 的 NVFP4（还要逐层量化 + 校准）。
+而且这里是 batch=1、26 个 SM 的**延迟**瓶颈，FP4 省的是带宽与吞吐，落到单句上收益很小，音质风险
+却是实打实的。fp16 是这条链上唯一"改一行、零风险、有正收益"的档位，所以默认开它——
+收益也只有约 20%，说明瓶颈在自回归解码的 kernel 启动与访存，不在算力。
+
+#### 预热：把一次性开销挪到启动时（DirectStorage 式思路）
+
+每个进程的第一次推理要多花 20–40 秒（CUDA kernel 编译 + onnxruntime EP 初始化）。做法不是让
+用户等，而是**启动时先合成一句丢掉**（`server.py --warmup`，默认开）：
+
+    21:04:36 INFO use wetext frontend
+    21:05:29 INFO yield speech len 5.44, rtf 7.63      ← 这句是预热，输出被丢弃
+    21:05:29 INFO 预热完成，用时 42.7s
+    INFO:     Uvicorn running on http://0.0.0.0:50000
+
+| | 无预热 | 有预热 |
+| --- | --- | --- |
+| 服务开始接受请求 | 12–17 秒 | 42–89 秒 |
+| **服务就绪后的第一句** | 23–26 秒 | **5.0 秒** |
+| 稳定态 | 4.7–5.2 秒 | 4.7–5.2 秒 |
+
+代价是启动慢 30–70 秒，换来"第一句话不卡"。`--warmup 0` 可关掉。
+
+#### 显存/内存的真实边界（8 GB 显卡 + 16 GB 内存）
+
+- 两个服务同开：显存 6.4 / 8.1 GB 仍能跑，但 CosyVoice 单句劣化到 8–14 秒（独占时 4.8–5.2 秒）。
+- 真正的坑在**内存**：两个 python 服务各提交 8.4–8.9 GB（工作集很小，CUDA 运行时预留的提交量很大），
+  合计约 17 GB，而物理内存只有 15.3 GB → 页面文件涨到 8 GB、Memory Compression 压到 3.8 GB，
+  任务管理器显示 98%。这时合成会劣化到 12–30 秒；关掉一个服务后**立即**回到 5 秒。
+- 边打游戏边合成同样会劣化（游戏占显存，驱动回退共享内存）：实测 9–24 秒，游戏退出即恢复。
+- `NVIDIA Overlay`（NVIDIA App 浮层）自己占约 1.25 GB 共享显存，关掉能多让出 1 GB。
+- 结论：**8 GB 显卡 + 16 GB 内存的机器，同一时间只该跑一个 TTS 服务**。没在跑的那个引擎由
+  App 自动降级到 Piper，不影响出声。
+
+#### 语音 tokenizer 上 GPU（onnxruntime-gpu）
+
+装了 `onnxruntime-gpu 1.23.2`，CUDA EP 可用，`frontend_zero_shot` 从 0.98 秒降到 **0.11 秒**；
+代价是首次调用前要付 66 秒的 EP 初始化（正好被上面的预热吃掉），并且显存/内存都上涨。
+8 GB 卡上"两个服务同开"会因此爆显存，所以默认仍走 CPU，只有设 `COSYVOICE_ORT_GPU=1` 才启用。
+
+#### TRT / vLLM 评估（都没有落地）
+
+- **vLLM**：PyPI 上只有 sdist（`vllm-0.31.0.tar.gz`），Windows 没有二进制轮子，源码编译要全量 CUDA
+  工具链，上游也不支持 Windows。放弃。
+- **TensorRT**：CosyVoice 里有 `load_trt` 路径（只覆盖 flow decoder，需要 onnx 导出 + engine 构建），
+  但 `tensorrt-cu12` 只在 `pypi.nvidia.com`，本机对它的 TLS 一律失败（加 `--trusted-host` 也无效），
+  清华源只有 sdist。放弃。
 
 **坑三：wetext 的 FST 要联网拉。** 前端初始化时会 `snapshot_download("pengzhendong/wetext")`，
 本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），于是 `text_frontend` 退化成空字符串——
@@ -2441,9 +2492,8 @@ GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
 
 ### 27.9 仍未闭合
 
-- CosyVoice 的 fp16 没默认启用（实测收益在噪声级别），TRT / vLLM 加速没试；
-  onnxruntime 仍是 CPU 版，语音 tokenizer 那 1 秒还没挪到 GPU。
-- 每个 CosyVoice 进程的第一句要多花约 20 秒（CUDA 预热），目前靠"先随便合成一句"绕过，
-  没在 server.py 里做启动预热。
+- fp4 只能用 TensorRT / torchao NVFP4 这条量化路线，本机都拿不到轮子（见上），所以"fp4 对比"
+  只到"可行性 + fp8 报错"这一层，没有真实 FP4 数字。
+- `COSYVOICE_ORT_GPU=1` 只在大批量、单独跑 CosyVoice 时值得开；没做"根据剩余显存自动决定"的逻辑。
 - GPT-SoVITS 的 `/control` 接口未使用，软重启只重建本地连接池。
 - 下拉框只覆盖四个引擎标识，各自的细项（权重路径、参考音频、指令文本）仍然要改 `config.yaml`。

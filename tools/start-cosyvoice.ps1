@@ -78,11 +78,19 @@ Write-Host "  源码     $Repo"
 Write-Host "  模型     $ModelDir"
 Write-Host "  端口     $Port"
 Write-Host ""
-Write-Host "首次启动要加载约 4 GB 权重（约 10-17 秒）；之后每句合成：" -ForegroundColor DarkGray
-Write-Host "  GPU（.venv-gpu）：约 5 秒 / 4 秒音频；进程刚起后的第一句要 20 秒左右（CUDA 预热）" -ForegroundColor DarkGray
-Write-Host "  CPU（py310）    ：约 30-40 秒 / 4 秒音频" -ForegroundColor DarkGray
+Write-Host "启动时会先做一次预热（DirectStorage 那种""先把东西搬进显存/DLL 就绪""的思路）：" -ForegroundColor DarkGray
+Write-Host "  加载权重约 10-17 秒，再做一句废弃合成、吃掉 CUDA kernel 与 onnxruntime EP 的一次性初始化，" -ForegroundColor DarkGray
+Write-Host "  所以从启动到能服务约 30-60 秒，但之后第一句用户请求就是正常速度（约 4-5 秒 / 4 秒音频）。" -ForegroundColor DarkGray
+Write-Host "  CPU（py310）：每句约 30-40 秒，预热意义不大。" -ForegroundColor DarkGray
 Write-Host "按 Ctrl+C 停止。" -ForegroundColor DarkGray
 Write-Host ""
+
+# onnxruntime-gpu 要靠 torch 自带的 cudnn/cublas DLL，把 torch\lib 放进 PATH 最省事。
+$venvRoot = Split-Path (Split-Path $Python -Parent) -Parent
+$torchLib = Join-Path $venvRoot 'Lib\site-packages\torch\lib'
+if (Test-Path $torchLib) {
+    $env:PATH = "$torchLib;$env:PATH"
+}
 
 # 工作目录必须在仓库根，server.py 用相对路径拼 third_party/Matcha-TTS。
 Set-Location $Repo
