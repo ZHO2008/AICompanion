@@ -190,6 +190,8 @@ public static class ConfigLoader
         // 嵌套小节同样可能被显式写成 null。
         target.Tts.Chatterbox = parsed.Tts?.Chatterbox ?? Missing("tts.chatterbox", warnings, target.Tts.Chatterbox);
         target.Tts.Piper = parsed.Tts?.Piper ?? Missing("tts.piper", warnings, target.Tts.Piper);
+        target.Tts.GptSoVits = parsed.Tts?.GptSoVits ?? Missing("tts.gpt_sovits", warnings, target.Tts.GptSoVits);
+        target.Tts.CosyVoice = parsed.Tts?.CosyVoice ?? Missing("tts.cosyvoice", warnings, target.Tts.CosyVoice);
     }
 
     private static T Missing<T>(string section, List<string> warnings, T fallback)
@@ -231,7 +233,7 @@ public static class ConfigLoader
         // ---------------- tts ----------------
         var ttsDefaults = new TtsConfig();
         c.Tts.Engine = FixString(c.Tts.Engine, ttsDefaults.Engine, "tts.engine", warnings).ToLowerInvariant();
-        if (c.Tts.Engine is not ("chatterbox" or "piper"))
+        if (c.Tts.Engine is not ("chatterbox" or "piper" or "gpt_sovits" or "cosyvoice"))
         {
             warnings.Add($"tts.engine 取值 \"{c.Tts.Engine}\" 无法识别，已回退为 \"piper\"。");
             c.Tts.Engine = "piper";
@@ -245,6 +247,19 @@ public static class ConfigLoader
         c.Tts.Chatterbox.Port = FixPort(c.Tts.Chatterbox.Port, ttsDefaults.Chatterbox.Port, "tts.chatterbox.port", warnings);
         c.Tts.Chatterbox.SynthesizePath = FixString(c.Tts.Chatterbox.SynthesizePath, ttsDefaults.Chatterbox.SynthesizePath, "tts.chatterbox.synthesize_path", warnings);
         c.Tts.Chatterbox.RestartPath = FixString(c.Tts.Chatterbox.RestartPath, ttsDefaults.Chatterbox.RestartPath, "tts.chatterbox.restart_path", warnings);
+
+        // GPT-SoVITS / CosyVoice：只校验"会影响连接与产物格式"的字段，其余原样透传。
+        c.Tts.GptSoVits.Port = FixPort(c.Tts.GptSoVits.Port, ttsDefaults.GptSoVits.Port, "tts.gpt_sovits.port", warnings);
+        c.Tts.GptSoVits.TtsPath = FixString(c.Tts.GptSoVits.TtsPath, ttsDefaults.GptSoVits.TtsPath, "tts.gpt_sovits.tts_path", warnings);
+        c.Tts.GptSoVits.PromptLang = FixString(c.Tts.GptSoVits.PromptLang, ttsDefaults.GptSoVits.PromptLang, "tts.gpt_sovits.prompt_lang", warnings);
+        c.Tts.GptSoVits.TextLang = FixString(c.Tts.GptSoVits.TextLang, ttsDefaults.GptSoVits.TextLang, "tts.gpt_sovits.text_lang", warnings);
+        c.Tts.GptSoVits.TextSplitMethod = FixString(c.Tts.GptSoVits.TextSplitMethod, ttsDefaults.GptSoVits.TextSplitMethod, "tts.gpt_sovits.text_split_method", warnings);
+        c.Tts.GptSoVits.TimeoutSeconds = FixPositive(c.Tts.GptSoVits.TimeoutSeconds, ttsDefaults.GptSoVits.TimeoutSeconds, "tts.gpt_sovits.timeout_seconds", warnings);
+        c.Tts.CosyVoice.Port = FixPort(c.Tts.CosyVoice.Port, ttsDefaults.CosyVoice.Port, "tts.cosyvoice.port", warnings);
+        c.Tts.CosyVoice.Mode = FixString(c.Tts.CosyVoice.Mode, ttsDefaults.CosyVoice.Mode, "tts.cosyvoice.mode", warnings).ToLowerInvariant();
+        c.Tts.CosyVoice.PromptPrefix = c.Tts.CosyVoice.PromptPrefix ?? string.Empty;
+        c.Tts.CosyVoice.SampleRate = FixPositive(c.Tts.CosyVoice.SampleRate, ttsDefaults.CosyVoice.SampleRate, "tts.cosyvoice.sample_rate", warnings);
+        c.Tts.CosyVoice.TimeoutSeconds = FixPositive(c.Tts.CosyVoice.TimeoutSeconds, ttsDefaults.CosyVoice.TimeoutSeconds, "tts.cosyvoice.timeout_seconds", warnings);
         c.Tts.SoftRestartHours = FixPositive(c.Tts.SoftRestartHours, ttsDefaults.SoftRestartHours, "tts.soft_restart_hours", warnings);
         c.Tts.SoftRestartIdleMinutes = FixPositive(c.Tts.SoftRestartIdleMinutes, ttsDefaults.SoftRestartIdleMinutes, "tts.soft_restart_idle_minutes", warnings);
 

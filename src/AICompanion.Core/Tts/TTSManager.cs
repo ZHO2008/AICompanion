@@ -70,22 +70,43 @@ public sealed class TTSManager : IDisposable
     /// <summary>Chatterbox 是否正在被实际使用（HealthMonitor 用它决定要不要探活 5000 端口）。</summary>
     public bool IsChatterboxActive => _engine is ChatterboxEngine;
 
+    /// <summary>
+    /// 当前实际使用的外部 HTTP 语音引擎（Chatterbox / GPT-SoVITS / CosyVoice）。
+    /// Piper 与 SAPI 是进程内引擎，返回 null —— 游戏模式据此决定要不要按端口结束外部进程。
+    /// </summary>
+    public IHttpTtsEngine? ActiveHttpEngine => _engine as IHttpTtsEngine;
+
+    /// <summary>是否正在使用外部 HTTP 语音服务。</summary>
+    public bool IsHttpEngineActive => _engine is IHttpTtsEngine;
+
+    /// <summary>引擎标识 → 给人看的名字（日志与气泡用）。</summary>
+    public static string EngineLabel(string name) => name switch
+    {
+        TTSEngineFactory.GptSoVits => "GPT-SoVITS",
+        TTSEngineFactory.CosyVoice => "CosyVoice",
+        TTSEngineFactory.Chatterbox => "Chatterbox",
+        TTSEngineFactory.Piper => "Piper",
+        TTSEngineFactory.Sapi => "Windows 内置语音",
+        _ => name,
+    };
+
     /// <summary>启动逻辑（手册 §3.4 启动逻辑）。</summary>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         _logger.Info($"按配置创建 TTS 引擎：{_config.Tts.Engine}");
 
-        if (_engine is ChatterboxEngine chatterbox)
+        if (_engine is IHttpTtsEngine httpEngine)
         {
-            var available = await chatterbox.RefreshAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+            var available = await httpEngine.RefreshAvailabilityAsync(cancellationToken).ConfigureAwait(false);
 
             if (!available)
             {
                 // 手册 §3.4 步骤 3：记录日志 + 气泡 + 改用 Piper + 状态栏标注降级。
-                _logger.Warn("Chatterbox 不可用，按手册降级为 Piper。");
+                var label = EngineLabel(_engine.Name);
+                _logger.Warn($"{label} 不可用，按手册降级为 Piper。");
                 _bubble.Show(
                     "tts-degraded",
-                    "Chatterbox 启动失败，已降级为 Piper。请在设置中调整。",
+                    $"{label} 启动失败，已降级为 Piper。请在设置中调整。",
                     BubbleLevel.Warning);
 
                 _engine.Unload();
@@ -95,7 +116,7 @@ public sealed class TTSManager : IDisposable
             }
             else
             {
-                _logger.Info("Chatterbox 已就绪，使用 GPU 语音合成。");
+                _logger.Info($"{EngineLabel(_engine.Name)} 已就绪，使用外部语音服务合成。");
                 _bubble.Clear("tts-degraded");
                 IsDegraded = false;
             }
@@ -235,13 +256,13 @@ public sealed class TTSManager : IDisposable
     /// </summary>
     public async Task<bool> CheckSoftRestartAsync(TimeSpan userIdle, CancellationToken cancellationToken = default)
     {
-        if (_engine is not ChatterboxEngine chatterbox || _restarting)
+        if (_engine is not IHttpTtsEngine httpEngine || _restarting)
         {
             return false;
         }
 
         var uptimeThreshold = TimeSpan.FromHours(Math.Max(0.1, _config.Tts.SoftRestartHours));
-        if (chatterbox.Uptime < uptimeThreshold)
+        if (httpEngine.Uptime < uptimeThreshold)
         {
             return false;
         }
@@ -255,18 +276,18 @@ public sealed class TTSManager : IDisposable
         }
 
         _logger.Info(
-            $"Chatterbox 已连续运行 {chatterbox.Uptime.TotalHours:N1} 小时且空闲超过 " +
+            $"{EngineLabel(_engine.Name)} 已连续运行 {httpEngine.Uptime.TotalHours:N1} 小时且空闲超过 " +
             $"{idleThreshold.TotalMinutes:N0} 分钟，开始软重启。");
 
         _restarting = true;
         try
         {
-            await chatterbox.TrySoftRestartAsync(cancellationToken).ConfigureAwait(false);
+            await httpEngine.TrySoftRestartAsync(cancellationToken).ConfigureAwait(false);
             return true;
         }
         catch (Exception ex)
         {
-            _logger.Error($"Chatterbox 软重启失败（不影响当前服务）：{ex.Message}", ex);
+            _logger.Error($"{EngineLabel(_engine.Name)} 软重启失败（不影响当前服务）：{ex.Message}", ex);
             return false;
         }
         finally

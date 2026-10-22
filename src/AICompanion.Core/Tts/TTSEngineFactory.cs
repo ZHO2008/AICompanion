@@ -30,11 +30,27 @@ public static class TTSEngineFactory
     /// </summary>
     public const string Sapi = "sapi";
 
+    /// <summary>GPT-SoVITS（api_v2.py，默认 9880）。</summary>
+    public const string GptSoVits = "gpt_sovits";
+
+    /// <summary>CosyVoice 2 / 3（官方 FastAPI server.py，默认 50000）。</summary>
+    public const string CosyVoice = "cosyvoice";
+
     public static ITTSEngine Create(string engineType, TtsEngineContext context)
     {
         if (string.Equals(engineType, Chatterbox, StringComparison.OrdinalIgnoreCase))
         {
             return new ChatterboxEngine(context.Config, context.Logger);
+        }
+
+        if (string.Equals(engineType, GptSoVits, StringComparison.OrdinalIgnoreCase))
+        {
+            return new GptSoVitsEngine(context.Config, context.Logger);
+        }
+
+        if (string.Equals(engineType, CosyVoice, StringComparison.OrdinalIgnoreCase))
+        {
+            return new CosyVoiceEngine(context.Config, context.Logger);
         }
 
         if (string.Equals(engineType, Sapi, StringComparison.OrdinalIgnoreCase))

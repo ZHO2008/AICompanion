@@ -21,7 +21,8 @@ llm:
   startup_timeout_seconds: 180
 
 tts:
-  engine: "piper"                # 可选 "chatterbox" 或 "piper"
+  # 可选："chatterbox"（外部 GPU 服务）/"gpt_sovits"（api_v2.py）/"cosyvoice"（官方 FastAPI）/"piper"（本地 CPU）
+  engine: "piper"
   default_voice: "zh_CN-default" # 全局默认音色，角色缺失配置时使用
   soft_restart_hours: 4.0
   soft_restart_idle_minutes: 5.0
@@ -32,6 +33,43 @@ tts:
     # 手册未规定 chatterbox-api 的路由，做成配置项以便按部署版本调整。
     synthesize_path: "/synthesize"
     restart_path: "/restart"
+  # GPT-SoVITS：对接整合包里的 api_v2.py（默认 9880）。
+  # 训练好的模型 = gpt_weights_path(*.ckpt) + sovits_weights_path(*.pth)；
+  # 不填权重则用服务端当前模型做零样本，此时 ref_audio_path + prompt_text 必填。
+  gpt_sovits:
+    host: "127.0.0.1"
+    port: 9880
+    tts_path: "/tts"
+    gpt_weights_path: ""
+    sovits_weights_path: ""
+    ref_audio_path: ""          # 3~10 秒干净人声
+    prompt_text: ""             # 参考音频的原文，必须一致
+    prompt_lang: "zh"
+    text_lang: "zh"
+    text_split_method: "cut5"
+    speed_factor: 1.0
+    top_k: 15
+    top_p: 1.0
+    temperature: 1.0
+    timeout_seconds: 120        # 首次合成要建 CUDA 图，别设太短
+    launch_command: ""
+  # CosyVoice 2/3：对接官方 runtime/python/fastapi/server.py（默认 50000）。
+  # 服务返回裸 PCM，sample_rate 必须与模型一致：CosyVoice2/3 = 24000，CosyVoice1 = 22050。
+  cosyvoice:
+    host: "127.0.0.1"
+    port: 50000
+    mode: "zero_shot"           # sft / zero_shot / cross_lingual / instruct / instruct2
+    spk_id: ""                  # sft / instruct 用
+    prompt_text: ""             # zero_shot / instruct2 用
+    prompt_wav: ""              # zero_shot / cross_lingual / instruct2 用
+    instruct_text: ""           # instruct / instruct2 用
+    # CosyVoice3 的 LLM 硬性要求输入里含 <|endofprompt|>，官方写法是把它放在指令前面：
+    #   prompt_prefix: "You are a helpful assistant.<|endofprompt|>"
+    # 填了它，zero_shot 的 prompt_text 与 cross_lingual 的正文会自动加上；留空则原样发送（CosyVoice 1/2）。
+    prompt_prefix: ""
+    sample_rate: 24000
+    timeout_seconds: 120
+    launch_command: ""
   piper:
     model_path: "models/piper/zh_CN/model.onnx"
     library_path: "third_party/piper/build/piper.dll"

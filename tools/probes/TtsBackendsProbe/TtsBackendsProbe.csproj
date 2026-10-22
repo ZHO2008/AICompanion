@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    GPT-SoVITS / CosyVoice 两个HTTP语音后端的验证探针。
+
+    只引用 Core，不碰 WPF —— 引擎本身是纯网络客户端，用控制台就能完整验证。
+    GPT-SoVITS 走真实服务；CosyVoice 在本地起一个桩服务，按官方 server.py 的约定
+    返回裸 PCM，用来验证"多部分表单字段 + PCM 封装 WAV"这两处最容易写错的地方。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>TtsBackendsProbe</AssemblyName>
+    <RootNamespace>TtsBackendsProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\AICompanion.Core\AICompanion.Core.csproj" />
+  </ItemGroup>
+
+</Project>

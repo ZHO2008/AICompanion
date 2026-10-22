@@ -2245,3 +2245,96 @@ asr:
   要发布就用 `-NoLicensedAssets` 重打。
 - Inno Setup 那条路径这次没重跑，只验证了分发目录。`.iss` 是整目录递归打包
   （`Source: {#StageDir}\*`），所以目录干净它自然干净。
+---
+
+## 27. 语音合成后端：GPT-SoVITS 与 CosyVoice（2026-10-22）
+
+### 27.1 为什么要做
+
+手册 §3.4 只规定了 Chatterbox 与 Piper。这一轮要把两种**训练好的音色**接进来：
+GPT-SoVITS 整合包（`E:\GPT-SoVITS\...v2pro`）与 CosyVoice 3。二者都是"本地 HTTP 服务"形态，
+于是新增 `IHttpTtsEngine` 抽象，把探活 / 超时 / 软重启 / 连接池重建从 Chatterbox 里提取出来复用——
+否则每加一个引擎就要在 `TTSManager` 里再复制一遍降级逻辑。
+
+### 27.2 新增与改动
+
+| 文件 | 内容 |
+| --- | --- |
+| `Abstractions/IHttpTtsEngine.cs` | 外部 HTTP 引擎接口：BaseUrl / Port / Uptime / 探活 / 软重启 |
+| `Tts/HttpTtsEngineBase.cs` | 公共骨架 + `WavFromPcm16`（裸 PCM → WAV） |
+| `Tts/GptSoVitsEngine.cs` | `POST /tts`；`/set_gpt_weights`、`/set_sovits_weights` 切换训练模型 |
+| `Tts/CosyVoiceEngine.cs` | 5 种推理模式；多部分表单；按配置采样率封装 PCM |
+| `Tts/TTSEngineFactory.cs` | 新增 `gpt_sovits` / `cosyvoice` 两个标识 |
+| `Tts/TTSManager.cs` | 降级、软重启、空闲判断泛化到 `IHttpTtsEngine`；新增 `EngineLabel` |
+| `Configuration/AppConfig.cs` | `GptSoVitsConfig` / `CosyVoiceConfig` |
+| `Configuration/ConfigLoader.cs` | 引擎白名单 + 端口/路径/采样率兜底 |
+| `Monitor/GameModeCoordinator.cs` | 按"当前 HTTP 引擎的端口"结束进程，不再写死 5000 |
+| `Core/Models/Knowledge.cs` | `VoiceConfig.PromptText` / `InstructText`（逐角色覆盖） |
+| `tools/probes/TtsBackendsProbe` | 新探针，30 项断言 |
+
+### 27.3 真实验证（GPT-SoVITS）
+
+服务：本地整合包 `api_v2.py`，CUDA，模型 `s1v3.ckpt` + `s2Gv2ProPlus.pth`（v2ProPlus）。
+
+| 指标 | 实测 |
+| --- | --- |
+| 参考音频 | 4.8 秒 / 32 kHz（SAPI 生成，`models\tts\ref_zh.wav`） |
+| 输出 | WAV 32 kHz、4.04–4.80 秒、253–307 KB（每句不同） |
+| 单句耗时 | 2.0–3.7 秒（首次含 CUDA 预热为 44 秒） |
+| 连续合成 | 第二次、第三次均成功 |
+| 探针结果 | 36 通过 / 0 失败（两个引擎合计） |
+
+### 27.4 CosyVoice：Windows 原生跑通，但踩了两个坑
+
+先说结论：**不需要 WSL**。`requirements.txt` 里已经没有 `pynini` / `WeTextProcessing`，
+新版换成了纯 Python 的 `wetext`，所以只要有个 Python 3.10，Windows 上就能装。
+
+实际安装路径（全部实测）：
+
+| 步骤 | 命令 / 结果 |
+| --- | --- |
+| Python | `python-3.10.11-amd64.exe` 静默装到 `E:\py310`（华为镜像 27.7 MB，3 秒） |
+| torch | `torch==2.3.1` + `torchaudio==2.3.1`（CPU 版，约 10 分钟） |
+| 依赖 | 分组装，镜像按 清华 → 阿里 → PyPI 回退；`openai-whisper` 要 `--no-build-isolation` |
+| 源码 | GitHub 的 `git clone` 被连接重置，改用 `codeload` 的 zip（1.54 MB / 78 秒）+ Matcha-TTS zip |
+| 权重 | ModelScope 4.13 GB（llm/flow/hift/campplus/tokenizer_v3）+ BlankEN 945 MB |
+
+**坑一：CosyVoice3 的 `<|endofprompt|>`。** 第一次合成"成功"，但音频只有 3 帧，
+HiFiGAN 的 f0 预测器报 `Kernel size can't be greater than actual input size`。根因在
+`cosyvoice/llm/llm.py:479`：`assert 151646 in text`，而 151646 就是 `<|endofprompt|>`。
+官方 `example.py` 的写法是把它放在指令前：
+
+    inference_zero_shot(tts_text, 'You are a helpful assistant.<|endofprompt|>' + 参考文本, prompt_wav)
+
+引擎为此加了 `tts.cosyvoice.prompt_prefix`，自动补到 zero_shot 的 `prompt_text` 与
+cross_lingual 的正文前；已经带标记就不重复加。
+
+**坑二：上游 `server.py` 自相矛盾。** 它先 `load_wav(prompt_wav.file, 16000)` 读成 tensor，
+再把 tensor 传给 `inference_zero_shot`，而 `frontend.load_wav` 只接受路径，必然抛
+`TypeError: Invalid file: tensor([[...]])`。已核对上游 main 分支，同样是这个写法。
+本机副本就地打了补丁：上传内容落成临时文件、传路径进去，让前端按 24 kHz（频谱）与
+16 kHz（token / speaker）各自正确重采样，流式响应结束后删文件。补丁在 `server.py`
+的 `_save_upload` / `_stream_and_cleanup`，有注释标明"本地补丁（非上游代码）"。
+
+修复后的真实结果：
+
+| 指标 | 实测 |
+| --- | --- |
+| 模型加载 | 11.4 秒（4.13 GB + 945 MB，从本地磁盘） |
+| 输出 | 24 kHz 单声道 WAV、5.80 秒、272 KB，PCM 非全零 |
+| 单句耗时 | 38.9 秒（CPU，RTF 7.2） |
+| 服务端 | `uvicorn` + `python-multipart`，`/docs` 200 |
+
+CPU 慢是硬伤：GPU 要 cu128 轮子（本机 torch 是 CPU 版，RTX 5060 用不上）。
+所以把 GPT-SoVITS 定为主力，CosyVoice 当高质量兜底。
+
+启动服务用 `tools\start-cosyvoice.ps1`（默认指向 `E:\py310` 与
+`E:\cosyvoice\pretrained_models\Fun-CosyVoice3-0.5B`，端口被占时会提示而不是再起一个）。
+
+### 27.5 仍未闭合
+
+- 两个引擎都还没接进设置面板的下拉框，只能改 `config.yaml` 后重启。
+- CosyVoice 的 GPU 推理没验证（需要 `torch 2.7+cu128`，与上游 pin 的 2.3.1 冲突，没动）。
+- `wetext` 的规范化模型要联网从 ModelScope 拉，本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），
+  前端因此降级为"不做文本规范化"。纯中文短句不受影响，数字/英文缩写需要先手工改写。
+- GPT-SoVITS 的 `/control` 接口未使用，软重启只重建本地连接池。

@@ -112,18 +112,18 @@ public sealed class GameModeCoordinator
         // 步骤 1-2：优先 /unload，失败则终止 llama-server 进程。
         await _llama.UnloadAsync(cancellationToken).ConfigureAwait(false);
 
-        // 步骤 3：Chatterbox 同样要停（它是外部进程，只能按端口反查后结束）。
-        if (_tts.IsChatterboxActive)
+        // 步骤 3：外部 HTTP 语音服务同样要停（它是外部进程，只能按端口反查后结束）。
+        if (_tts.ActiveHttpEngine is { } httpEngine)
         {
-            var port = _config.Tts.Chatterbox.Port;
-            _logger.Info($"Chatterbox 正在使用中，尝试停止占用端口 {port} 的进程以释放显存。");
+            var port = httpEngine.Port;
+            _logger.Info($"{httpEngine.Name} 正在使用中，尝试停止占用端口 {port} 的进程以释放显存。");
             _chatterboxStopped = await PortProcessLocator
                 .TryKillListenerOnPortAsync(port, _logger, cancellationToken)
                 .ConfigureAwait(false);
 
             if (!_chatterboxStopped)
             {
-                _logger.Warn("未能停止 Chatterbox 进程，其显存占用可能未被释放。");
+                _logger.Warn($"未能停止 {httpEngine.Name} 进程，其显存占用可能未被释放。");
             }
         }
         else

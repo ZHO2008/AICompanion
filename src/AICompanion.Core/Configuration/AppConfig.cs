@@ -83,7 +83,11 @@ public sealed class TtsConfig
 
     public PiperConfig Piper { get; set; } = new();
 
+    /// <summary>GPT-SoVITS（api_v2.py 服务）对接配置。</summary>
+    public GptSoVitsConfig GptSoVits { get; set; } = new();
 
+    /// <summary>CosyVoice（官方 FastAPI server.py）对接配置。</summary>
+    public CosyVoiceConfig CosyVoice { get; set; } = new();
 
     /// <summary>Chatterbox 软重启阈值：连续运行超过该小时数才考虑重启（手册 §3.4）。</summary>
     public double SoftRestartHours { get; set; } = 4.0;
@@ -123,6 +127,105 @@ public sealed class PiperConfig
 
     /// <summary>espeak-ng 数据目录（Piper 做音素化时需要）。</summary>
     public string EspeakDataPath { get; set; } = "third_party/piper/espeak-ng-data";
+}
+
+/// <summary>
+/// GPT-SoVITS 对接配置（对接 api_v2.py，默认端口 9880）。
+///
+/// 支持三种用法，可自由组合：
+///   1. 用训练好的模型：填 <c>gpt_weights_path</c>（*.ckpt）+ <c>sovits_weights_path</c>（*.pth）；
+///   2. 零样本：只填 <c>ref_audio_path</c> + <c>prompt_text</c>；
+///   3. 训练模型 + 指定参考音频，音色最可控。
+/// </summary>
+public sealed class GptSoVitsConfig
+{
+    public string Host { get; set; } = "127.0.0.1";
+
+    public int Port { get; set; } = 9880;
+
+    /// <summary>合成接口路径（GET/POST 都支持，这里统一用 POST JSON）。</summary>
+    public string TtsPath { get; set; } = "/tts";
+
+    /// <summary>训练好的 GPT 权重（*.ckpt）。留空则沿用服务端当前模型。</summary>
+    public string GptWeightsPath { get; set; } = string.Empty;
+
+    /// <summary>训练好的 SoVITS 权重（*.pth）。留空则沿用服务端当前模型。</summary>
+    public string SovitsWeightsPath { get; set; } = string.Empty;
+
+    /// <summary>参考音频（3~10 秒干净人声）。零样本或需要锁定音色时必填。</summary>
+    public string RefAudioPath { get; set; } = string.Empty;
+
+    /// <summary>参考音频的原文。必须与音频内容一致，否则音色/语调会跑偏。</summary>
+    public string PromptText { get; set; } = string.Empty;
+
+    /// <summary>参考音频语种：zh / en / ja / ko / yue 等（GPT-SoVITS 的取值）。</summary>
+    public string PromptLang { get; set; } = "zh";
+
+    /// <summary>待合成文本语种。</summary>
+    public string TextLang { get; set; } = "zh";
+
+    /// <summary>切句策略，cut0~cut5，默认 cut5（标点切分，最稳）。</summary>
+    public string TextSplitMethod { get; set; } = "cut5";
+
+    /// <summary>全局语速系数，与角色 Speed 相乘。</summary>
+    public double SpeedFactor { get; set; } = 1.0;
+
+    public int TopK { get; set; } = 15;
+
+    public double TopP { get; set; } = 1.0;
+
+    public double Temperature { get; set; } = 1.0;
+
+    /// <summary>合成超时。首次调用要建 CUDA 图，几十秒很正常，默认给足 120 秒。</summary>
+    public int TimeoutSeconds { get; set; } = 120;
+
+    /// <summary>启动命令；为空表示由用户自己先启动服务。</summary>
+    public string LaunchCommand { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// CosyVoice 2 / 3 对接配置（对接官方 runtime/python/fastapi/server.py，默认端口 50000）。
+///
+/// 服务端返回的是**裸 PCM**（无 WAV 头），所以 <see cref="SampleRate"/> 必须与模型匹配：
+/// CosyVoice2 / CosyVoice3 是 24000，CosyVoice 1 是 22050。
+/// </summary>
+public sealed class CosyVoiceConfig
+{
+    public string Host { get; set; } = "127.0.0.1";
+
+    public int Port { get; set; } = 50000;
+
+    /// <summary>推理模式：sft / zero_shot / cross_lingual / instruct / instruct2。</summary>
+    public string Mode { get; set; } = "zero_shot";
+
+    /// <summary>SFT 预训练音色的说话人 id（sft / instruct 模式使用）。</summary>
+    public string SpkId { get; set; } = string.Empty;
+
+    /// <summary>零样本模式的参考音频原文。</summary>
+    public string PromptText { get; set; } = string.Empty;
+
+    /// <summary>参考音频路径（zero_shot / cross_lingual / instruct2 使用）。</summary>
+    public string PromptWav { get; set; } = string.Empty;
+
+    /// <summary>指令文本（instruct / instruct2 使用），如"用四川话说这句话"。</summary>
+    public string InstructText { get; set; } = string.Empty;
+
+    /// <summary>
+    /// CosyVoice3 必须的指令前缀。CosyVoice3 的 LLM 会硬断言输入里含 <c>&lt;|endofprompt|&gt;</c>，
+    /// 官方示例把它和"翻译成什么"写在一起，如 <c>"You are a helpful assistant.&lt;|endofprompt|&gt;"</c>。
+    /// 填了它，引擎会在 zero_shot 的 prompt_text、cross_lingual 的正文前自动补上；
+    /// 留空则原样发送（CosyVoice1/2 不需要）。instruct / instruct2 的 instruct_text 仍然原样发送，
+    /// 因为标记要放在指令**末尾**。
+    /// </summary>
+    public string PromptPrefix { get; set; } = string.Empty;
+
+    /// <summary>返回 PCM 的采样率。CosyVoice2/3 = 24000，CosyVoice1 = 22050。</summary>
+    public int SampleRate { get; set; } = 24000;
+
+    public int TimeoutSeconds { get; set; } = 120;
+
+    /// <summary>启动命令；为空表示由用户自己先启动服务。</summary>
+    public string LaunchCommand { get; set; } = string.Empty;
 }
 
 public sealed class AsrConfig

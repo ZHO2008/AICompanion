@@ -26,6 +26,8 @@
 | `TTSManager` + `ITTSEngine` | ✅ 完成 | 三级音色兜底、降级、软重启、托盘重置 |
 | `PiperEngine` | ⚠️ 部分 | 进程外 `piper.exe` 可用；C API 的 P/Invoke 待库编译后补齐 |
 | `ChatterboxEngine` | ✅ 完成 | HTTP 合成、`/health` 可用性、软重启 |
+| `GptSoVitsEngine` | ✅ 完成 | HTTP 合成、`/set_*_weights` 切训练模型、零样本；真实服务 30/30 |
+| `CosyVoiceEngine` | ✅ 完成 | 5 种推理模式、裸 PCM→WAV、CosyVoice3 的 `<|endofprompt|>` 前缀；真实服务 36/36 |
 | `ASRManager` | ✅ 完成 | 高优先级音频线程、VAD 分段、Faulted 状态机 |
 | `WhisperCppRecognizer` | ✅ 完成 | 经 `ai_asr.dll` 桥接层调用 whisper.cpp（真实编译 + 真实推理验证，模型加载 279ms） |
 | WebRTC VAD | ✅ 完成 | libfvad 真实构建为 `bin\libfvad.dll`；真实中文语音检出 78%，激进度单调性已验；修复了会让语音输入静默失效的 `fvad_reset` 缺陷 |
@@ -364,6 +366,16 @@ E:\DEEPSEEK
    （RTX 3060 12GB）上以正式 7B 模型验证。本轮开发机为 RTX 5060 Laptop 8GB，
    且 GPU 推理是部分卸载（ngl=10/28，受实时空闲显存限制）。
 
+6. **CosyVoice 的 CPU 合成很慢，且依赖上游服务的一个本地补丁**
+   CosyVoice3 在 Windows 原生**可以**跑（Python 3.10，依赖里已经没有 `pynini`，
+   换成了纯 Python 的 `wetext`），本机实测通过。但有两件事得说清楚：
+   - **速度**：CPU 上 5.8 秒音频要 38.9 秒（RTF 7.2）；GPU 需要 cu128 轮子（本机 torch 是 CPU 版）。
+     日常用建议只把它当"高质量兜底"，主用 GPT-SoVITS（2.0 秒出 4.0 秒音频）。
+   - **上游 bug**：官方 `runtime/python/fastapi/server.py` 把上传的 wav 先读成 tensor 再传给
+     `inference_*`，而 `frontend.load_wav` 只接受路径，必然抛
+     `TypeError: Invalid file: tensor([...])`。本机副本已就地改成"上传落地成临时文件再传路径"，
+     重新 clone 上游后需要照 VERIFICATION §27.4 重打补丁。
+
 
 ---
 
@@ -388,6 +400,38 @@ E:\DEEPSEEK
 >
 > `ui.scale` 为 `0` 表示按屏幕自动适配（默认）；设为 `0.5`–`2.5` 则是固定倍率。
 > 用户在界面上调过的值存在 `Assets/appearance.json`，优先级高于本文件。
+
+### 语音合成：GPT-SoVITS / CosyVoice
+
+`tts.engine` 现在接受四个值：`piper`（默认，本地 CPU）、`chatterbox`、`gpt_sovits`、`cosyvoice`。
+后两者是**外部 HTTP 服务**——程序只当客户端，服务没起就按手册降级到 Piper 并弹气泡说明，
+不会静默换引擎。
+
+| 引擎 | 配置节 | 前置条件 |
+| --- | --- | --- |
+| GPT-SoVITS | `tts.gpt_sovits` | 整合包里的 `runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880` |
+| CosyVoice | `tts.cosyvoice` | `tools\start-cosyvoice.ps1`（Windows 原生，Python 3.10） |
+
+GPT-SoVITS 支持三种用法，可自由组合：
+
+- **训练好的模型**：填 `gpt_weights_path`（`*.ckpt`）与 `sovits_weights_path`（`*.pth`），
+  引擎启动时会调 `/set_gpt_weights`、`/set_sovits_weights` 切过去；
+- **零样本**：只填 `ref_audio_path` + `prompt_text`（3~10 秒干净人声，文字必须与音频一致）；
+- **两者叠加**：训练模型 + 指定参考音频，音色最可控。
+
+CosyVoice 用 `mode` 选择推理方式：`sft`（内置说话人 `spk_id`）、`zero_shot`（`prompt_text` + `prompt_wav`）、
+`cross_lingual`、`instruct`、`instruct2`。**它的服务返回裸 PCM**（16 bit 单声道、无 WAV 头），
+所以 `sample_rate` 必须填对：CosyVoice2/3 是 `24000`，CosyVoice1 是 `22050`。
+
+两个引擎都允许在角色音色里逐角色覆盖：`VoiceId` → 说话人，`ReferenceAudioPath` → 参考音频，
+`PromptText` / `InstructText` → 对应文本。改完 `tts.engine` 需要重启程序生效。
+
+> **CosyVoice3 必须配 `prompt_prefix`。** 它的 LLM 会硬断言输入里含 `<|endofprompt|>`，
+> 官方写法是 `"You are a helpful assistant.<|endofprompt|>"`，填在 `tts.cosyvoice.prompt_prefix` 里，
+> 引擎会自动补到 zero_shot 的 `prompt_text` 和 cross_lingual 的正文前。
+> 不填的话服务端会"合成成功但只有一两个 token"，表现为音频极短甚至报
+> `Kernel size can't be greater than actual input size` —— 这个坑踩过，记在这里。
+> CosyVoice 1/2 不需要这个前缀，留空即可。
 
 ### 语音输入：按住说话（默认）
 

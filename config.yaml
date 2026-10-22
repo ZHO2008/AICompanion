@@ -32,6 +32,41 @@ tts:
     # 手册未规定 chatterbox-api 的路由，做成配置项以便按部署版本调整。
     synthesize_path: "/synthesize"
     restart_path: "/restart"
+  # GPT-SoVITS：对接整合包里的 api_v2.py（默认 9880）。
+  # 训练好的模型 = gpt_weights_path(*.ckpt) + sovits_weights_path(*.pth)；
+  # 不填权重则用服务端当前模型做零样本，此时 ref_audio_path + prompt_text 必填。
+  gpt_sovits:
+    host: "127.0.0.1"
+    port: 9880
+    tts_path: "/tts"
+    gpt_weights_path: ""
+    sovits_weights_path: ""
+    ref_audio_path: "models/tts/ref_zh.wav"
+    prompt_text: "今天天气不错，我们一起去公园散步吧。"
+    prompt_lang: "zh"
+    text_lang: "zh"
+    text_split_method: "cut5"
+    speed_factor: 1.0
+    top_k: 15
+    top_p: 1.0
+    temperature: 1.0
+    timeout_seconds: 120
+    launch_command: ""
+  # CosyVoice 2/3：对接官方 runtime/python/fastapi/server.py（默认 50000）。
+  # 服务返回裸 PCM，sample_rate 必须与模型一致：CosyVoice2/3 = 24000，CosyVoice1 = 22050。
+  cosyvoice:
+    host: "127.0.0.1"
+    port: 50000
+    mode: "zero_shot"
+    spk_id: ""
+    prompt_text: "今天天气不错，我们一起去公园散步吧。"
+    prompt_wav: "models/tts/ref_zh.wav"
+    instruct_text: ""
+    # CosyVoice3 必须：LLM 硬断言输入含 <|endofprompt|>，官方把它放在指令前。
+    prompt_prefix: "You are a helpful assistant.<|endofprompt|>"
+    sample_rate: 24000
+    timeout_seconds: 120
+    launch_command: ""
   piper:
     model_path: "models/piper/zh_CN/model.onnx"
     library_path: "third_party/piper/build/piper.dll"

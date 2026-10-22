@@ -17,7 +17,7 @@ namespace AICompanion.Core.Tts;
 ///   - 之后由 HealthMonitor 的探活结果与软重启流程负责更新缓存。
 /// 绝不在属性 getter 里做阻塞式网络调用 —— 那正是准则 1 明令禁止的行为。
 /// </summary>
-public sealed class ChatterboxEngine : ITTSEngine
+public sealed class ChatterboxEngine : IHttpTtsEngine
 {
     private readonly AppConfig _config;
     private readonly IAppLogger _logger;
@@ -43,6 +43,8 @@ public sealed class ChatterboxEngine : ITTSEngine
     public TimeSpan Uptime => DateTime.UtcNow - _startedUtc;
 
     public string BaseUrl => _baseUrl;
+
+    public int Port => _config.Tts.Chatterbox.Port;
 
     private static HttpClient CreateClient()
     {
