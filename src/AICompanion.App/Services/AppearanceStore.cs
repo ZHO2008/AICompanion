@@ -48,6 +48,12 @@ public static class AppearanceStore
         /// </summary>
         public double? HorizontalOffset { get; set; }
 
+        /// <summary>
+        /// 用户在设置面板选的 TTS 引擎；null 表示跟随 config.yaml 的 tts.engine。
+        /// 存这里而不是回写 config.yaml，是为了守住准则 9（程序绝不改用户配置）。
+        /// </summary>
+        public string? TtsEngine { get; set; }
+
         public DateTime SavedAt { get; set; }
     }
 
@@ -81,7 +87,8 @@ public static class AppearanceStore
                 model.Scale is null &&
                 model.BubbleSeconds is null &&
                 model.TransparentOpacity is null &&
-                model.HorizontalOffset is null)
+                model.HorizontalOffset is null &&
+                string.IsNullOrWhiteSpace(model.TtsEngine))
             {
                 if (File.Exists(path))
                 {
@@ -179,6 +186,21 @@ public static class AppearanceStore
 
         // 0 视为"没设"，这样删掉文件与滑块归零是同一个效果
         model.HorizontalOffset = offset is null || Math.Abs(offset.Value) < 0.0005 ? null : offset;
+        return SaveModel(model);
+    }
+
+    /// <summary>读取用户选的 TTS 引擎；没有覆盖时返回 null（跟随 config.yaml）。</summary>
+    public static string? LoadTtsEngine()
+    {
+        var engine = LoadModel().TtsEngine;
+        return string.IsNullOrWhiteSpace(engine) ? null : engine.Trim().ToLowerInvariant();
+    }
+
+    /// <summary>保存用户选的 TTS 引擎；传 null 或空表示清除覆盖。</summary>
+    public static bool SaveTtsEngine(string? engine)
+    {
+        var model = LoadModel();
+        model.TtsEngine = string.IsNullOrWhiteSpace(engine) ? null : engine.Trim().ToLowerInvariant();
         return SaveModel(model);
     }
 }

@@ -36,6 +36,23 @@ public static class TTSEngineFactory
     /// <summary>CosyVoice 2 / 3（官方 FastAPI server.py，默认 50000）。</summary>
     public const string CosyVoice = "cosyvoice";
 
+    /// <summary>
+    /// 设置面板下拉框里可选的引擎。<c>sapi</c> 不在此列：它是内部兜底，
+    /// 让用户主动选"系统语音"没有意义，反而容易误以为程序不该降级。
+    /// </summary>
+    public static readonly string[] UserSelectable = [Piper, Chatterbox, GptSoVits, CosyVoice];
+
+    /// <summary>引擎在界面上的显示名（带一句定位说明，方便用户判断要不要起服务）。</summary>
+    public static string DisplayName(string engineType) => engineType switch
+    {
+        Piper => "Piper（本地 CPU）",
+        Chatterbox => "Chatterbox（HTTP）",
+        GptSoVits => "GPT-SoVITS（HTTP 9880）",
+        CosyVoice => "CosyVoice 2/3（HTTP 50000）",
+        Sapi => "Windows 内置语音（兜底）",
+        _ => engineType,
+    };
+
     public static ITTSEngine Create(string engineType, TtsEngineContext context)
     {
         if (string.Equals(engineType, Chatterbox, StringComparison.OrdinalIgnoreCase))

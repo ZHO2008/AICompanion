@@ -22,13 +22,30 @@
     powershell -ExecutionPolicy Bypass -File tools\start-cosyvoice.ps1
 #>
 param(
-    [string]$Python = 'E:\py310\python.exe',
+    [string]$Python = '',
     [string]$Repo = 'E:\cosyvoice',
     [string]$ModelDir = 'E:\cosyvoice\pretrained_models\Fun-CosyVoice3-0.5B',
     [int]$Port = 50000
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 没显式指定 Python 时自动挑：优先带 CUDA 的 venv（快 10 倍以上），否则用 CPU 的 py310。
+if ([string]::IsNullOrWhiteSpace($Python)) {
+    $gpuVenv = Join-Path $Repo '.venv-gpu\Scripts\python.exe'
+    if (Test-Path $gpuVenv) {
+        $device = & $gpuVenv -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>$null
+        if ($device -eq 'cuda') {
+            $Python = $gpuVenv
+            Write-Host "[提示] 使用带 CUDA 的 venv：$gpuVenv" -ForegroundColor DarkGray
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Python)) {
+        $Python = 'E:\py310\python.exe'
+        Write-Host "[提示] 未找到可用的 CUDA venv，回退 CPU 版：$Python" -ForegroundColor DarkGray
+    }
+}
 
 $server = Join-Path $Repo 'runtime\python\fastapi\server.py'
 if (-not (Test-Path $server)) {

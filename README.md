@@ -424,7 +424,11 @@ CosyVoice 用 `mode` 选择推理方式：`sft`（内置说话人 `spk_id`）、
 所以 `sample_rate` 必须填对：CosyVoice2/3 是 `24000`，CosyVoice1 是 `22050`。
 
 两个引擎都允许在角色音色里逐角色覆盖：`VoiceId` → 说话人，`ReferenceAudioPath` → 参考音频，
-`PromptText` / `InstructText` → 对应文本。改完 `tts.engine` 需要重启程序生效。
+`PromptText` / `InstructText` → 对应文本。
+
+> **不用改文件也能换引擎**：设置面板 →「语音」→「合成引擎」下拉框，选中即重建引擎并生效。
+> 选择存在 `Assets\appearance.json`（优先级高于 `config.yaml`，且**不会**改动 `config.yaml`，准则 9），
+> 删掉该键或用回配置里的值即可恢复。`config.yaml` 仍然决定各引擎的权重、参考音频等细项。
 
 > **CosyVoice3 必须配 `prompt_prefix`。** 它的 LLM 会硬断言输入里含 `<|endofprompt|>`，
 > 官方写法是 `"You are a helpful assistant.<|endofprompt|>"`，填在 `tts.cosyvoice.prompt_prefix` 里，

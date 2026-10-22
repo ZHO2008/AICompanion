@@ -2331,10 +2331,34 @@ CPU 慢是硬伤：GPU 要 cu128 轮子（本机 torch 是 CPU 版，RTX 5060 �
 启动服务用 `tools\start-cosyvoice.ps1`（默认指向 `E:\py310` 与
 `E:\cosyvoice\pretrained_models\Fun-CosyVoice3-0.5B`，端口被占时会提示而不是再起一个）。
 
-### 27.5 仍未闭合
+**坑三：wetext 的 FST 要联网拉。** 前端初始化时会 `snapshot_download("pengzhendong/wetext")`，
+本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），于是 `text_frontend` 退化成空字符串——
+数字不念出来，比如"我有 3 个苹果"会读成"我有三个苹果"之外的怪结果。
+修法是把 FST 直接落到本地（`en/tn`、`zh/tn` 各约 0.5–6 MB，PathScope 能正常下），
+再让 `frontend.py` 优先读本地目录（`WETEXT_DIR` 或 `<repo>/pretrained_models/wetext`），
+找不到才回退上游行为。验证：
 
-- 两个引擎都还没接进设置面板的下拉框，只能改 `config.yaml` 后重启。
-- CosyVoice 的 GPU 推理没验证（需要 `torch 2.7+cu128`，与上游 pin 的 2.3.1 冲突，没动）。
-- `wetext` 的规范化模型要联网从 ModelScope 拉，本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），
-  前端因此降级为"不做文本规范化"。纯中文短句不受影响，数字/英文缩写需要先手工改写。
+    输入：我有3个苹果，电话是13800138000。
+    输出：我有三个苹果，电话是幺三八零零幺三八零零零。
+    输入：价格是12.5元。  →  价格是十二点五元。
+
+服务日志里现在会打印 `use wetext frontend`。
+
+### 27.5 设置面板可以直接切引擎
+
+原来"语音"页只有一行只读的"配置引擎"，换引擎得去改 `config.yaml` 再重启。
+现在加了下拉框（Piper / Chatterbox / GPT-SoVITS / CosyVoice），选中即生效：
+
+- 选择结果写 **`Assets\appearance.json`** 的 `ttsEngine`，**不写 config.yaml**（准则 9）；
+- 切换时立即 `TTSManager.ResetAsync()` 重建引擎，并在气泡里提示"已切换为 X"；
+- 启动时 `AppHost.ApplyTtsEnginePreference()` 用这个偏好覆盖配置值（只在内存里改），
+  优先级：`appearance.json` > `config.yaml`；值非法时记一条 WRN 并按配置运行；
+- 下拉框右侧有小字提示该引擎要不要先起服务（GPT-SoVITS 9880 / CosyVoice 50000），
+  服务没起时按原设计降级到 Piper 并弹气泡，不会静默换引擎。
+
+### 27.6 仍未闭合
+
+- CosyVoice 的 GPU 推理没验证（需要 `torch 2.7+cu128`；上游 pin 的是 2.3.1）；
+  CPU 上 RTF 7.2，够用但偏慢。
 - GPT-SoVITS 的 `/control` 接口未使用，软重启只重建本地连接池。
+- 下拉框只覆盖四个引擎标识，各自的细项（权重路径、参考音频、指令文本）仍然要改 `config.yaml`。

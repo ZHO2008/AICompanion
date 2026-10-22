@@ -208,6 +208,8 @@ public sealed class AppHost : IAsyncDisposable
         }
 
         // ---------- 3. 核心组件（构造顺序按依赖关系） ----------
+        ApplyTtsEnginePreference();
+
         NvidiaSmi = new NvidiaSmi(Logger);
         RuntimeMode = new RuntimeModeState();
 
@@ -364,6 +366,37 @@ public sealed class AppHost : IAsyncDisposable
             $"知识库 {Knowledge.Count} 条，启动问题 {_startupProblems.Count} 项。");
 
         IsStarted = true;
+    }
+
+    /// <summary>
+    /// 设置面板选的引擎存在 Assets\appearance.json，优先级高于 config.yaml 的 tts.engine。
+    /// 只改内存里的配置对象，不回写文件（准则 9）。
+    /// </summary>
+    private void ApplyTtsEnginePreference()
+    {
+        var preferred = AppearanceStore.LoadTtsEngine();
+        if (preferred is null)
+        {
+            return;
+        }
+
+        if (Array.IndexOf(Core.Tts.TTSEngineFactory.UserSelectable, preferred) < 0)
+        {
+            Logger.Warn(
+                $"Assets\\appearance.json 里的 ttsEngine \"{preferred}\" 无法识别，忽略该偏好，" +
+                $"按 config.yaml 的 {Config.Tts.Engine} 运行。");
+            return;
+        }
+
+        if (string.Equals(preferred, Config.Tts.Engine, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        Logger.Info(
+            $"按界面偏好把 TTS 引擎由 config.yaml 的 \"{Config.Tts.Engine}\" 覆盖为 \"{preferred}\"" +
+            "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+        Config.Tts.Engine = preferred;
     }
 
     /// <summary>HealthMonitor 在休眠唤醒后用它尝试重启一次失败的服务。</summary>

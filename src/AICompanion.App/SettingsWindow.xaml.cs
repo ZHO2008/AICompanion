@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 using AICompanion.App.Services;
 using AICompanion.Core.Abstractions;
@@ -27,6 +28,9 @@ public partial class SettingsWindow : Window
 
     /// <summary>初始化滑块期间不响应 ValueChanged，避免把默认值当成用户修改。</summary>
     private bool _appearanceInitialized;
+
+    /// <summary>初始化引擎下拉框期间不响应 SelectionChanged。</summary>
+    private bool _ttsEngineInitialized;
 
     public SettingsWindow(AppHost host, BubbleNotifier bubbles, Action? onAppearanceChanged = null)
     {
@@ -58,6 +62,103 @@ public partial class SettingsWindow : Window
         Closed += (_, _) => _refreshTimer.Stop();
 
         LoadAppearanceTab();
+        LoadTtsEngineTab();
+    }
+
+    // ------------------------------------------------------------------ 语音引擎选择
+
+    private void LoadTtsEngineTab()
+    {
+        if (TtsEngineCombo is null)
+        {
+            return;
+        }
+
+        _ttsEngineInitialized = false;
+        TtsEngineCombo.Items.Clear();
+
+        var current = AppearanceStore.LoadTtsEngine() ?? _host.Config.Tts.Engine;
+
+        foreach (var engine in Core.Tts.TTSEngineFactory.UserSelectable)
+        {
+            var item = new ComboBoxItem
+            {
+                Content = Core.Tts.TTSEngineFactory.DisplayName(engine),
+                Tag = engine,
+            };
+
+            TtsEngineCombo.Items.Add(item);
+
+            if (string.Equals(engine, current, StringComparison.OrdinalIgnoreCase))
+            {
+                TtsEngineCombo.SelectedItem = item;
+            }
+        }
+
+        if (TtsEngineCombo.SelectedItem is null && TtsEngineCombo.Items.Count > 0)
+        {
+            TtsEngineCombo.SelectedIndex = 0;
+        }
+
+        _ttsEngineInitialized = true;
+        UpdateEngineHint();
+    }
+
+    private void UpdateEngineHint()
+    {
+        if (TtsEngineHintText is null || TtsEngineCombo?.SelectedItem is not ComboBoxItem item)
+        {
+            return;
+        }
+
+        TtsEngineHintText.Text = item.Tag switch
+        {
+            Core.Tts.TTSEngineFactory.Piper => "本地 CPU，无需外部服务",
+            Core.Tts.TTSEngineFactory.GptSoVits => "需先起 api_v2.py（9880）",
+            Core.Tts.TTSEngineFactory.CosyVoice => "需先起 server.py（50000）",
+            Core.Tts.TTSEngineFactory.Chatterbox => "需先起 HTTP 服务",
+            _ => string.Empty,
+        };
+    }
+
+    private async void OnTtsEngineChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_ttsEngineInitialized)
+        {
+            return;
+        }
+
+        if (TtsEngineCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string engine)
+        {
+            return;
+        }
+
+        UpdateEngineHint();
+
+        try
+        {
+            // 存界面偏好而不是回写 config.yaml（准则 9）。启动时 AppHost 会用它覆盖配置值。
+            var saved = AppearanceStore.SaveTtsEngine(engine);
+            _host.Config.Tts.Engine = engine;
+
+            _host.Logger.Info(
+                $"用户在设置面板选择 TTS 引擎：{engine}" +
+                (saved ? "（已写入 Assets\\appearance.json，config.yaml 未改动）" : "（写入偏好失败，仅本次运行生效）"));
+
+            await _host.Tts.ResetAsync();
+
+            _bubbles.Show(
+                "tts-engine-changed",
+                $"语音引擎已切换为 {Core.Tts.TTSEngineFactory.DisplayName(engine)}。",
+                BubbleLevel.Info,
+                TimeSpan.FromSeconds(_host.Config.Ui.BubbleDurationSeconds));
+
+            RefreshVoiceTab();
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Error($"切换语音引擎失败：{ex.Message}", ex);
+        }
     }
 
     // ------------------------------------------------------------------ 外观页
@@ -298,7 +399,9 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        TtsEngineText.Text = $"配置引擎：{_host.Tts.ConfiguredEngine}";
+        TtsEngineText.Text = AppearanceStore.LoadTtsEngine() is null
+            ? $"配置引擎：{_host.Tts.ConfiguredEngine}（来源 config.yaml）"
+            : $"配置引擎：{_host.Tts.ConfiguredEngine}（来源 Assets\\appearance.json，优先级高于 config.yaml）";
         TtsVoiceText.Text = _host.Tts.IsDegraded
             ? $"当前实际引擎：{_host.Tts.CurrentEngineName}（降级）"
             : $"当前实际引擎：{_host.Tts.CurrentEngineName}";

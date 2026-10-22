@@ -88,6 +88,17 @@
             <StackPanel Margin="10">
                 <TextBlock Style="{StaticResource SectionTitle}" Text="语音合成（TTS）" />
                 <TextBlock x:Name="TtsEngineText" />
+                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                    <TextBlock Text="合成引擎：" VerticalAlignment="Center" />
+                    <ComboBox x:Name="TtsEngineCombo"
+                              Width="210"
+                              Margin="8,0,0,0"
+                              SelectionChanged="OnTtsEngineChanged" />
+                    <TextBlock x:Name="TtsEngineHintText"
+                               VerticalAlignment="Center"
+                               Margin="10,0,0,0"
+                               Foreground="#FF9AA0A6" />
+                </StackPanel>
                 <TextBlock x:Name="TtsVoiceText" />
                 <TextBlock x:Name="TtsPiperText" />
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
