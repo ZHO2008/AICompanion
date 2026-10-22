@@ -2400,7 +2400,8 @@ dtype 和算子，能吃它的只有 TensorRT 10.x 的 FP4 engine 或 torchao �
 - 边打游戏边合成同样会劣化（游戏占显存，驱动回退共享内存）：实测 9–24 秒，游戏退出即恢复。
 - `NVIDIA Overlay`（NVIDIA App 浮层）自己占约 1.25 GB 共享显存，关掉能多让出 1 GB。
 - 结论：**8 GB 显卡 + 16 GB 内存的机器，同一时间只该跑一个 TTS 服务**。没在跑的那个引擎由
-  App 自动降级到 Piper，不影响出声。
+  App 自动降级到 Piper，不影响出声。`tools\start-cosyvoice.ps1` 启动时若发现 9880 在监听，
+  会直接打出这条提醒和结束命令。
 
 #### 语音 tokenizer 上 GPU（onnxruntime-gpu）
 

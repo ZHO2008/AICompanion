@@ -75,6 +75,16 @@ if ($busy) {
 Write-Host "启动 CosyVoice：" -ForegroundColor Cyan
 Write-Host "  Python   $Python"
 Write-Host "  源码     $Repo"
+
+# 两个模型服务各占约 8.5 GB 提交内存（CUDA 上下文的固有开销），16 GB 机器同开会把
+# 页面文件逼近上限，任务管理器显示 90% 以上，合成也会从 5 秒劣化到 12-30 秒。
+$other = Get-NetTCPConnection -LocalPort 9880 -State Listen -ErrorAction SilentlyContinue
+if ($other) {
+    Write-Host ""
+    Write-Host "[注意] GPT-SoVITS 正在跑（9880）。两个模型服务各占约 8.5 GB 提交内存，" -ForegroundColor Yellow
+    Write-Host "       16 GB 内存的机器会吃紧（实测内存 90%+、合成 12-30 秒）。" -ForegroundColor Yellow
+    Write-Host "       建议只留一个：Stop-Process -Id $($other[0].OwningProcess) -Force" -ForegroundColor Yellow
+}
 Write-Host "  模型     $ModelDir"
 Write-Host "  端口     $Port"
 Write-Host ""
