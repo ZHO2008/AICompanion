@@ -2282,7 +2282,7 @@ GPT-SoVITS 整合包（`E:\GPT-SoVITS\...v2pro`）与 CosyVoice 3。二者都是
 | 输出 | WAV 32 kHz、4.04–4.80 秒、253–307 KB（每句不同） |
 | 单句耗时 | 2.0–3.7 秒（首次含 CUDA 预热为 44 秒） |
 | 连续合成 | 第二次、第三次均成功 |
-| 探针结果 | 40 通过 / 0 失败（两个引擎合计） |
+| 探针结果 | 46 通过 / 0 失败（引擎 + 管理器合计） |
 
 ### 27.4 CosyVoice：Windows 原生跑通，但踩了两个坑
 
@@ -2363,7 +2363,7 @@ GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
 - 每个进程**第一次**推理要多花约 20 秒（CUDA kernel 预热），之后才是 5 秒；
 - 服务端装的 onnxruntime 是 CPU 版，语音 tokenizer 仍在 CPU 上跑（`frontend_zero_shot` 约占
   5 秒里的 1 秒）；换 `onnxruntime-gpu` 还能再快一点，但收益不大，没动；
-- 与 GPT-SoVITS 同时开：显存合计 6.6 / 8.1 GB，两个服务都正常，探针仍是 40/40。
+- 与 GPT-SoVITS 同时开：显存合计 6.6 / 8.1 GB，两个服务都正常，探针仍是 46/46。
 
 **坑三：wetext 的 FST 要联网拉。** 前端初始化时会 `snapshot_download("pengzhendong/wetext")`，
 本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），于是 `text_frontend` 退化成空字符串——
@@ -2402,7 +2402,23 @@ GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
 探针第 6 项专门验证这条：指令写"用四川话说这句话"（不带标记），
 得到 9.04 秒音频而不是"1 个 token 的假成功"。产物见 `artifacts\tts\cosyvoice_instruct2.wav`。
 
-### 27.7 仍未闭合
+### 27.7 管理器级集成（不只是引擎）
+
+前几项都直接调引擎，绕过了 `TTSManager`。但 App 里走的是管理器：它要读配置选引擎、
+探活、失败时按三级降级、把异常吸收成失败结果并弹气泡。所以补了第 7 项：
+
+    [INF] 按配置创建 TTS 引擎：gpt_sovits
+    [INF] gpt_sovits 服务就绪：http://127.0.0.1:9880
+    [INF] TTS 初始化完成：配置引擎=gpt_sovits，实际引擎=gpt_sovits，降级=False。
+    [OK]  初始化后按配置选中 gpt_sovits
+    [OK]  未降级到 Piper
+    [OK]  ActiveHttpEngine 暴露端口 9880
+    [OK]  SynthesizeAsync 成功（无错误）  ← 1.6 秒，322 604 字节 WAV
+    [OK]  空文本被管理器拦下（不抛异常）
+
+这一项确认了"设置面板切到 GPT-SoVITS 后，管理器确实把请求交给了它，而不是悄悄用 Piper"。
+
+### 27.8 仍未闭合
 
 - CosyVoice 的 fp16 没默认启用（实测收益在噪声级别），TRT / vLLM 加速没试；
   onnxruntime 仍是 CPU 版，语音 tokenizer 那 1 秒还没挪到 GPU。

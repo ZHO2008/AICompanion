@@ -49,6 +49,7 @@ internal static class Program
         await TestGptSoVitsRealAsync(config, logger, root).ConfigureAwait(false);
         await TestCosyVoiceRealAsync(config, logger, root).ConfigureAwait(false);
         await TestCosyVoiceInstructAsync(config, logger, root).ConfigureAwait(false);
+        await TestManagerIntegrationAsync(config, logger).ConfigureAwait(false);
 
         Console.WriteLine();
         Console.WriteLine($"=== 结果：通过 {_passed}，失败 {_failed} ===");
@@ -383,6 +384,42 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// 7. 管理器级集成：App 实际走的是 TTSManager（探活 → 降级链 → 合成 → 结果包装），
+    /// 前面几项只测到引擎层，这里补上"管理器有没有把请求正确转给新引擎"。
+    /// </summary>
+    private static async Task TestManagerIntegrationAsync(AppConfig config, IAppLogger logger)
+    {
+        Console.WriteLine();
+        Console.WriteLine("-- 7. TTSManager 集成（GPT-SoVITS） --");
+
+        var savedEngine = config.Tts.Engine;
+        config.Tts.Engine = "gpt_sovits";
+
+        var bubble = new RecordingBubble();
+        using var manager = new TTSManager(config, logger, bubble);
+
+        await manager.InitializeAsync().ConfigureAwait(false);
+        Check($"初始化后按配置选中 gpt_sovits（实际 {manager.CurrentEngineName}）",
+            manager.CurrentEngineName == "gpt_sovits");
+        Check("未降级到 Piper", !manager.IsDegraded);
+        Check("ActiveHttpEngine 暴露端口 9880", manager.ActiveHttpEngine?.Port == 9880);
+
+        var sw = Stopwatch.StartNew();
+        var result = await manager.SynthesizeAsync("这句话来自管理器，不是直接调用引擎。").ConfigureAwait(false);
+        sw.Stop();
+
+        Check($"SynthesizeAsync 成功（{result.Error ?? "无错误"}）", result.Success);
+        Check("返回的音频是 WAV", result.Audio is { Length: > 44 } && result.Audio[0] == (byte)'R');
+        Console.WriteLine($"  管理器合成耗时 {sw.Elapsed.TotalSeconds:N1} 秒，{result.Audio?.Length ?? 0} 字节");
+
+        var empty = await manager.SynthesizeAsync("   ").ConfigureAwait(false);
+        Check("空文本被管理器拦下（不抛异常）", !empty.Success);
+
+        manager.Dispose();
+        config.Tts.Engine = savedEngine;
+    }
+
     private static byte[] BuildSinePcm(int sampleRate, double seconds)
     {
         var samples = (int)(sampleRate * seconds);
@@ -586,4 +623,30 @@ internal sealed class ConsoleLogger : IAppLogger
 
     private static void Write(string level, string message) =>
         Console.WriteLine($"    [{level}] {message}");
+}
+
+/// <summary>探针用的气泡实现：只记录，不弹任何 UI。</summary>
+internal sealed class RecordingBubble : IBubbleNotifier
+{
+    public List<string> Messages { get; } = new();
+
+    public void Show(string key, string message, BubbleLevel level = BubbleLevel.Info, TimeSpan? duration = null)
+    {
+        Messages.Add($"{level}:{key}:{message}");
+        Console.WriteLine($"    [气泡/{level}] {message}");
+    }
+
+    public void Clear(string key)
+    {
+    }
+
+    public void ClearAll()
+    {
+    }
+
+    public void SetStatus(string key, string value) => Console.WriteLine($"    [状态] {key} = {value}");
+
+    public void ClearStatus(string key)
+    {
+    }
 }
