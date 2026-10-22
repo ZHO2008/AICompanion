@@ -2625,5 +2625,45 @@ ONNX 里 `FLOAT4E2M1` 权重 + 每 16 元素一个 fp32 块缩放 → `Dequantiz
 - 这台 8 GB 显存 / 16 GB 内存的机器上，真正有效的优化是把 fp16 用对（已做：RTF 1.30→1.00）、
   只跑一个服务、开启动预热 —— 不是换数据类型。
 
+### 27.11 FP8 实测（清掉 FP4 环境后）
+
+fp4 研究环境（`.venv-fp4` 7.7 GB + 下载的轮子 2.7 GB）已删除，回到只有
+`torch 2.7.1+cu128 + onnxruntime 1.18(CPU)` 的最小环境，再试 FP8。
+
+**一、微基准（`torch._scaled_mm`，fp16 对照）**
+
+| 形状 | fp16 | fp8（tensorwise） | 倍数 |
+| --- | --- | --- | --- |
+| 4096×4096×4096 | 5.25 ms | 2.88 ms | **1.82×** |
+| M=512 FFN 上行 (896→4864) | 0.159 ms | 0.087 ms | **1.83×** |
+| M=1 FFN 上行 | 0.031 ms | 0.024 ms | 1.3× |
+| M=1 FFN 下行 | 0.026 ms | 0.032 ms | 0.8×（更慢） |
+| M=1 attn 投影 | 0.018 ms | 0.019 ms | 持平 |
+
+- **per-row（逐 token）缩放不可用**：`RuntimeError: Per-row scaling is not supported for this platform!`
+  —— sm_120 上这个 torch 构建只支持 per-tensor（标量）缩放。
+- 这很关键：LLM 量化必须逐 token 缩放才不掉精度，per-tensor 对 outlier 无能为力。
+
+**二、端到端（真模型）**
+
+- 同进程、fp16 基线：**2.79 秒合成 1.88 秒音频**（单句、非服务态）。
+- 把 LLM 里 **169 个 Linear** 全换成 per-tensor FP8 的 `_scaled_mm` 后：
+  `RuntimeError: CUDA error: device-side assert triggered` —— 量化噪声直接把自回归采样打崩。
+- 分阶段耗时（同一句、fp16）：
+
+  | 阶段 | 耗时 | 占比 |
+  | --- | --- | --- |
+  | LLM + 前端 | ≈2.5 s | **80%** |
+  | flow（扩散解码） | 0.52 s | 17% |
+  | hift（声码器） | 0.11 s | 4% |
+  | 合计 | 3.13 s | — |
+
+**结论**：FP8 的 1.8× 只在 **M≥512**（prefill 那一小段）成立；而 80% 的时间花在
+**batch=1 的自回归解码**上，这一档 FP8 持平或更慢，加上 sm_120 只给 per-tensor 缩放、
+精度撑不住 LLM。所以 FP8 在 CosyVoice 上同样不可用 —— **保持 fp16** 是这台机器的最优解。
+
+脚本：`E:\cosyvoice-src\bench_fp8_torch.py`（微基准）、`cosy_fp8.py`（端到端尝试）、
+`cosy_profile_stages.py`（分阶段）。
+
 脚本留在 `E:\cosyvoice-src\`（`trt_prec3.py` 三方对比、`trt_fp4_bench4.py` FP4 单测、
 `bench_nvfp4.py` torchao 版），`.venv-fp4` 只是研究环境，**不进安装包**。
