@@ -48,6 +48,7 @@ internal static class Program
         await TestCosyVoiceStubAsync(config, logger).ConfigureAwait(false);
         await TestGptSoVitsRealAsync(config, logger, root).ConfigureAwait(false);
         await TestCosyVoiceRealAsync(config, logger, root).ConfigureAwait(false);
+        await TestCosyVoiceInstructAsync(config, logger, root).ConfigureAwait(false);
 
         Console.WriteLine();
         Console.WriteLine($"=== 结果：通过 {_passed}，失败 {_failed} ===");
@@ -306,6 +307,78 @@ internal static class Program
             config.Tts.CosyVoice.Mode = savedMode;
             config.Tts.CosyVoice.PromptWav = savedWav;
             config.Tts.CosyVoice.PromptText = savedText;
+            config.Tts.CosyVoice.PromptPrefix = savedPrefix;
+        }
+    }
+
+    /// <summary>
+    /// 6. instruct2 的 endofprompt 自动补全：指令串故意不带 &lt;|endofprompt|&gt;，
+    /// 引擎应当自己补在末尾，否则 CosyVoice3 的 LLM 断言会失败（表现为 500 或 1 个 token）。
+    /// </summary>
+    private static async Task TestCosyVoiceInstructAsync(AppConfig config, IAppLogger logger, string root)
+    {
+        Console.WriteLine();
+        Console.WriteLine("-- 6. CosyVoice instruct2（自动补 endofprompt）--");
+
+        var savedMode = config.Tts.CosyVoice.Mode;
+        var savedWav = config.Tts.CosyVoice.PromptWav;
+        var savedInstruct = config.Tts.CosyVoice.InstructText;
+        var savedPrefix = config.Tts.CosyVoice.PromptPrefix;
+
+        config.Tts.CosyVoice.Port = 50000;
+        config.Tts.CosyVoice.Mode = "instruct2";
+        config.Tts.CosyVoice.PromptWav = Path.Combine(root, "models", "tts", "ref_zh.wav");
+        config.Tts.CosyVoice.PromptPrefix = "You are a helpful assistant.<|endofprompt|>";
+        // 故意不带标记，验证引擎会补
+        config.Tts.CosyVoice.InstructText = "用四川话说这句话";
+
+        var engine = new CosyVoiceEngine(config, logger);
+        var up = await engine.RefreshAvailabilityAsync().ConfigureAwait(false);
+        Check("服务 127.0.0.1:50000 可达", up);
+
+        if (!up)
+        {
+            Console.WriteLine("  （跳过：CosyVoice 服务未启动）");
+            Restore();
+            return;
+        }
+
+        var voice = new VoiceConfig { FallbackPiperVoice = "zh_CN-default" };
+        var sw = Stopwatch.StartNew();
+        byte[] audio;
+        try
+        {
+            audio = await engine.SynthesizeAsync("今天天气真好，我们去河边走走吧。", voice).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Check($"instruct2 合成未抛异常：{ex.Message}", false);
+            engine.Unload();
+            Restore();
+            return;
+        }
+
+        sw.Stop();
+        var seconds = audio.Length > 44 ? BitConverter.ToInt32(audio, 40) / (double)(BitConverter.ToInt32(audio, 24) * 2) : 0;
+        Console.WriteLine($"  合成耗时 {sw.Elapsed.TotalSeconds:N1} 秒，音频 {seconds:N2} 秒，{audio.Length} 字节");
+
+        Check("返回 WAV", audio.Length > 44 && audio[0] == (byte)'R');
+        Check("音频时长 > 0.5 秒（不是 1 个 token 的假成功）", seconds > 0.5);
+        Check("采样率 24000", BitConverter.ToInt32(audio, 24) == 24000);
+
+        var outFile = Path.Combine(root, "artifacts", "tts", "cosyvoice_instruct2.wav");
+        Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
+        await File.WriteAllBytesAsync(outFile, audio).ConfigureAwait(false);
+        Console.WriteLine($"  已写出：{outFile}");
+
+        engine.Unload();
+        Restore();
+
+        void Restore()
+        {
+            config.Tts.CosyVoice.Mode = savedMode;
+            config.Tts.CosyVoice.PromptWav = savedWav;
+            config.Tts.CosyVoice.InstructText = savedInstruct;
             config.Tts.CosyVoice.PromptPrefix = savedPrefix;
         }
     }

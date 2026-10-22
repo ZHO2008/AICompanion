@@ -27,7 +27,7 @@
 | `PiperEngine` | ⚠️ 部分 | 进程外 `piper.exe` 可用；C API 的 P/Invoke 待库编译后补齐 |
 | `ChatterboxEngine` | ✅ 完成 | HTTP 合成、`/health` 可用性、软重启 |
 | `GptSoVitsEngine` | ✅ 完成 | HTTP 合成、`/set_*_weights` 切训练模型、零样本；真实服务 30/30 |
-| `CosyVoiceEngine` | ✅ 完成 | 5 种推理模式、裸 PCM→WAV、CosyVoice3 的 `<|endofprompt|>` 前缀；真实服务 36/36 |
+| `CosyVoiceEngine` | ✅ 完成 | 5 种推理模式、裸 PCM→WAV、CosyVoice3 的 `<|endofprompt|>` 前缀；真实服务 40/40 |
 | `ASRManager` | ✅ 完成 | 高优先级音频线程、VAD 分段、Faulted 状态机 |
 | `WhisperCppRecognizer` | ✅ 完成 | 经 `ai_asr.dll` 桥接层调用 whisper.cpp（真实编译 + 真实推理验证，模型加载 279ms） |
 | WebRTC VAD | ✅ 完成 | libfvad 真实构建为 `bin\libfvad.dll`；真实中文语音检出 78%，激进度单调性已验；修复了会让语音输入静默失效的 `fvad_reset` 缺陷 |
@@ -366,15 +366,19 @@ E:\DEEPSEEK
    （RTX 3060 12GB）上以正式 7B 模型验证。本轮开发机为 RTX 5060 Laptop 8GB，
    且 GPU 推理是部分卸载（ngl=10/28，受实时空闲显存限制）。
 
-6. **CosyVoice 的 CPU 合成很慢，且依赖上游服务的一个本地补丁**
+6. **CosyVoice 有 GPU 与 CPU 两条路，速度差 5 倍多**
    CosyVoice3 在 Windows 原生**可以**跑（Python 3.10，依赖里已经没有 `pynini`，
-   换成了纯 Python 的 `wetext`），本机实测通过。但有两件事得说清楚：
-   - **速度**：CPU 上 5.8 秒音频要 38.9 秒（RTF 7.2）；GPU 需要 cu128 轮子（本机 torch 是 CPU 版）。
-     日常用建议只把它当"高质量兜底"，主用 GPT-SoVITS（2.0 秒出 4.0 秒音频）。
+   换成了纯 Python 的 `wetext`），本机实测通过。有三件事得说清楚：
+   - **速度**：同一句 20 字（约 4.2 秒音频），CPU 上要 39 秒（RTF 7.2），
+     GPU（`torch 2.7.1+cu128`）只要 4.6–5.7 秒（RTF 1.1–1.3）。
+     服务进程刚起的**第一句**会多花 20 秒左右（CUDA 预热），之后才是 5 秒。
+     `tools\start-cosyvoice.ps1` 会自动优先用带 CUDA 的 `.venv-gpu`，没有才回退 CPU。
    - **上游 bug**：官方 `runtime/python/fastapi/server.py` 把上传的 wav 先读成 tensor 再传给
      `inference_*`，而 `frontend.load_wav` 只接受路径，必然抛
      `TypeError: Invalid file: tensor([...])`。本机副本已就地改成"上传落地成临时文件再传路径"，
      重新 clone 上游后需要照 VERIFICATION §27.4 重打补丁。
+   - **前置依赖**：GPT-SoVITS 与 CosyVoice 同时开时显存合计约 6.6 / 8.1 GB，两个都能跑；
+     如果是 6 GB 显存的机器，建议只留一个。
 
 
 ---

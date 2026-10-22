@@ -78,7 +78,9 @@ Write-Host "  源码     $Repo"
 Write-Host "  模型     $ModelDir"
 Write-Host "  端口     $Port"
 Write-Host ""
-Write-Host "首次启动要加载 4 GB 权重，CPU 上约 10-20 秒；之后每句合成约 20-40 秒。" -ForegroundColor DarkGray
+Write-Host "首次启动要加载约 4 GB 权重（约 10-17 秒）；之后每句合成：" -ForegroundColor DarkGray
+Write-Host "  GPU（.venv-gpu）：约 5 秒 / 4 秒音频；进程刚起后的第一句要 20 秒左右（CUDA 预热）" -ForegroundColor DarkGray
+Write-Host "  CPU（py310）    ：约 30-40 秒 / 4 秒音频" -ForegroundColor DarkGray
 Write-Host "按 Ctrl+C 停止。" -ForegroundColor DarkGray
 Write-Host ""
 

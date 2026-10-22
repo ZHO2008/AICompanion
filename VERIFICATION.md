@@ -2282,7 +2282,7 @@ GPT-SoVITS 整合包（`E:\GPT-SoVITS\...v2pro`）与 CosyVoice 3。二者都是
 | 输出 | WAV 32 kHz、4.04–4.80 秒、253–307 KB（每句不同） |
 | 单句耗时 | 2.0–3.7 秒（首次含 CUDA 预热为 44 秒） |
 | 连续合成 | 第二次、第三次均成功 |
-| 探针结果 | 36 通过 / 0 失败（两个引擎合计） |
+| 探针结果 | 40 通过 / 0 失败（两个引擎合计） |
 
 ### 27.4 CosyVoice：Windows 原生跑通，但踩了两个坑
 
@@ -2325,11 +2325,45 @@ cross_lingual 的正文前；已经带标记就不重复加。
 | 单句耗时 | 38.9 秒（CPU，RTF 7.2） |
 | 服务端 | `uvicorn` + `python-multipart`，`/docs` 200 |
 
-CPU 慢是硬伤：GPU 要 cu128 轮子（本机 torch 是 CPU 版，RTX 5060 用不上）。
-所以把 GPT-SoVITS 定为主力，CosyVoice 当高质量兜底。
+CPU 上 RTF 7.2，慢得没法当默认引擎。GPU 后来补上了，见下。
 
 启动服务用 `tools\start-cosyvoice.ps1`（默认指向 `E:\py310` 与
-`E:\cosyvoice\pretrained_models\Fun-CosyVoice3-0.5B`，端口被占时会提示而不是再起一个）。
+`E:\cosyvoice\pretrained_models\Fun-CosyVoice3-0.5B`，端口被占时会提示而不是再起一个；
+脚本会自动优先挑带 CUDA 的 `.venv-gpu`）。
+
+**坑四：GPU 版 torch 的 3.1 GB 轮子下不下来。** 本机的 torch 是 CPU 版，
+RTX 5060 是 sm_120，必须 `torch 2.7.1+cu128` 才认。做法是建一个
+`--system-site-packages` 的隔离 venv（`E:\cosyvoice\.venv-gpu`），只让它覆盖 torch/torchaudio，
+CPU 环境原样保留：
+
+    E:\py310\python.exe -m venv --system-site-packages E:\cosyvoice\.venv-gpu
+    # pip 的下载器会在 download-r2.pytorch.org 上卡住（TLS 拦截 + 大文件流式），
+    # 改用 curl 断点续传下到本地再离线装：
+    curl.exe -L -C - -o torch-2.7.1+cu128-cp310-cp310-win_amd64.whl <wheel-url>
+    .venv-gpu\Scripts\python.exe -m pip install --no-deps --no-index <两个 whl>
+
+实测 5.6 MB/s，3.1 GB 约 10 分钟。装完验证：
+
+    torch 2.7.1+cu128 | cuda available: True | cuda build: 12.8
+    device: NVIDIA GeForce RTX 5060 Laptop GPU | sm_120, 7.9 GB, 26 SMs
+    matmul ok: True
+
+GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
+
+| 项目 | CPU（py310，torch 2.3.1） | GPU（.venv-gpu，torch 2.7.1+cu128） |
+| --- | --- | --- |
+| 模型加载 | 11.4 秒 | 10.6 秒（fp32）/ 11.3 秒（fp16） |
+| 首句（含预热） | 38.9 秒 | 23–26 秒 |
+| 稳定态单句 | 约 39 秒（RTF 7.2） | **4.6–5.7 秒（RTF 1.1–1.3）** |
+| 显存 | 0 | 3.2 GB（fp32）/ 3.3 GB（fp16） |
+
+几点结论：
+- GPU 比 CPU 快约 **5.5 倍**，RTF 从 7.2 降到 1.2（20 字一句话 5 秒出结果）；
+- **fp16 收益很小**（RTF 1.11 vs 1.27，噪声级别），所以没改上游默认值，避免引入音质风险；
+- 每个进程**第一次**推理要多花约 20 秒（CUDA kernel 预热），之后才是 5 秒；
+- 服务端装的 onnxruntime 是 CPU 版，语音 tokenizer 仍在 CPU 上跑（`frontend_zero_shot` 约占
+  5 秒里的 1 秒）；换 `onnxruntime-gpu` 还能再快一点，但收益不大，没动；
+- 与 GPT-SoVITS 同时开：显存合计 6.6 / 8.1 GB，两个服务都正常，探针仍是 40/40。
 
 **坑三：wetext 的 FST 要联网拉。** 前端初始化时会 `snapshot_download("pengzhendong/wetext")`，
 本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），于是 `text_frontend` 退化成空字符串——
@@ -2356,9 +2390,23 @@ CPU 慢是硬伤：GPU 要 cu128 轮子（本机 torch 是 CPU 版，RTX 5060 �
 - 下拉框右侧有小字提示该引擎要不要先起服务（GPT-SoVITS 9880 / CosyVoice 50000），
   服务没起时按原设计降级到 Piper 并弹气泡，不会静默换引擎。
 
-### 27.6 仍未闭合
+### 27.6 instruct2 的 endofprompt 自动补全
 
-- CosyVoice 的 GPU 推理没验证（需要 `torch 2.7+cu128`；上游 pin 的是 2.3.1）；
-  CPU 上 RTF 7.2，够用但偏慢。
+`instruct` / `instruct2` 的指令文本也要求带 `<|endofprompt|>`，但位置和 zero_shot 相反：
+标记必须落在**指令末尾**，模型用它切"指令"与"要读的正文"。让用户手写容易忘，
+所以引擎在配了 `prompt_prefix`（说明用的是 CosyVoice3）且指令缺标记时自动补一个：
+
+    [INF] instruct_text 缺少 <|endofprompt|> 标记，已按 prompt_prefix 的配置补在末尾。
+    [INF] CosyVoice 合成完成（instruct2，24000 Hz，PCM 433920 字节 → WAV 433964 字节）：16 字。
+
+探针第 6 项专门验证这条：指令写"用四川话说这句话"（不带标记），
+得到 9.04 秒音频而不是"1 个 token 的假成功"。产物见 `artifacts\tts\cosyvoice_instruct2.wav`。
+
+### 27.7 仍未闭合
+
+- CosyVoice 的 fp16 没默认启用（实测收益在噪声级别），TRT / vLLM 加速没试；
+  onnxruntime 仍是 CPU 版，语音 tokenizer 那 1 秒还没挪到 GPU。
+- 每个 CosyVoice 进程的第一句要多花约 20 秒（CUDA 预热），目前靠"先随便合成一句"绕过，
+  没在 server.py 里做启动预热。
 - GPT-SoVITS 的 `/control` 接口未使用，软重启只重建本地连接池。
 - 下拉框只覆盖四个引擎标识，各自的细项（权重路径、参考音频、指令文本）仍然要改 `config.yaml`。

@@ -104,7 +104,7 @@ public sealed class CosyVoiceEngine : HttpTtsEngineBase
                 Require(speaker, "instruct 模式需要 spk_id（tts.cosyvoice.spk_id 或角色音色 VoiceId）。");
                 Require(instruct, "instruct 模式需要 instruct_text（tts.cosyvoice.instruct_text）。");
                 form.Add(new StringContent(speaker!, Encoding.UTF8), "spk_id");
-                form.Add(new StringContent(instruct!, Encoding.UTF8), "instruct_text");
+                form.Add(new StringContent(EnsureEndMarker(instruct!), Encoding.UTF8), "instruct_text");
                 break;
 
             case "zero_shot":
@@ -116,7 +116,7 @@ public sealed class CosyVoiceEngine : HttpTtsEngineBase
             case "instruct2":
                 Require(instruct, "instruct2 模式需要 instruct_text。");
                 AddWavPart(form, promptWav, "instruct2 模式需要 prompt_wav。", cancellationToken);
-                form.Add(new StringContent(instruct!, Encoding.UTF8), "instruct_text");
+                form.Add(new StringContent(EnsureEndMarker(instruct!), Encoding.UTF8), "instruct_text");
                 break;
 
             case "cross_lingual":
@@ -168,6 +168,23 @@ public sealed class CosyVoiceEngine : HttpTtsEngineBase
         }
 
         return prefix + value;
+    }
+
+    /// <summary>
+    /// instruct / instruct2 的指令文本：CosyVoice3 要求 <c>&lt;|endofprompt|&gt;</c> 落在指令**末尾**
+    /// （模型用它切分"指令"与"要读的正文"）。配了 prompt_prefix 就认为用户在用 CosyVoice3，
+    /// 缺标记时补一个；没配则原样发送（CosyVoice1/2 不需要）。
+    /// </summary>
+    private string EnsureEndMarker(string instruct)
+    {
+        if (string.IsNullOrWhiteSpace(Cfg.PromptPrefix) ||
+            instruct.Contains("<|endofprompt|>", StringComparison.Ordinal))
+        {
+            return instruct;
+        }
+
+        Logger.Info("instruct_text 缺少 <|endofprompt|> 标记，已按 prompt_prefix 的配置补在末尾。");
+        return instruct + "<|endofprompt|>";
     }
 
     private static void AddWavPart(MultipartFormDataContent form, string? path, string missingMessage, CancellationToken cancellationToken)

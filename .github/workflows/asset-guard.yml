@@ -1,0 +1,33 @@
+name: asset-guard
+
+# 这个仓库是"源码 + 双许可"公开的：Live2D 官方示例模型（Hiyori）、
+# Cubism Core 运行时、以及任何模型权重都不允许进仓库。
+# 之前踩过一次（Hiyori 被打进分发包），所以用 CI 兜一道，
+# 免得哪天 `git add -A` 又把授权受限的文件带上来。
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  no-licensed-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查是否误提交了授权受限素材或模型权重
+        run: |
+          set -eu
+          bad=$(git ls-files | grep -Ei \
+            '^(Hiyori/|Live2DCubismCore\.dll|Assets/source/|Assets/Default/character\.png|dist/|models/)' \
+            || true)
+          bad="$bad$(git ls-files | grep -Ei '\.(onnx|pth|ckpt|safetensors|gguf)$' || true)"
+
+          if [ -n "${bad}" ]; then
+            echo "以下文件不应出现在仓库里（授权受限 / 模型权重 / 构建产物）："
+            echo "${bad}"
+            exit 1
+          fi
+
+          echo "OK：没有发现授权受限素材或模型权重。"
