@@ -2282,7 +2282,7 @@ GPT-SoVITS 整合包（`E:\GPT-SoVITS\...v2pro`）与 CosyVoice 3。二者都是
 | 输出 | WAV 32 kHz、4.04–4.80 秒、253–307 KB（每句不同） |
 | 单句耗时 | 2.0–3.7 秒（首次含 CUDA 预热为 44 秒） |
 | 连续合成 | 第二次、第三次均成功 |
-| 探针结果 | 46 通过 / 0 失败（引擎 + 管理器合计） |
+| 探针结果 | 49 通过 / 0 失败（引擎 + 管理器合计） |
 
 ### 27.4 CosyVoice：Windows 原生跑通，但踩了两个坑
 
@@ -2363,7 +2363,7 @@ GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
 - 每个进程**第一次**推理要多花约 20 秒（CUDA kernel 预热），之后才是 5 秒；
 - 服务端装的 onnxruntime 是 CPU 版，语音 tokenizer 仍在 CPU 上跑（`frontend_zero_shot` 约占
   5 秒里的 1 秒）；换 `onnxruntime-gpu` 还能再快一点，但收益不大，没动；
-- 与 GPT-SoVITS 同时开：显存合计 6.6 / 8.1 GB，两个服务都正常，探针仍是 46/46。
+- 与 GPT-SoVITS 同时开：显存合计 6.6 / 8.1 GB，两个服务都正常，探针仍是 49/49。
 
 **坑三：wetext 的 FST 要联网拉。** 前端初始化时会 `snapshot_download("pengzhendong/wetext")`，
 本机 TLS 被拦截（`SSL: CERTIFICATE_VERIFY_FAILED`），于是 `text_frontend` 退化成空字符串——
@@ -2418,7 +2418,28 @@ GPU 与 CPU 的实测对比（同一句 20 字，输出约 4.2 秒音频）：
 
 这一项确认了"设置面板切到 GPT-SoVITS 后，管理器确实把请求交给了它，而不是悄悄用 Piper"。
 
-### 27.8 仍未闭合
+同一项里还模拟了设置面板的**运行时切换**（下拉框做的事 = 改配置 + `ResetAsync`）：
+
+    [INF] 收到"重启语音服务"请求，正在重建 TTS 引擎。
+    [INF] 按配置创建 TTS 引擎：cosyvoice
+    [INF] TTS 初始化完成：配置引擎=cosyvoice，实际引擎=cosyvoice，降级=False。
+    [OK]  ResetAsync 后切到 cosyvoice
+    [OK]  切换后仍能合成（27 字，24000 Hz，222 764 字节）
+
+### 27.8 App 启动时按界面偏好覆盖引擎（真进程验证）
+
+单测之外，把 `Assets\appearance.json` 写成 `"ttsEngine": "gpt_sovits"`（config.yaml 里仍是
+`piper`），然后真跑一次 `AICompanion.exe`，日志里能看到覆盖生效、并按新引擎初始化：
+
+    17:56:32 [INF] [App] 按界面偏好把 TTS 引擎由 config.yaml 的 "piper" 覆盖为 "gpt_sovits"
+                    （来源 Assets\appearance.json，未改动 config.yaml）。
+    17:56:35 [INF] [TTS] 按配置创建 TTS 引擎：gpt_sovits
+    17:56:35 [INF] [TTS] TTS 初始化完成：配置引擎=gpt_sovits，实际引擎=gpt_sovits，降级=False。
+    17:56:35 [INF] [App] 启动完成：… TTS=gpt_sovits（降级=False）…
+
+验证完已把 `appearance.json` 还原（没有留下测试痕迹），config.yaml 全程未被修改。
+
+### 27.9 仍未闭合
 
 - CosyVoice 的 fp16 没默认启用（实测收益在噪声级别），TRT / vLLM 加速没试；
   onnxruntime 仍是 CPU 版，语音 tokenizer 那 1 秒还没挪到 GPU。

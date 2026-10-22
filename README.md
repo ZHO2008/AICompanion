@@ -27,7 +27,7 @@
 | `PiperEngine` | ⚠️ 部分 | 进程外 `piper.exe` 可用；C API 的 P/Invoke 待库编译后补齐 |
 | `ChatterboxEngine` | ✅ 完成 | HTTP 合成、`/health` 可用性、软重启 |
 | `GptSoVitsEngine` | ✅ 完成 | HTTP 合成、`/set_*_weights` 切训练模型、零样本；真实服务 30/30 |
-| `CosyVoiceEngine` | ✅ 完成 | 5 种推理模式、裸 PCM→WAV、CosyVoice3 的 `<|endofprompt|>` 前缀；真实服务 46/46 |
+| `CosyVoiceEngine` | ✅ 完成 | 5 种推理模式、裸 PCM→WAV、CosyVoice3 的 `<|endofprompt|>` 前缀；真实服务 49/49 |
 | `ASRManager` | ✅ 完成 | 高优先级音频线程、VAD 分段、Faulted 状态机 |
 | `WhisperCppRecognizer` | ✅ 完成 | 经 `ai_asr.dll` 桥接层调用 whisper.cpp（真实编译 + 真实推理验证，模型加载 279ms） |
 | WebRTC VAD | ✅ 完成 | libfvad 真实构建为 `bin\libfvad.dll`；真实中文语音检出 78%，激进度单调性已验；修复了会让语音输入静默失效的 `fvad_reset` 缺陷 |

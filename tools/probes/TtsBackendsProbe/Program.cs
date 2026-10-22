@@ -49,7 +49,7 @@ internal static class Program
         await TestGptSoVitsRealAsync(config, logger, root).ConfigureAwait(false);
         await TestCosyVoiceRealAsync(config, logger, root).ConfigureAwait(false);
         await TestCosyVoiceInstructAsync(config, logger, root).ConfigureAwait(false);
-        await TestManagerIntegrationAsync(config, logger).ConfigureAwait(false);
+        await TestManagerIntegrationAsync(config, logger, root).ConfigureAwait(false);
 
         Console.WriteLine();
         Console.WriteLine($"=== 结果：通过 {_passed}，失败 {_failed} ===");
@@ -388,7 +388,7 @@ internal static class Program
     /// 7. 管理器级集成：App 实际走的是 TTSManager（探活 → 降级链 → 合成 → 结果包装），
     /// 前面几项只测到引擎层，这里补上"管理器有没有把请求正确转给新引擎"。
     /// </summary>
-    private static async Task TestManagerIntegrationAsync(AppConfig config, IAppLogger logger)
+    private static async Task TestManagerIntegrationAsync(AppConfig config, IAppLogger logger, string root)
     {
         Console.WriteLine();
         Console.WriteLine("-- 7. TTSManager 集成（GPT-SoVITS） --");
@@ -415,6 +415,29 @@ internal static class Program
 
         var empty = await manager.SynthesizeAsync("   ").ConfigureAwait(false);
         Check("空文本被管理器拦下（不抛异常）", !empty.Success);
+
+        // 设置面板切换引擎时走的就是这条路：改配置 + ResetAsync 重建。
+        // 这里的配置由本测试自己负责，不依赖前面几项留下的状态。
+        var savedPrefix = config.Tts.CosyVoice.PromptPrefix;
+        var savedPromptWav = config.Tts.CosyVoice.PromptWav;
+        var savedPromptText = config.Tts.CosyVoice.PromptText;
+        config.Tts.CosyVoice.Mode = "zero_shot";
+        config.Tts.CosyVoice.PromptWav = Path.Combine(root, "models", "tts", "ref_zh.wav");
+        config.Tts.CosyVoice.PromptText = "今天天气不错，我们一起去公园散步吧。";
+        config.Tts.CosyVoice.PromptPrefix = "You are a helpful assistant.<|endofprompt|>";
+
+        config.Tts.Engine = "cosyvoice";
+        await manager.ResetAsync().ConfigureAwait(false);
+        Check($"ResetAsync 后切到 cosyvoice（实际 {manager.CurrentEngineName}）",
+            manager.CurrentEngineName == "cosyvoice");
+
+        var switched = await manager.SynthesizeAsync("切换引擎之后的这一句，应该由 CosyVoice 读。").ConfigureAwait(false);
+        Check($"切换后仍能合成（{switched.Error ?? "无错误"}）", switched.Success);
+        Check("切换后的音频是 24 kHz", switched.Audio is { Length: > 44 } && BitConverter.ToInt32(switched.Audio, 24) == 24000);
+
+        config.Tts.CosyVoice.PromptPrefix = savedPrefix;
+        config.Tts.CosyVoice.PromptWav = savedPromptWav;
+        config.Tts.CosyVoice.PromptText = savedPromptText;
 
         manager.Dispose();
         config.Tts.Engine = savedEngine;
