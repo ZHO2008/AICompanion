@@ -2933,6 +2933,9 @@ fp4 研究环境（`.venv-fp4` 7.7 GB + 下载的轮子 2.7 GB）已删除，回
 （enum 版 `Request` 内联构造请求对象）。删 `ApplyProfile` 的前提是确认"换模型"能力**本身不存在**：
 模型路径只在 `OnHostReady` 里从 `config.live2d.default_model_path` 读一次并建渲染器，
 `ChangeAppearance` 只换静态图，设置面板没有任何 Live2D 模型选择/重建入口 —— 详见 §30.15 第 1 条。
+另清理两处过期 TODO 注释：`_motionExists` 与 `SafeExists` 上写着"接 Live2D 后替换为真实检查"，
+但 `MainWindow` 早在 `OnHostReady` 里就注入了真实的 `Live2dModelInfo.HasMotion`（按 model3.json 的
+Motions 组名判断），注释已改成描述现状。
 
 **LipSync**：`_lastReported` 的读与写都挪进 `lock (_sync)`（原来只有写在锁内），
 平滑基准不再可能与 `Stop()` 的清零竞争；`ReportToUi` 仍在锁外。

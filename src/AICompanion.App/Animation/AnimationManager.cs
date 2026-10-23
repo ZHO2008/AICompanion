@@ -25,9 +25,9 @@ public sealed class AnimationManager
 
     /// <summary>
     /// 动作存在性检查（由宿主注入）。
-    /// TODO: 接 Live2D / VPet 后替换为真实检查，例如解析 model3.json 的 Motions 列表，
-    ///       或调用 SDK 的 HasMotion(group) —— 我无法预设你本机 SDK 的接口名。
-    /// 传 null 表示"无法检查，按存在处理"（此时只做映射存在性兜底）。
+    ///
+    /// 实际注入的是 <c>Live2dModelInfo.HasMotion</c>（按 model3.json 的 Motions 组名判断），
+    /// 静态图降级时宿主传 null。传 null 表示"无法检查，按存在处理"（此时只做映射存在性兜底）。
     /// </summary>
     private readonly Func<string, bool>? _motionExists;
 
@@ -203,7 +203,10 @@ public sealed class AnimationManager
         return fallback;
     }
 
-    /// <summary>TODO: 这里的检查逻辑要换成你本机 Live2D / VPet 的真实 API。</summary>
+    /// <summary>
+    /// 调用宿主注入的检查（实际是 <c>Live2dModelInfo.HasMotion</c>）。
+    /// 检查本身抛异常时按"存在"处理：不能让一个检查异常把整条动作链路挡死。
+    /// </summary>
     private bool SafeExists(string motion)
     {
         try
