@@ -46,7 +46,8 @@
 | 退出与资源回收 | ✅ 完成 | 关窗只停渲染循环、托盘"退出"走 `Shutdown()` → `AppHost.DisposeAsync()` 终止 llama-server；第四轮真机跑出"退出必崩 + 孤儿进程"并修复（VERIFICATION §31） |
 
 > 验证细节与**尚未验证项**的完整清单见 [VERIFICATION.md](./VERIFICATION.md)。
-> 截至第四轮（2026-10-23），VERIFICATION 记录到 §31：启动 8.4 秒、退出 0.23 秒、真实推理 0.7 秒/16 token。
+> 截至第四轮（2026-10-23），VERIFICATION 记录到 §32：启动 8.4 秒、退出 0.23 秒、真实推理 0.7 秒/16 token；
+> 0.9.1 打包与异目录验证见 §32。各版本改了什么见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
