@@ -43,8 +43,10 @@
 | Piper C 库 | ⏸ 后置 | 决策 Q9；已有 SAPI 兜底，不影响出声 |
 | SAPI 语音兜底 | ✅ 完成 | Piper 不可用时自动降级到 Windows 内置语音，任何机器都能发声 |
 | llama-server CUDA 构建 | ✅ 完成 | `bin\ggml-cuda.dll` 54MB；GPU 计算进程列表 + 显存 +1152MB 三重证据；CPU 版备份在 `bin\cpu-backup\` |
+| 退出与资源回收 | ✅ 完成 | 关窗只停渲染循环、托盘"退出"走 `Shutdown()` → `AppHost.DisposeAsync()` 终止 llama-server；第四轮真机跑出"退出必崩 + 孤儿进程"并修复（VERIFICATION §31） |
 
 > 验证细节与**尚未验证项**的完整清单见 [VERIFICATION.md](./VERIFICATION.md)。
+> 截至第四轮（2026-10-23），VERIFICATION 记录到 §31：启动 8.4 秒、退出 0.23 秒、真实推理 0.7 秒/16 token。
 
 ---
 
@@ -150,6 +152,8 @@ E:\DEEPSEEK
 │   ├── build_llama_cuda.bat        # Ninja + CUDA 并行构建 llama-server
 │   ├── build_fvad.bat              # 构建 bin\libfvad.dll
 │   ├── Fetcher                     # 多镜像断点续传下载器（开发工具）
+│   ├── cosyvoice-patches            # 上游 CosyVoice server.py/frontend.py 的本地补丁副本
+│   ├── research                    # 精度/性能试验脚本（fp8、fp4、分支耗时剖析，全部可弃）
 │   ├── probes                      # 全部验证探针，每个都是独立控制台工程
 │   │   ├── AnimationProbe          # 形象/动作/口型逻辑回归（46 项断言）
 │   │   ├── AsrPttProbe             # 按住说话逻辑（27 项断言）
@@ -160,6 +164,7 @@ E:\DEEPSEEK
 │   │   ├── MonitorProbe            # GameMonitor 协议与冷却期验证
 │   │   ├── OomProbe                # OOM 回退 / ngl 边界验证
 │   │   ├── PipelineProbe           # 对话管线 + VAD + 语音合成验证
+│   │   ├── TtsBackendsProbe        # GPT-SoVITS / CosyVoice3 / Chatterbox 三条 TTS 后端直连验证
 │   │   ├── Live2DPoc               # Live2D 最小可行性验证（PoC）
 │   │   ├── FakeLlamaServer         # 假 llama-server，用于注入 OOM
 │   │   └── testdata                # 测试用真实语音样本（SAPI 合成）
@@ -357,14 +362,17 @@ E:\DEEPSEEK
    Live2D → `Assets\Default` 静态立绘 → 纯色块，启动日志写明降到了哪一级。
 
 4. **Piper C API 未接入**
-   决策 Q9 已确认后置。当前 `PiperEngine` 走进程外 `piper.exe`，需要该可执行文件存在。
+   决策 Q9 已确认后置。当前 `PiperEngine` 走进程外 `piper.exe`，需要该可执行文件存在，
+   并且要把 Piper 语音模型放到 `models\piper\zh_CN\`（`model.onnx` + 同名 `.json`）。
+   本机该目录是空的，所以实测一直是 SAPI 兜底。
    好消息是**不影响出声**：Piper 不可用时会自动降级到 Windows 内置语音（SAPI），
    日志与气泡都会标明"降级"，不是静默替换。
 
 5. **性能类验收项未在目标机器验证**
    手册 §9 的"预处理 <650ms""LLM <2s""12 小时无泄漏"等指标需要在部署机
    （RTX 3060 12GB）上以正式 7B 模型验证。本轮开发机为 RTX 5060 Laptop 8GB，
-   且 GPU 推理是部分卸载（ngl=10/28，受实时空闲显存限制）。
+   且 GPU 推理是部分卸载（实测 `ngl=5/8/9 / 28`，随实时空闲显存浮动：
+   `gpu.reserved_mb=4096` + `kv_cache_reserved_mb=1024` 的保守策略）。
 
 6. **CosyVoice 有 GPU 与 CPU 两条路，速度差 5 倍多**
    CosyVoice3 在 Windows 原生**可以**跑（Python 3.10，依赖里已经没有 `pynini`，
@@ -565,7 +573,22 @@ WPF 按新 DPI 重新布局，不会被 Windows 位图拉伸（变模糊）也�
 
 ## 九、验证记录
 
-见 `VERIFICATION.md`。
+全部证据、复现命令与"尚未验证"清单都在 [VERIFICATION.md](./VERIFICATION.md)（现 31 章）。按章节查：
+
+| 想看什么 | 章节 |
+| --- | --- |
+| 托管代码 / 原生组件能不能构建 | §1–§2 |
+| ASR 桥接层、启动流程、对话管线、OOM 回退、GameMonitor、GPU 推理、VAD | §3、§5–§10 |
+| 发现并修复过的缺陷（含对照实验） | §4 |
+| 明确**没验证**的部分 | §12 |
+| 鼠标交互、DPI、立绘与语音兜底、气泡与外观设置 | §13–§17 |
+| Live2D 可行性、合成与命中问题的根因 | §19–§20 |
+| 性能与资源（死代码、进程、内存） | §21、§28–§30 |
+| TTS / ASR 完善、按住说话、GPT-SoVITS 与 CosyVoice | §22–§23、§27 |
+| 打包与分发策略（含 1.6 GB 全家桶安装包） | §24、§26 |
+| 两小时连续运行（内存/句柄采样） | §25 |
+| 第四轮真机运行：启动 8.4s、退出 0.23s、真实推理 0.7s/16 token、退出崩溃根因 | §31 |
+| 自己复现一遍 | §18 |
 
 ## 十、打包与分发
 
