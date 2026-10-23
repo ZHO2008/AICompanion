@@ -77,11 +77,11 @@ public sealed class GameCooldownTracker
     /// 清掉已过期的冷却项。原先只在 <see cref="IsInCooldown"/> 命中时惰性删除，
     /// 那些"设过一次就再没被查询过"的进程名会一直留在字典里（长驻进程的慢泄漏）。
     /// </summary>
-    private void PruneExpiredLocked()
+    private int PruneExpiredLocked()
     {
         if (_untilByProcess.Count == 0)
         {
-            return;
+            return 0;
         }
 
         var now = DateTime.UtcNow;
@@ -90,6 +90,8 @@ public sealed class GameCooldownTracker
         {
             _untilByProcess.Remove(key);
         }
+
+        return expired.Count;
     }
 
     public TimeSpan RemainingCooldown(string? processName)
@@ -116,14 +118,7 @@ public sealed class GameCooldownTracker
     {
         lock (_sync)
         {
-            var now = DateTime.UtcNow;
-            var expired = _untilByProcess.Where(kv => kv.Value <= now).Select(kv => kv.Key).ToList();
-            foreach (var key in expired)
-            {
-                _untilByProcess.Remove(key);
-            }
-
-            return expired.Count;
+            return PruneExpiredLocked();
         }
     }
 

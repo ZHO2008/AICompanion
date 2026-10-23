@@ -44,6 +44,15 @@ public sealed class MonitorServer : IAsyncDisposable
     private DateTime _lastMessageUtc = DateTime.MinValue;
     private bool _disconnectNotified;
 
+    /// <summary>
+    /// 是否正在 Stop。跨线程读写（Stop 在 UI 线程，读循环在线程池）。
+    ///
+    /// 用于让"停止中发现的断连"一律不弹气泡：加了"限时等待接受循环"之后，
+    /// 读循环的 finally 必定抢在 Stop 的 HandleDisconnect(notify:false) 之前执行，
+    /// 若仍按默认 notify:true 处理，用户正常退出也会看到一句"游戏检测服务已断开"。
+    /// </summary>
+    private volatile bool _stopping;
+
     public MonitorServer(
         AppConfig config,
         IAppLogger logger,
@@ -89,7 +98,12 @@ public sealed class MonitorServer : IAsyncDisposable
 
     public event EventHandler<string>? ClientDisconnected;
 
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// 启动监听。**有意不 await 接受循环**：它必须活到 <see cref="Stop"/>，
+    /// 因此这里只负责把任务挂到字段上就直接返回。
+    /// （原实现结尾是一句 `await Task.CompletedTask;` 的空操作，只为凑出 async 修饰符。）
+    /// </summary>
+    public Task StartAsync(CancellationToken cancellationToken = default)
     {
         Stop();
 
@@ -101,10 +115,12 @@ public sealed class MonitorServer : IAsyncDisposable
 
         _logger.Info($"GameMonitor 通信服务已监听 {endpoint}。");
 
+        _stopping = false;
+
         _acceptTask = Task.Run(() => AcceptLoopAsync(_lifetime.Token));
         _watchdog = new Timer(_ => CheckHeartbeat(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
 
-        await Task.CompletedTask.ConfigureAwait(false);
+        return Task.CompletedTask;
     }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
@@ -207,7 +223,16 @@ public sealed class MonitorServer : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.Warn($"读取 GameMonitor 消息时异常：{ex.Message}");
+            // 停止过程里读循环被强关连接打断是预期内的（Stop 等超时后会直接 Dispose 掉 client），
+            // 降级为 Debug，免得正常退出时日志里留一条吓人的 Warn。
+            if (_stopping)
+            {
+                _logger.Debug($"停止时读取 GameMonitor 消息中断：{ex.Message}");
+            }
+            else
+            {
+                _logger.Warn($"读取 GameMonitor 消息时异常：{ex.Message}");
+            }
         }
         finally
         {
@@ -329,8 +354,14 @@ public sealed class MonitorServer : IAsyncDisposable
         HandleDisconnect($"{silentSeconds:N0} 秒未收到心跳");
     }
 
-    private void HandleDisconnect(string reason, bool notify = true)
+    /// <param name="notify">
+    /// 是否弹气泡并触发 <see cref="ClientDisconnected"/>。
+    /// 传 null（默认）表示按当前状态自动判断：正在 Stop 就不弹 —— 正常退出不该告警。
+    /// </param>
+    private void HandleDisconnect(string reason, bool? notify = null)
     {
+        var shouldNotify = notify ?? !_stopping;
+
         bool wasConnected;
 
         lock (_sync)
@@ -365,7 +396,7 @@ public sealed class MonitorServer : IAsyncDisposable
 
         _disconnectNotified = true;
 
-        if (!notify)
+        if (!shouldNotify)
         {
             _logger.Info($"GameMonitor 已断开：{reason}");
             return;
@@ -405,6 +436,10 @@ public sealed class MonitorServer : IAsyncDisposable
 
     public void Stop()
     {
+        // 先置位：下面的 Cancel/Stop 会让读循环的 finally 跑在本次 Stop 内部（等待接受循环时），
+        // 那条路径必须同样按"不弹气泡"处理。
+        _stopping = true;
+
         try
         {
             _watchdog?.Dispose();
@@ -434,6 +469,29 @@ public sealed class MonitorServer : IAsyncDisposable
             // 忽略。
         }
 
+        // 限时等待接受循环真正结束：_acceptTask 之前只赋值从不等待，
+        // DisposeAsync/Stop 返回后它可能仍在跑（甚至还在给 _logger 写日志），
+        // 进程退出时就成了"对象已释放但后台线程仍在用"的隐患。
+        // 顺序很重要：先 Cancel + Listener.Stop 把 AcceptTcpClientAsync 打断，再等，否则必等满超时。
+        if (_acceptTask is not null)
+        {
+            try
+            {
+                // 不无参 Wait：它会一直等到本轮读循环结束（对端不关连接时可能是几分钟），
+                // 而 Stop 可能运行在 UI 线程上。
+                if (!_acceptTask.Wait(TimeSpan.FromSeconds(1)))
+                {
+                    _logger.Warn("GameMonitor 接受循环 1 秒内未退出，放弃等待（后台线程可能仍未结束）。");
+                }
+            }
+            catch (AggregateException ex)
+            {
+                _logger.Debug($"接受循环退出时异常：{ex.InnerException?.Message ?? ex.Message}");
+            }
+
+            _acceptTask = null;
+        }
+
         // 自己在停止，不该给用户弹"游戏检测服务已断开"的告警气泡。
         HandleDisconnect("服务停止", notify: false);
     }
@@ -442,6 +500,8 @@ public sealed class MonitorServer : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
+        // Stop 已经按 notify:false 做完收尾（关 watchdog → 取消 CTS → 停 listener → 等接受循环 → 关 writer/client）。
+        // 这里只补 CTS 本身的释放，避免与 Stop 重复释放 socket / writer。
         Stop();
 
         try

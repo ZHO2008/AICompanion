@@ -73,7 +73,11 @@ public sealed class GameListProvider
         }
     }
 
-    /// <summary>文件被编辑后自动重载，无需重启 GameMonitor。</summary>
+    /// <summary>
+    /// 文件被编辑后自动重载，无需重启 GameMonitor。
+    /// 由 <see cref="GameProcessScanner.GetRunningGames"/> 在每次扫描前以 force:false 调用；
+    /// 构造函数用 force:true 首次加载。
+    /// </summary>
     public void ReloadIfChanged(bool force = false)
     {
         try
@@ -117,11 +121,13 @@ public sealed class GameListProvider
             }
 
             _lastWriteUtc = writeTime;
-            _logger.Info($"游戏列表已加载：{parsed.Count} 项（{string.Join(", ", parsed)}）");
+            _logger.Info($"游戏列表已加载（{FilePath}）：{parsed.Count} 项（{string.Join(", ", parsed)}）");
         }
         catch (Exception ex)
         {
-            _logger.Warn($"读取游戏列表失败：{ex.Message}");
+            // 文件被占用、编码异常等情况一律保留旧列表：一次读盘失败就把检测列表清空，
+            // 会表现为"游戏检测突然不再触发"，比继续用旧列表更糟。不抛给调用方。
+            _logger.Warn($"重载游戏列表失败，继续沿用上一次的列表：{ex.Message}");
         }
     }
 }
@@ -141,6 +147,16 @@ public sealed class GameProcessScanner
     /// <summary>返回当前正在运行的、位于列表中的进程名（原始大小写来自列表）。</summary>
     public IReadOnlyList<string> GetRunningGames()
     {
+        /*
+         * 每次扫描前先看 game_list.txt 是否被编辑过（只有写时间变了才真正读盘）。
+         *
+         * 这是 <see cref="GameListProvider.ReloadIfChanged"/> 里"改完不用重启 GameMonitor"
+         * 那句承诺的唯一落点：之前只有构造函数以 force:true 调过一次，
+         * `!force && writeTime == _lastWriteUtc` 的提前返回永远走不到，热重载实际是死的。
+         * 重载失败不会抛：内部只记 Warn 并保留旧列表。
+         */
+        _list.ReloadIfChanged(force: false);
+
         var names = _list.Names;
         if (names.Count == 0)
         {

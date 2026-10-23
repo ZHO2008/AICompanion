@@ -19,20 +19,19 @@ namespace AICompanion.Core.Tts;
 /// </summary>
 public sealed class PiperEngine : ITTSEngine
 {
-    private readonly AppConfig _config;
     private readonly IAppLogger _logger;
-    private readonly IBubbleNotifier _bubble;
+
+    /// <summary>动态库探测结论（用于"为什么不可用"的报错文案）。</summary>
+    private readonly string _nativeLibraryMessage;
 
     private readonly string _configuredModelPath;
     private readonly string _libraryPath;
     private readonly string _executablePath;
     private readonly string _espeakDataPath;
 
-    public PiperEngine(AppConfig config, IAppLogger logger, IBubbleNotifier bubble)
+    public PiperEngine(AppConfig config, IAppLogger logger)
     {
-        _config = config;
         _logger = logger.ForCategory("TTS.Piper");
-        _bubble = bubble;
 
         _configuredModelPath = AppPaths.Resolve(config.Tts.Piper.ModelPath);
         _libraryPath = AppPaths.Resolve(config.Tts.Piper.LibraryPath);
@@ -40,8 +39,7 @@ public sealed class PiperEngine : ITTSEngine
         _espeakDataPath = AppPaths.Resolve(config.Tts.Piper.EspeakDataPath);
 
         var probe = PiperNativeApi.Probe(_libraryPath, out var message);
-        NativeLibraryStatus = probe;
-        NativeLibraryMessage = message;
+        _nativeLibraryMessage = message;
 
         if (probe == PiperNativeProbe.Loaded)
         {
@@ -55,17 +53,11 @@ public sealed class PiperEngine : ITTSEngine
 
     public string Name => "piper";
 
-    public PiperNativeProbe NativeLibraryStatus { get; }
-
-    public string NativeLibraryMessage { get; }
-
     /// <summary>手册要求：通过检查模型文件是否存在来判断可用性。</summary>
     public bool IsAvailable => File.Exists(_configuredModelPath);
 
     /// <summary>进程外 piper.exe 是否就绪。</summary>
     public bool IsExecutableAvailable => File.Exists(_executablePath);
-
-    public string ConfiguredModelPath => _configuredModelPath;
 
     public async Task<byte[]> SynthesizeAsync(string text, VoiceConfig config, CancellationToken cancellationToken = default)
     {
@@ -88,7 +80,7 @@ public sealed class PiperEngine : ITTSEngine
         if (!IsExecutableAvailable)
         {
             throw new FileNotFoundException(
-                $"Piper 动态库尚未编译（{NativeLibraryMessage}），且未找到进程外兜底的 piper.exe（{_executablePath}）。" +
+                $"Piper 动态库尚未编译（{_nativeLibraryMessage}），且未找到进程外兜底的 piper.exe（{_executablePath}）。" +
                 "请编译 Piper C 动态库，或把官方 piper.exe 放到该路径。");
         }
 

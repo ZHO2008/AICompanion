@@ -2829,7 +2829,7 @@ fp4 研究环境（`.venv-fp4` 7.7 GB + 下载的轮子 2.7 GB）已删除，回
 | `LlamaServerController.StopProcessAsync` 的 `process.Dispose()` | 在 `finally` 里，扫描工具看不见 → 误报 |
 | `LipSync` 用 `Timer.Stop()` 而非 `Dispose()` | 其 `Dispose()` 路径就是 `Stop()` + 置空引用，再加一层没有收益 |
 | `BubbleNotifier` / `LogSink` 的 `DispatcherTimer` / `StreamWriter` | 与进程同生命周期；为省一次 Tick 去改接口不划算。但 GameMonitor 的**双 sink 同文件**是真 bug，已修 |
-| `tools/probes` 引用的公开成员（`ComputeRms`、`EyeBlinkParameters`、`LastRawResult`、`IHttpTtsEngine.BaseUrl` 等） | 探针不在解决方案里，但属于可运行验证资产，删了会破坏探针编译 |
+| `tools/probes` 引用的公开成员（`ComputeRms`、`EyeBlinkParameters`、`LastRawResult` 等） | 探针不在解决方案里，但属于可运行验证资产，删了会破坏探针编译。**注**：本条原还列了 `IHttpTtsEngine.BaseUrl`，第三轮复核发现探针对它 0 引用，已删除该成员（见 §30.12 第 13 项） |
 
 ### 29.9 本轮**未修**的（如实登记原因）
 
@@ -2848,9 +2848,292 @@ fp4 研究环境（`.venv-fp4` 7.7 GB + 下载的轮子 2.7 GB）已删除，回
 9. `KnowledgeImporter` 子系统（约 390 行）目前零消费者：它是知识导入的设计入口，删掉会丢失功能面，
    登记为"未接线"，等真正接上再决定去留。
 
+> **第三轮已全部处理**：以上 9 项在 2026-10-23 上午逐一落地（第 8 项改为“实现”而不是“弃用”，
+> 因为复核发现 `ConfigLoader` 使用 `IgnoreUnmatchedProperties()`，并不存在“删键会报未知键”的校验）。
+> 逐项对应关系与证据见 §30.0；其中第 6 条已修，第 8 条的前提判断在 §30.0 末尾纠正。
+
 ### 29.10 最终状态
 
 - `dotnet build AICompanion.sln -c Debug` → **0 Warning / 0 Error**。
 - 改动 30 个文件；行尾统一（ASRManager 恢复 CRLF，其余保持 LF），没有混入 EOF 换行噪声。
 - 本轮全部为静态代码修改，**没有跑任何模型推理**（遵守"低负载"要求）。
 - 机器**没有关机**：用户中途回来继续提要求，关机前需再确认。
+
+
+## 30. 第三轮：§29.9 登记项全部落地（2026-10-23 上午）
+
+### 30.0 与 §29.9 的对应关系
+
+| §29.9 登记项 | 本轮状态 | 详见 |
+| --- | --- | --- |
+| 1 `Live2DRenderer` 异常路径不释放 GL/lapp/control | 已修 | §30.1 |
+| 2 `TrayIcon` 事件与 `ContextMenuStrip` 不退订、不释放 | 已修 | §30.2 |
+| 3 `MainWindow` 8 个 lambda 订阅没有 `-=` | 已修（实际 9 条，含 `Bubbles.Changed`） | §30.2 |
+| 4 `GameListProvider.ReloadIfChanged` 热重载分支不可达 | 已修（接上，未新增 `FileSystemWatcher`） | §30.8 |
+| 5 `LogSink` 没有单文件大小上限 | 已修（32 MB 滚动一代） | §30.7 |
+| 6 `ConversationPipeline` 锚点前覆盖 `_lastUserMessage` | 已修 | §30.6 |
+| 7 `ContextManager.MaxRecentRounds` 轮/条语义 | 已修 | §30.5 |
+| 8 三个未使用的配置键 | 已实现（保键不删，见说明） | §30.4 / §30.10 |
+| 9 `KnowledgeImporter` 零消费者 | 已接线（设置面板选文件夹导入） | §30.11 |
+
+§29.9 第 8 项当时写的是"配置校验严格、删键会让用户现有 `config.yaml` 报未知键"。本轮复核发现这个前提**不成立**：
+`ConfigLoader` 用的是 `IgnoreUnmatchedProperties()`（`ConfigLoader.cs`），仓库里根本没有"未知键/废弃键"检查，
+所以既没有"删键会报错"的风险，也没有现成的忽略名单可用。两条路都能走通后，选择了**实现**而不是**弃用**——
+把键变成真实功能，比删掉更能兑现手册里"外部语音服务可被程序拉起"的设计意图。
+
+### 30.1 Live2D 异常路径（`Animation/Live2DRenderer.cs`）
+
+`TryCreate` 原来是"正常路径正确、失败路径全漏"：
+
+- `control.Start()` 已经建好 GL 上下文与渲染线程、`new LAppDelegateOpenGL()` 已经建好 Cubism 资源之后，
+  任何一步失败都只写一行日志就走人 —— 泄漏整套原生资源（含渲染线程）。
+- 修法：把 `control` / `lapp` / `model` 提升为 `try` 外的局部变量，加 `handedOver` 标志；
+  `model is null`、任意异常、**以及"就绪日志本身抛异常"**三条失败路径都走 `finally` 里的释放。
+- 释放助手 `ReleaseNativeResources(model, lapp, control, logger)` 按 model → lapp → control 顺序，**每步各自 try/catch**。
+  顺序不能反（lapp 持有模型用到的贴图与离屏表面，control 提供 lapp 依赖的 GL 上下文），
+  也不能挤在一个 try 里（`model.Dispose()` 抛一次就会漏掉最贵的 control）。
+
+`Dispose` 原来是"四行挤一个 try"：`_model.Dispose()` 抛异常就跳过 lapp 与 control。改为先单独 try 退订
+`CompositionTarget.Rendering` / `_control.SizeChanged` / `_control.Render`（避免释放过程中合成器还在回调），
+再调同一个释放助手。
+
+其余：删掉 `_startedUtc`（只写不读）；`ApplyViewport` 的视口日志由 `Info` 降为 `Debug`
+（`SizeChanged` 高频触发，而 `LogSink` 每行 Flush，拖窗口会持续写盘）。`_frameworkStarted` 有意不复位
+（Cubism 的 `StartUp` 全进程只允许一次，失败后复用比再来一次安全），已加注释说明。
+
+行尾：该文件原有 2 行散落 CRLF，被编辑工具归一为 LF。这是本轮唯一一处行尾差异
+（`git diff --ignore-cr-at-eol` 后 +81/-11，正常 diff 为 +83/-13）。
+
+### 30.2 窗口 / 托盘 / 动作 / 口型的事件与释放
+
+**MainWindow**：新增 `private readonly List<Action> _unsubscribe`，所有对外部服务的订阅都登记一条退订动作，
+`OnClosed` 里逐条 try/catch 执行后 `Clear()`，且**排在所有释放动作之前**（后台服务在窗口关闭后仍会触发）。
+登记 9 条：`Bubbles.Changed`、`Pipeline.StatusChanged/ReplyReady/UserMessageAccepted`、`Asr.SpeechRecognized`、
+`Asr.StateChanged`、`ObservableAudio.PlaybackStarted/PlaybackStopped`、`Tts.EngineFellBack`。
+`Asr.StateChanged` 原来挂了两个处理器（一个更新文字、一个请求 `Listen` 动作），合并成一个
+（先 `UpdateStageText()`，再只在 `Running` 时请求动作），退订只算一次。
+
+顺带修掉三处零碎问题：
+
+- `_expressionTimer` 初始化里的 `Interval = 8s` 是死赋值（必然被 `ScheduleExpressionRevert` 的
+  `Stop → Interval → Start` 覆盖），删除。
+- 口型：`_lipSync.Start(wav)` 改为只在 `_live2d is not null` 时启动。静态图下 `ApplyMouthOpen` 只写 Debug、
+  没有写回路径，每秒 20 次 `BeginInvoke` 纯属空转。
+- 悬停诊断改为惰性：判定节奏仍是 2 秒一次，但拼接字符串只在"这一 tick 真的要写日志"时做
+  （原来每 100 ms 拼一次）；`IsCursorOnCharacter(bool collectDiag = false)` 收集参数可选。
+- 静态图表情查找统一到 `ApplyExpression`（`.png`/`.jpg` 的探测只剩一处），删掉过期 TODO。
+
+**TrayIcon**：删 `_hostReady` 字段（连同只为消除"未使用"告警而写的 `_ = _hostReady;`）；
+删无效闪烁分支（`BubbleLevel.Error` 时赋的还是构造时同一个 `_icon` 实例，没有任何视觉变化）；
+`Bubbles.Changed` 处理器存字段并在 `Dispose` 里退订；`ContextMenuStrip` 存字段并在 `Dispose` 里
+`Visible=false → ContextMenuStrip=null → Dispose()`，最后释放菜单。
+没有逐个字段保存 9 个菜单项：`ToolStrip.Dispose()` 会连带释放 `Items`，逐个持有属于重复引用、收益为零。
+
+**AnimationManager**：删 `Current` 属性、`ApplyProfile(AvatarProfile)`、`Request(AnimationRequest)` 重载
+（enum 版 `Request` 内联构造请求对象）。删 `ApplyProfile` 的前提是确认"换模型"能力**本身不存在**：
+模型路径只在 `OnHostReady` 里从 `config.live2d.default_model_path` 读一次并建渲染器，
+`ChangeAppearance` 只换静态图，设置面板没有任何 Live2D 模型选择/重建入口 —— 详见 §30.15 第 1 条。
+
+**LipSync**：`_lastReported` 的读与写都挪进 `lock (_sync)`（原来只有写在锁内），
+平滑基准不再可能与 `Stop()` 的清零竞争；`ReportToUi` 仍在锁外。
+
+### 30.3 水平微调：托盘入口缺回调（本轮新发现）
+
+主窗口打开设置面板时会把 `ApplyUserAppearanceSettings` 作为回调传进去，托盘菜单打开时**没有传**——
+从托盘改"水平微调"并保存后，偏移要重启才生效。已在 `TrayIcon` 打开设置面板处补上同一个回调
+（`ApplyUserAppearanceSettings` 本来就是 public，没有改可见性）。
+
+接线的完整形态（`MainWindow`）：
+
+- 字段 `_defaultHorizontalOffset` 记下角色包自带偏移（`profile.HorizontalOffset`）；
+- 创建渲染器时用 `AppearanceStore.LoadHorizontalOffset() ?? _defaultHorizontalOffset`；
+- `ApplyUserAppearanceSettings()` 里 `_live2d?.SetUserOffset(...)`，滑块归零（存 null）时回到角色包默认值，
+  而不是硬编码 0。
+
+### 30.4 TTSManager 并发保护 + `launch_command` 生效
+
+**引擎替换加锁**：新增 `SemaphoreSlim _engineLock`，所有引擎字段替换都走 `InstallEngineAsync`：
+持锁 → 先换字段 → 再 `Unload` 旧引擎（`ReferenceEquals` 防同实例双卸，`Unload` 异常只 Warn）→ 释放锁。
+持锁期间不 await 任何外部代码，所以不会死锁。`Dispose` 也用同一把锁（同步方法只能 `Wait()`）。
+这样消除了"取到引擎引用后、调用前被 Unload"的窗口。
+
+**合成路径取快照**：`var engine = _restarting ? GetPiperFallback() : _engine;` + `engine is null` 检查，
+后续（含 catch 里的 `engine.Name`）全用快照。
+
+**`launch_command` 从死配置变真功能**：`LaunchCommandFor` 只认 `gpt_sovits` / `cosyvoice`
+（`chatterbox` 故意返回 null —— `AppHost` 已经负责拉起，两处都拉会起两个进程）。
+拉起方式与 `AppHost` 同构：`cmd /c <命令>`、`WorkingDirectory = AppPaths.Root`、每个引擎**每进程只试一次**、
+空命令跳过、失败只 Warn（绝不因此让启动失败）。拉起后 2 秒 × 3 次探活（≤6 秒），
+拿到了就继续用，拿不到仍按手册降级到 Piper —— 但用户可以在服务起来后点"重启语音服务"切回。
+
+另删掉一处悬空 XML 注释（没有挂在任何成员上，是 CS1587 的来源）。
+
+### 30.5 ContextManager 轮/条语义
+
+原来 `MaxRecentRounds` 被当成"条数"用：配置 N 轮实际只保留 N 条消息 = N/2 轮（一轮 = 用户 + 回复两条）。
+改为 `MaxRecentMessages => Math.Max(2, MaxRecentRounds * 2)`，压缩阈值改按条数比较，
+日志改为 `（X 条 > Y 条 = Z 轮）`；`AddMessage` 的硬上限同步成 `Math.Max(64, MaxRecentMessages * 2)`。
+
+摘要栈原来无上限（长跑进程会一直长）：新增 `MaxSummaryEntries = 200` + `TrimSummaryStackLocked()`
+（丢最旧、记 Debug），锚点摘要与压缩摘要两处追加点都过一遍。
+
+### 30.6 ConversationPipeline 锚点时序
+
+原顺序是"先覆盖 `_lastUserMessage` 再处理锚点指令"，于是"记住这个"把指令本身当成被记住的内容。
+改为先取 `previousUserMessage` 快照、再覆盖（仍在 `UserMessageAccepted` 之前，事件顺序不变），
+快照传给 `HandleAnchorCommandAsync`。依赖检查：`_lastUserMessage` 的唯一读者就是该方法；
+`GenerateReplyAsync` 用的是参数 `userText`，不读该字段，所以没有其它地方依赖旧顺序。
+
+### 30.7 LogSink 单文件上限（32 MB，滚动一代）
+
+`RollIfTooLarge`：写盘并 Flush 之后检查长度 → 超限则 Flush+Dispose writer → `File.Move(x.log, x.log.1, overwrite: true)`
+→ 重开当日文件 → 用统一的 `FormatLine` 往**新**文件写一条 Info 通知（滚动本身要留痕）。
+
+关键细节是 `_rollRetryAfterLength` 闸门：文件被别的进程独占时 `File.Move` 会失败，
+若每写一行都重试，就会每行都做一遍"关闭 → 改名 → 重开"，把日志变成 I/O 风暴。
+现在失败后记下当时的长度，等文件再长 8 MB 才重试一次。所有 IO 异常照旧吞掉，日志本身不成为崩溃源。
+
+按天清理、`PurgeAll`、目录大小统计没有改动。两个已知取舍登记在 §30.15。
+
+### 30.8 MonitorServer / GameMonitor / GameListProvider
+
+- `MonitorServer.StartAsync` 不再是 `async`（原来结尾只有一句 `await Task.CompletedTask;`）。
+- `_acceptTask` 选择"保留 + 在 `Stop` 里限时等待 1 秒"，而不是删字段：接受循环必须活到 Stop，
+  删字段只消除告警、不解决退出时后台线程还在跑。等待顺序是 `Cancel CTS → Listener.Stop()（打断 Accept）
+  → 再 Wait(1s)`，反过来必等满超时。
+- 加了等待之后引出一个**新回归**：读循环的 finally 现在必定抢在 `Stop` 的 `notify:false` 之前，
+  正常退出会弹一句"游戏检测服务已断开"。新增 `volatile bool _stopping`，`HandleDisconnect` 改为
+  `notify ?? !_stopping`；读循环的通用 catch 在停止期降为 Debug（此时强关 client 属预期）。
+- `GameProcessScanner.GetRunningGames()` 开头调 `_list.ReloadIfChanged(force: false)` ——
+  热重载分支第一次真正可达（外部编辑 `game_list.txt` 后下一次扫描即生效；是否读盘由写时间把关）。
+  重载失败保留上一次的列表、只 Warn、不抛。
+- `Program.cs`：`Main` 建 `CancellationTokenSource`，`ProcessExit` 里 `cts.Cancel()`，
+  `RunAsync(..., cts.Token)`。原 `CancellationToken.None` 让所有取消分支是死代码；
+  现在取消能立刻打断 `Task.Delay`（空闲间隔 30 秒，最多省 30 秒）。协议里没有 offline 消息类型，
+  断连信号就是 socket 关闭：`RunAsync` 返回后 finally 的 `DisposeAsync()` 关连接，主程序读循环 EOF。
+  退出时**刻意不发 restore**（避免与主程序退出流程抢状态回滚）。
+- `TickAsync` 每个检测周期调一次 `_cooldown.PruneExpired()`：冷却字典只在"被查询"时惰性删除，
+  设过一次就再没被查过的进程名会一直留着（长驻进程的慢泄漏）。同时把 `GameCooldownTracker` 里
+  重复的两份清理实现合并成一份（`PruneExpiredLocked` 统一返回清理条数）。
+
+### 30.9 AppHost / App 生命周期
+
+- 删 `_dispatcher`（只赋值不读；UI 封送都在 `BubbleNotifier` / `AnimationManager` 内部）。
+  构造参数保留以免改所有调用方，加注释 + `_ = dispatcher;` 说明。
+- 两处拉起外部服务改用 `using var process = Process.Start(...)`，并新增 `IsProcessRunning` 去重：
+  GameMonitor 按进程名；Chatterbox 改按**健康状态**判断（`cmd /c <任意命令>` 的真实进程可能是
+  python/node/xxx.exe，按进程名会把用户自己的 python 误当成服务而跳过真正需要的启动）。
+- 待审核提醒的 fire-and-forget 任务改为 `_backgroundCts` + `Task? _pendingNotifyTask` 跟踪；
+  `DisposeAsync` 一开始就 Cancel + `Wait(2s)`（超时 Warn），**先于**所有组件拆解与最后的 `LogSink.Close()`。
+- `BubbleNotifier` 新增 `SetLogger(IAppLogger)`，`AppHost` 在两个日志分支里改绑：
+  否则切换 `app_log_dir` 之后，任何一条气泡日志都会把引导目录的文件重新打开（分流 + 多一个句柄）。
+- `App.OnExit`：`_host.DisposeAsync().AsTask()` + `Wait(10s)`，超时不再静默（`Debug.WriteLine`，
+  刻意不写日志文件 —— 此刻 sink 很可能已关，写进去正好是上面要避免的分流）。
+- 兜底托盘：`_host` / `_mainWindow` / `_bubbles` 三者都非 null 才建 `TrayIcon`，否则 `Shutdown(1)`。
+  选择"不创建"而不是安全占位：`TrayIcon` 对这三个对象全无空校验，占位只能把 NRE 藏起来；
+  没有主窗口就没有可托管界面，直接退出比留一个点了就崩的托盘更合理。
+
+### 30.10 闲置表情 `ui.idle_expression_seconds`
+
+`ExpressionHoldSeconds` 是"每次表情播完固定等几秒就退"，配置成 0 就永不回退；`IdleExpressionSeconds`
+是"最后一次交互之后 N 秒，无论表情何时贴上的一律退"。本轮把后者从死配置接成真规则：
+
+- `NoteUserInteraction()` 记录时刻，调用点：表情变化、发送消息、左键按下（点击/拖动起点）、右键开功能栏；
+- `CheckIdleExpression()` 挂在已有的 `_hoverTimer` tick（100 ms）顶部，**先于**透传模式判断，
+  所以关掉悬停切换也生效；不新增定时器；
+- `0` 表示关闭；当前没有表情时直接返回。
+
+`AppConfig` 与 `config.default.yaml` 的注释同步改成"闲置兜底"语义（原来写的是"待机时每隔多少秒播放一次随机表情"，
+与实际行为不符）。
+
+### 30.11 KnowledgeImporter 接线（390 行从零消费者变真入口）
+
+设置面板"待审核知识"页新增"从文件夹导入角色包"按钮：
+
+- `OpenFolderDialog` 选目录（导入器的参数是**角色包目录**，内含 `personality.json`），
+  默认从知识库目录开始找；
+- `new KnowledgeImporter(_host.Config, _host.Logger, _bubbles, _host.Knowledge)`
+  → `ImportCharacterPackAsync(dir, ImportStrategy.Append)`；
+- `Append` 是唯一"只新增、绝不改动已有条目"的策略（`Merge` 会按 Id/触发器改写，`Overwrite` 会备份后替换整库）；
+- `Warnings` 逐条 Warn，成功刷新候选列表并提示条数，失败显示 `Error`，异常记 `Error(ex)`。
+
+### 30.12 本轮删除的死代码（25 项）
+
+| # | 位置 | 判据 |
+| --- | --- | --- |
+| 1 | `AppPaths.EnsureDirectory` | 全仓 1 处（声明本身） |
+| 2 | `AppearanceStore.Model.SavedAt`（+ 唯一写入） | 只写不读 |
+| 3 | `AnimationRequest.CreatedUtc` | 只有初始化赋值 |
+| 4 | `KeyCombo.Modules` | 0 引用 |
+| 5 | `KeyCombo.IsValid` | 0 引用（`ConfigLoader` 直接调 `TryParse`） |
+| 6 | `IdleTaskScheduler.IsTaskRunning` | 0 读取（内部仍用 `_taskRunning`） |
+| 7 | `PiperEngine._config` | 只写不读（9 处 `_config` 匹配其实是 `_configuredModelPath`） |
+| 8 | `PiperEngine._bubble` + 构造参数 | 未使用，3 个调用点同步 |
+| 9 | `PiperEngine.NativeLibraryStatus` / `NativeLibraryMessage` | 公开属性 0 读取；后者降为私有字段（错误文案仍在用） |
+| 10 | `PiperEngine.ConfiguredModelPath` | 0 引用 |
+| 11 | `TtsSynthesisResult.UsedVoice` | 只写不读 → 位置参数与 `Fail` 的 voice 参数一并去掉 |
+| 12 | `AppConfig.FillWarnings`（+ `ConfigLoader` 赋值） | 只写不读，兜底信息仍由 `ConfigLoadResult.Warnings` 返回 |
+| 13 | `IHttpTtsEngine.BaseUrl` | 接口成员 0 消费 → 删；`HttpTtsEngineBase` 的降 private；`ChatterboxEngine` 的实现删掉 |
+| 14 | `LlamaClient.BaseUrl` | 0 引用（内部走 `_baseUrl`） |
+| 15 | `TrayIcon._hostReady` | 只写不读（含 `_ = _hostReady;`） |
+| 16 | `TrayIcon` 的 Error 闪烁分支 | 赋的是同一个 `_icon` 实例，无视觉变化 |
+| 17 | `AnimationManager.Current` | 0 读取 |
+| 18 | `AnimationManager.ApplyProfile` | 0 调用（换模型能力不存在，见 §30.15） |
+| 19 | `AnimationManager.Request(AnimationRequest)` | 0 调用 |
+| 20 | `Live2DRenderer._startedUtc` | 只写不读 |
+| 21 | `MonitorServer` 的 `await Task.CompletedTask;` | 空操作 |
+| 22 | `AppHost._dispatcher` | 只赋值不读 |
+| 23 | `MainWindow._expressionTimer.Interval` 初始化 | 死赋值 |
+| 24 | `SettingsWindow` 3 处恒假 null 守卫 | `InitializeComponent()` 之后恒非 null |
+| 25 | `GameCooldownTracker` 重复的清理实现 | 两套等价逻辑合并成 `PruneExpiredLocked` |
+
+每个名字都按词边界全仓计数（`src` + `tools/probes`，排除 `obj/bin`），确认只剩声明本身才动。
+`tools/probes` 对以上成员 0 引用，已逐名核对。
+
+### 30.13 接线而非删除（5 项）
+
+| 位置 | 之前 | 现在 |
+| --- | --- | --- |
+| `ServiceHealthSnapshot.Describe()` | 只写日志，界面看不到 | 设置面板"服务健康"列表读 `Health.Snapshots` |
+| `BubbleNotifier.Statuses` | 写入后没人读 | 设置面板"状态栏标记"列表（`tts-engine` 等） |
+| `GameCooldownTracker.PruneExpired()` | 0 调用 | `TickAsync` 每周期调用 |
+| `BubbleNotifier.SetLogger` | 不存在（日志器绑死在引导 sink） | `AppHost` 两个日志分支改绑 |
+| `GameProcessScanner.ReloadIfChanged` | 分支不可达 | `GetRunningGames()` 开头调用 |
+
+### 30.14 复核后**保留**的（新增证据）
+
+| 位置 | 为什么保留 |
+| --- | --- |
+| `MonitorMessage.TimestampUtc` | 只有一个构造点，但它是 JSON 线格式字段（`System.Text.Json` 序列化所有公开属性），删了会改变协议 |
+| `PendingReviewService.DisplayText` | 源码里 0 引用，但 `CandidateList` 用 `DisplayMemberPath="DisplayText"` 走反射绑定；grep 看不见这类使用 |
+| `MonitorServer._acceptTask` / `_readTask` | 前者在 `Stop` 里限时等待，后者在 `AcceptLoop` 内 `await`，都属真实使用 |
+| `PiperEngine._nativeLibraryMessage` | 公开属性已删，但"为什么不可用"的错误文案要用它，降为私有字段 |
+| `HttpTtsEngineBase` 软重启时重建 `HttpClient` | 与在飞请求之间确实存在窗口，但异常会被上层 catch 并降级；加锁会把合成路径串行化，代价大于收益 |
+| `WhisperCppRecognizer` 不 `NativeLibrary.Free` | 同 §29.8：实测 `0xC0000005` |
+
+### 30.15 仍未做 / 新登记
+
+1. **换模型能力本身未实现**：没有"重载/切换 Live2D 模型"的入口（`AppHost` 与设置面板都没有），
+   模型路径只在 `OnHostReady` 读一次。所以 `AnimationManager.ApplyProfile` 是被删掉而不是接线；
+   将来若要支持换模型，需要在重建 `Live2DRenderer` 之后重建 `AnimationManager`（或恢复一个 `ApplyProfile` 并接上）。
+2. **知识导入会出现两条气泡**：导入器内部自己弹 `import-done` / `import-rejected`，设置面板再补一条。
+   功能上无害，未改（改要动导入器的提示职责划分）。
+3. **`GameListProvider` 重载失败会每轮 Warn**（约 12 条/分钟）：换来"文件被临时占用后自愈"。
+   若嫌吵，可在 catch 里也更新 `_lastWriteUtc`，本轮未改。
+4. **`.log.1` 是否会被按天清理的 `"*.log"` 枚举命中**：取决于 Win32 对 3 字符扩展名的兼容匹配，
+   按"不动现有清理逻辑"的要求未验证、未改。
+5. **滚动通知那条 Info 不按 `minimum_level` 过滤**：需求是"滚动本身必须留痕"，故保留。
+6. **`AppHost` 构造参数 `dispatcher` 保留**（用 `_ = dispatcher;` 标注）：删参数要改所有调用方，收益为零。
+7. **`Live2DRenderer.cs` 的 2 行 CRLF 被归一到 LF**：见 §30.1 末尾。
+8. **用户的 `config.yaml` 不改**（准则 9）：`idle_expression_seconds` 的新语义只写在模板
+   `config.default.yaml` 的注释里，用户现有文件里的键值与行为仍然一致（20 秒）。
+
+### 30.16 最终状态
+
+- `dotnet build AICompanion.sln -c Debug` → **0 Warning / 0 Error**（本轮共跑 5 次，最后一次在全部改动之后）。
+- 改动 **33 个文件**，`+1143 / -284`（不含本文档）。
+- 行尾：`Live2DRenderer.cs` 的 2 行 CRLF 归一为 LF（该文件其余为 LF）；本文档本身原有 224 行 LF-only，
+  追加 §30 时统一成 CRLF，`git diff --ignore-cr-at-eol` 显示真实内容改动为 `+282 / -1`。代码文件的改动逐文件
+  用 `--ignore-cr-at-eol` 对比过，除上述 2 行外没有行尾噪声。
+- 全部为静态代码修改 + 文档，**没有跑任何模型推理、没有运行程序**（遵守"低负载"要求）。
+- 没有改 `config.yaml`（准则 9），没有关机。

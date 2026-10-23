@@ -72,11 +72,6 @@ public partial class SettingsWindow : Window
 
     private void LoadTtsEngineTab()
     {
-        if (TtsEngineCombo is null)
-        {
-            return;
-        }
-
         _ttsEngineInitialized = false;
         TtsEngineCombo.Items.Clear();
 
@@ -109,7 +104,7 @@ public partial class SettingsWindow : Window
 
     private void UpdateEngineHint()
     {
-        if (TtsEngineHintText is null || TtsEngineCombo?.SelectedItem is not ComboBoxItem item)
+        if (TtsEngineCombo.SelectedItem is not ComboBoxItem item)
         {
             return;
         }
@@ -184,11 +179,6 @@ public partial class SettingsWindow : Window
 
     private void UpdateAppearanceLabels()
     {
-        if (BubbleSecondsText is null || OpacityText is null || HorizontalOffsetText is null)
-        {
-            return;
-        }
-
         BubbleSecondsText.Text = $"{BubbleSecondsSlider.Value:F0} 秒";
         OpacityText.Text = $"{OpacitySlider.Value:P0}";
 
@@ -312,6 +302,17 @@ public partial class SettingsWindow : Window
                 .Select(b => $"[{b.Level}] {b.Message}")
                 .ToList();
 
+            // HealthMonitor 的结果之前只写日志、界面上看不到（Describe() 因此成了零调用死代码）。
+            HealthList.ItemsSource = _host.Health is null
+                ? new[] { "尚未开始探测" }
+                : _host.Health.Snapshots.Select(s => s.Describe()).ToList();
+
+            // 状态栏标记：TTS 降级、游戏模式让出显存等都会写进来，之前写进去没人看。
+            var statuses = _bubbles.Statuses;
+            StatusList.ItemsSource = statuses.Count == 0
+                ? new[] { "无" }
+                : statuses.Select(kv => $"{kv.Key}：{kv.Value}").ToList();
+
             // 显存查询是异步的，这里只更新已有文本，避免阻塞 UI 线程（准则 1）。
             _ = UpdateGpuTextAsync();
         }
@@ -403,6 +404,84 @@ public partial class SettingsWindow : Window
         catch (Exception ex)
         {
             CandidateStatusText.Text = $"丢弃失败：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 从文件夹导入角色包（手册 §3.1 的导入入口）。
+    ///
+    /// 导入器的参数是**角色包目录**（目录里必须有 personality.json），不是单个 JSON 文件，
+    /// 因此这里选文件夹。策略用 <see cref="ImportStrategy.Append"/>：只新增条目、
+    /// 绝不动已有条目，对用户最安全（Overwrite 会替换整个知识库）。
+    /// </summary>
+    private async void OnImportCharacterPack(object sender, RoutedEventArgs e)
+    {
+        if (!_host.IsStarted)
+        {
+            CandidateStatusText.Text = "启动未完成，稍后再试。";
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "选择角色包目录（内含 personality.json）",
+            Multiselect = false,
+        };
+
+        // 默认从知识库目录开始找：角色包最常放在它的旁边。
+        if (Directory.Exists(_host.Knowledge.DirectoryPath))
+        {
+            dialog.InitialDirectory = _host.Knowledge.DirectoryPath;
+        }
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var packDirectory = dialog.FolderName;
+
+        try
+        {
+            CandidateStatusText.Text = "正在导入…";
+
+            // AppHost 没有单独暴露导入器实例，这里用同样四个依赖现建一个（导入器本身无状态）。
+            var importer = new KnowledgeImporter(_host.Config, _host.Logger, _bubbles, _host.Knowledge);
+            var result = await importer.ImportCharacterPackAsync(packDirectory, ImportStrategy.Append);
+
+            foreach (var warning in result.Warnings)
+            {
+                _host.Logger.Warn($"角色包导入警告：{warning}");
+            }
+
+            if (result.Success)
+            {
+                _host.Logger.Info(
+                    $"角色包导入完成（{result.Strategy}）：新增 {result.Added} 条，更新 {result.Updated} 条，" +
+                    $"跳过 {result.Skipped} 条，来源 {packDirectory}");
+
+                CandidateStatusText.Text = $"导入完成：新增 {result.Added} 条，跳过 {result.Skipped} 条。";
+
+                _bubbles.Show(
+                    "knowledge-import",
+                    $"角色包导入完成：新增 {result.Added} 条。",
+                    BubbleLevel.Info,
+                    TimeSpan.FromSeconds(_host.Config.Ui.BubbleDurationSeconds));
+
+                await RefreshCandidatesAsync();
+            }
+            else
+            {
+                _host.Logger.Warn($"角色包导入失败：{result.Error}（来源 {packDirectory}）");
+                CandidateStatusText.Text = $"导入失败：{result.Error}";
+                _bubbles.Show("knowledge-import-failed", $"角色包导入失败：{result.Error}", BubbleLevel.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Error($"导入角色包失败：{ex.Message}", ex);
+            CandidateStatusText.Text = $"导入失败：{ex.Message}";
+            _bubbles.Show("knowledge-import-failed", "角色包导入失败，详见日志。", BubbleLevel.Error);
         }
     }
 

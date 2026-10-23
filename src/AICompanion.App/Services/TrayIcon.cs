@@ -18,9 +18,15 @@ public sealed class TrayIcon : IDisposable
     private readonly BubbleNotifier _bubbles;
     private readonly WF.NotifyIcon _notifyIcon;
     private readonly WF.ToolStripMenuItem _interactiveItem;
+
+    /// <summary>托盘右键菜单。它不归 NotifyIcon 所有（框架不会替我们释放），必须自己 Dispose。</summary>
+    private readonly WF.ContextMenuStrip _menu;
+
+    /// <summary>气泡变化的处理器（存字段才能在 Dispose 里退订）。</summary>
+    private readonly EventHandler _bubblesChangedHandler;
+
     private readonly Icon _icon;
 
-    private bool _hostReady;
     private bool _disposed;
 
     public TrayIcon(AppHost host, MainWindow window, BubbleNotifier bubbles)
@@ -31,7 +37,8 @@ public sealed class TrayIcon : IDisposable
 
         _icon = CreateIcon();
 
-        var menu = new WF.ContextMenuStrip();
+        _menu = new WF.ContextMenuStrip();
+        var menu = _menu;
 
         var showItem = new WF.ToolStripMenuItem("显示/隐藏角色", null, (_, _) => _window.ToggleVisibility());
         menu.Items.Add(showItem);
@@ -62,13 +69,13 @@ public sealed class TrayIcon : IDisposable
 
         _notifyIcon.DoubleClick += (_, _) => _window.ToggleVisibility();
 
-        // 用托盘图标闪烁提示错误（准则 4：不弹窗，改用气泡/闪烁）。
-        _bubbles.Changed += (_, _) => UpdateTooltip();
+        // 气泡变化时同步托盘提示文本（准则 4：不弹窗，用气泡提示；图标只有一枚，无法用它表达状态）。
+        _bubblesChangedHandler = (_, _) => UpdateTooltip();
+        _bubbles.Changed += _bubblesChangedHandler;
     }
 
     public void OnHostReady()
     {
-        _hostReady = true;
         UpdateTooltip();
     }
 
@@ -88,11 +95,6 @@ public sealed class TrayIcon : IDisposable
 
             // NotifyIcon.Text 上限 63 个字符，超长会抛异常。
             _notifyIcon.Text = text.Length <= 63 ? text : text[..60] + "...";
-
-            if (worst?.Level == BubbleLevel.Error)
-            {
-                _notifyIcon.Icon = _icon;
-            }
         }
         catch
         {
@@ -157,7 +159,9 @@ public sealed class TrayIcon : IDisposable
     {
         try
         {
-            var settings = new SettingsWindow(_host, _bubbles)
+            // 必须传 onAppearanceChanged（与主窗口打开设置面板时一致）：
+            // 否则从托盘改完"水平微调"/气泡时长并保存后，角色上不会有任何变化（要重启才生效）。
+            var settings = new SettingsWindow(_host, _bubbles, _window.ApplyUserAppearanceSettings)
             {
                 Owner = _window.IsVisible ? _window : null,
             };
@@ -230,7 +234,19 @@ public sealed class TrayIcon : IDisposable
 
         try
         {
+            _bubbles.Changed -= _bubblesChangedHandler;
+        }
+        catch
+        {
+            // 忽略。
+        }
+
+        try
+        {
             _notifyIcon.Visible = false;
+
+            // NotifyIcon 会持有菜单引用：先断开，菜单才能被干净地释放。
+            _notifyIcon.ContextMenuStrip = null;
             _notifyIcon.Dispose();
         }
         catch
@@ -238,7 +254,16 @@ public sealed class TrayIcon : IDisposable
             // 忽略。
         }
 
+        try
+        {
+            // ToolStrip.Dispose 会连带释放 Items 里的 8 个菜单项，所以不需要逐个 Dispose。
+            _menu.Dispose();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
         _icon.Dispose();
-        _ = _hostReady;   // 保留字段：后续若需要按就绪状态改变行为可直接使用。
     }
 }

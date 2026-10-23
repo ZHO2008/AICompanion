@@ -141,13 +141,18 @@ public sealed class ConversationPipeline
         _idleScheduler?.NotifyUserActivity();
 
         var userMessage = ChatMessage.User(text);
+
+        // 锚点指令要锚住的是"上一条"用户消息，所以必须在覆盖 _lastUserMessage **之前**取快照：
+        // 原实现先覆盖再处理指令，"记住这个"就会把指令本身当成被记住的内容（时序 bug）。
+        var previousUserMessage = _lastUserMessage;
+
         _lastUserMessage = userMessage;
         UserMessageAccepted?.Invoke(this, userMessage);
 
         // 锚点指令：把上一轮对话标记为"记住"。
         if (AnchorCommandPattern.IsMatch(text))
         {
-            return await HandleAnchorCommandAsync(userMessage, cancellationToken).ConfigureAwait(false);
+            return await HandleAnchorCommandAsync(userMessage, previousUserMessage, cancellationToken).ConfigureAwait(false);
         }
 
         try
@@ -336,11 +341,15 @@ public sealed class ConversationPipeline
     }
 
     /// <summary>处理"记住这个"（手册 §3.2 锚点记忆）。</summary>
-    private Task<PipelineResult> HandleAnchorCommandAsync(ChatMessage command, CancellationToken cancellationToken)
+    private Task<PipelineResult> HandleAnchorCommandAsync(
+        ChatMessage command,
+        ChatMessage? previousUserMessage,
+        CancellationToken cancellationToken)
     {
         // 把上一条用户消息与上一条回复作为锚点内容。
-        var anchored = _lastAssistantMessage is not null && _lastUserMessage is not null
-            ? ChatMessage.User($"{_lastUserMessage.Content} → {_lastAssistantMessage.Content}")
+        // 上一条用户消息由调用方在覆盖 _lastUserMessage 之前快照传入（见 ProcessUserTextAsync）。
+        var anchored = _lastAssistantMessage is not null && previousUserMessage is not null
+            ? ChatMessage.User($"{previousUserMessage.Content} → {_lastAssistantMessage.Content}")
             : command;
 
         _context.AddAnchorMemory(anchored);

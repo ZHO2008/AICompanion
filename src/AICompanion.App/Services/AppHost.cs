@@ -40,12 +40,26 @@ namespace AICompanion.App.Services;
 /// </summary>
 public sealed class AppHost : IAsyncDisposable
 {
-    private readonly Dispatcher _dispatcher;
     private readonly BubbleNotifier _bubbles;
     private readonly List<string> _startupProblems = new();
 
+    /// <summary>
+    /// 启动期旁路任务（待审核提醒）的取消与句柄。
+    ///
+    /// 它们捕获了 this：若在 <see cref="DisposeAsync"/> 关掉日志 sink 之后才跑完，
+    /// 往里写一行日志就会把旧目录的日志文件重新打开（日志分流 + 多一个句柄）。
+    /// 因此 DisposeAsync 必须先 Cancel + 限时等它结束，再关日志。
+    /// </summary>
+    private readonly CancellationTokenSource _backgroundCts = new();
+    private Task? _pendingNotifyTask;
+
     private FileLogger? _rootLogger;
 
+    /// <param name="dispatcher">
+    /// UI 线程调度器。AppHost 自身不做封送（需要 UI 线程的组件在各自内部处理，
+    /// 例如 BubbleNotifier），因此这里**只保留参数、不再存字段**：
+    /// 原来的 _dispatcher 字段只赋值、全仓库零读取。
+    /// </param>
     /// <param name="sharedSink">
     /// 由调用方（App.OnStartup）预先创建并共享的日志 sink。
     ///
@@ -58,7 +72,7 @@ public sealed class AppHost : IAsyncDisposable
     /// </param>
     public AppHost(Dispatcher dispatcher, BubbleNotifier bubbles, LogSink? sharedSink = null)
     {
-        _dispatcher = dispatcher;
+        _ = dispatcher;   // 保留参数只为调用方签名稳定：AppHost 不直接往 UI 线程封送。
         _bubbles = bubbles;
 
         /*
@@ -156,6 +170,11 @@ public sealed class AppHost : IAsyncDisposable
             LogSink = BootstrapSink;
             _rootLogger = new FileLogger(LogSink, "App");
             Logger = _rootLogger;
+
+            // 气泡的 notifier 在引导期就建好了，它的日志器仍指着引导 sink。
+            // 统一改绑到真正的根日志器：否则切换目录后每条气泡日志都会把旧目录的文件重新打开。
+            _bubbles.SetLogger(Logger);
+
             Logger.Info($"沿用引导日志目录：{LogSink.DirectoryPath}");
         }
         else
@@ -163,6 +182,9 @@ public sealed class AppHost : IAsyncDisposable
             LogSink = new LogSink(appLogDirectory, level, Config.Logging.MaxLogDays);
             _rootLogger = new FileLogger(LogSink, "App");
             Logger = _rootLogger;
+
+            // 同上：先改绑气泡日志，再关闭引导句柄，避免"改绑前写一条、落到旧目录"。
+            _bubbles.SetLogger(Logger);
 
             // 目录不同：先关掉引导句柄再用新的，避免两个句柄同时存在。
             BootstrapSink.Close();
@@ -348,17 +370,30 @@ public sealed class AppHost : IAsyncDisposable
         Idle.Start();
 
         // ---------- 10. 待审核提醒 ----------
-        _ = Task.Run(async () =>
-        {
-            try
+        /*
+         * 这里是"启动即走"的旁路任务，但绝不能裸 fire-and-forget。
+         *
+         * 它捕获了 this；若 DisposeAsync 已经把日志 sink 关掉，它随后再写一行
+         * `Logger.Warn`，LogSink.EnsureWriter 就会把已关闭的日志文件重新打开
+         * （日志分流到旧目录 + 多一个句柄）。所以要把 Task 存下来，退出时先取消并限时等待。
+         */
+        _pendingNotifyTask = Task.Run(
+            async () =>
             {
-                await Knowledge.Pending.NotifyIfNeededAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"待审核提醒失败：{ex.Message}");
-            }
-        }, CancellationToken.None);
+                try
+                {
+                    await Knowledge.Pending.NotifyIfNeededAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // 已经在退出就不再写日志：此时 sink 可能已关闭，写进去会把旧文件重新打开。
+                    if (!_backgroundCts.IsCancellationRequested)
+                    {
+                        Logger.Warn($"待审核提醒失败：{ex.Message}");
+                    }
+                }
+            },
+            _backgroundCts.Token);
 
         Logger.Info(
             $"启动完成：运行模式={RuntimeMode.Describe()}，LLM 就绪={LlmReady}，" +
@@ -427,6 +462,35 @@ public sealed class AppHost : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 按进程名判断是否已有实例在运行（查询失败一律当作"没有"，不影响后面的拉起逻辑）。
+    /// 用于拉起前先去重：否则每点一次"重连/重启"就会多一个常驻进程。
+    /// </summary>
+    private static bool IsProcessRunning(string processName)
+    {
+        try
+        {
+            var running = System.Diagnostics.Process.GetProcessesByName(processName);
+
+            try
+            {
+                return running.Length > 0;
+            }
+            finally
+            {
+                // 每个 Process 对象都是一个进程句柄，不 Dispose 就等着终结器回收。
+                foreach (var process in running)
+                {
+                    process.Dispose();
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>按配置的启动命令重新拉起 chatterbox-api。</summary>
     private async Task<bool> RestartChatterboxAsync(CancellationToken cancellationToken)
     {
@@ -441,6 +505,16 @@ public sealed class AppHost : IAsyncDisposable
             return false;
         }
 
+        // 拉起前先看服务是否已经在线：已在线还去执行命令，每次重连都会多一个常驻的 chatterbox 进程。
+        // 这里用健康状态而不是进程名：启动命令形如 `cmd /c <任意命令>`，真实进程可能是
+        // python/node/xxx.exe，按名字查既可能漏判也可能误判（把用户自己的 python 当成服务）。
+        var existing = Health.Snapshots.FirstOrDefault(s => s.Key == "chatterbox");
+        if (existing?.State == Core.Health.ServiceState.Online)
+        {
+            Logger.Info("Chatterbox 已在线，跳过重复拉起。");
+            return true;
+        }
+
         try
         {
             Logger.Info($"按配置启动 Chatterbox：{command}");
@@ -453,7 +527,8 @@ public sealed class AppHost : IAsyncDisposable
                 WorkingDirectory = AppPaths.Root,
             };
 
-            System.Diagnostics.Process.Start(psi);
+            // using 只为不泄漏进程句柄（不 WaitForExit，否则会把启动流程阻塞到命令结束）。
+            using var process = System.Diagnostics.Process.Start(psi);
 
             // 给它一点启动时间，然后全量探活确认。
             for (var i = 0; i < 10; i++)
@@ -496,6 +571,14 @@ public sealed class AppHost : IAsyncDisposable
                 return Task.FromResult(false);
             }
 
+            // 已经在跑就不要再拉一个：托盘"重连游戏检测"可能被连点，
+            // 每次都会留下一个常驻的 GameMonitor.exe（它自己会重连，不需要新实例）。
+            if (IsProcessRunning("GameMonitor"))
+            {
+                Logger.Info("GameMonitor 已在运行，跳过重复拉起（它自己会重连主程序）。");
+                return Task.FromResult(true);
+            }
+
             var psi = new System.Diagnostics.ProcessStartInfo(exe)
             {
                 UseShellExecute = false,
@@ -503,7 +586,8 @@ public sealed class AppHost : IAsyncDisposable
                 WorkingDirectory = Path.GetDirectoryName(exe) ?? AppPaths.Root,
             };
 
-            System.Diagnostics.Process.Start(psi);
+            // using 只为不泄漏进程句柄（不 WaitForExit：GameMonitor 是常驻进程）。
+            using var process = System.Diagnostics.Process.Start(psi);
             Logger.Info($"已重新启动 GameMonitor：{exe}");
             return Task.FromResult(true);
         }
@@ -517,6 +601,36 @@ public sealed class AppHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         Logger?.Info("正在关闭 AI 伴侣…");
+
+        /*
+         * 先收掉启动期的旁路任务，再拆组件、最后关日志 —— 顺序不能反。
+         *
+         * 那个任务捕获了 this：若它在日志 sink 关闭之后才写日志，
+         * LogSink.EnsureWriter 会把已关闭的日志文件重新打开（日志分流到旧目录 + 多一个句柄）。
+         */
+        try
+        {
+            _backgroundCts.Cancel();
+
+            var pending = _pendingNotifyTask;
+            if (pending is not null && !pending.Wait(TimeSpan.FromSeconds(2)))
+            {
+                // 不无参等：它可能正卡在读知识库文件上，无限等待会吃光 OnExit 的 10 秒退出预算。
+                Logger?.Warn("待审核提醒任务 2 秒内未结束，继续退出。");
+            }
+        }
+        catch (AggregateException ex)
+        {
+            Logger?.Warn($"待审核提醒任务异常结束：{ex.InnerException?.Message ?? ex.Message}");
+        }
+        catch
+        {
+            // 其它异常都不该阻断退出流程。
+        }
+        finally
+        {
+            _backgroundCts.Dispose();
+        }
 
         try
         {

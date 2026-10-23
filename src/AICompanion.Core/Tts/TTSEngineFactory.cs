@@ -80,6 +80,6 @@ public static class TTSEngineFactory
             context.Logger.Warn($"无法识别的 TTS 引擎 \"{engineType}\"，按手册规则回退为 Piper。");
         }
 
-        return new PiperEngine(context.Config, context.Logger, context.Bubble);
+        return new PiperEngine(context.Config, context.Logger);
     }
 }

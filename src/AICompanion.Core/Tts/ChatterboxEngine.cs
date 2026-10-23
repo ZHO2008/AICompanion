@@ -42,8 +42,6 @@ public sealed class ChatterboxEngine : IHttpTtsEngine
     /// <summary>本引擎实例已连续运行的时长，用于软重启判断（手册 §3.4：超过 4 小时）。</summary>
     public TimeSpan Uptime => DateTime.UtcNow - _startedUtc;
 
-    public string BaseUrl => _baseUrl;
-
     public int Port => _config.Tts.Chatterbox.Port;
 
     private static HttpClient CreateClient()

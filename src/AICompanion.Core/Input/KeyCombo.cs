@@ -14,9 +14,6 @@ public static class KeyCombo
     public const int VkAlt = 0x12;
     public const int VkLWin = 0x5B;
 
-    /// <summary>修饰键（也含 Win 的主判定键），按需全按下方算触发。</summary>
-    public static IReadOnlyList<int> Modules(int[] modifiers) => modifiers;
-
     /// <summary>
     /// 解析按键描述。成功时 <paramref name="modifiers"/> 为修饰键虚拟码数组，
     /// <paramref name="mainKey"/> 为主键虚拟码。
@@ -58,8 +55,6 @@ public static class KeyCombo
         return true;
     }
 
-    /// <summary>主键是否被支持（用于配置校验时的友好提示）。</summary>
-    public static bool IsValid(string? spec) => TryParse(spec, out _, out _);
 
     private static bool TryParseModifier(string text, out int vk)
     {

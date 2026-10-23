@@ -54,7 +54,6 @@ public static class AppearanceStore
         /// </summary>
         public string? TtsEngine { get; set; }
 
-        public DateTime SavedAt { get; set; }
     }
 
     private static Model LoadModel()
@@ -104,7 +103,6 @@ public static class AppearanceStore
                 Directory.CreateDirectory(directory);
             }
 
-            model.SavedAt = DateTime.Now;
             File.WriteAllText(path, JsonSerializer.Serialize(model, JsonOptions), new UTF8Encoding(false));
             return true;
         }

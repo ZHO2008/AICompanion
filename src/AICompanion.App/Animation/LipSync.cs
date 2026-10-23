@@ -156,13 +156,22 @@ public sealed class LipSyncDriver : IDisposable
         }
 
         // 简单的起音/释放平滑：上扬快、回落慢，避免嘴抖。
+        //
+        // 平滑基准 _lastReported 必须在锁内读写：Stop() 会在锁内把它清零，
+        // 在锁外读/写就可能拿一个已被清零的旧值当基准，表现为嘴部开合突然回退。
         var target = envelope[index];
-        var previous = _lastReported;
-        var smoothed = target > previous
-            ? previous + (target - previous) * 0.7
-            : previous + (target - previous) * 0.3;
 
-        _lastReported = smoothed;
+        double smoothed;
+        lock (_sync)
+        {
+            var previous = _lastReported;
+            smoothed = target > previous
+                ? previous + (target - previous) * 0.7
+                : previous + (target - previous) * 0.3;
+
+            _lastReported = smoothed;
+        }
+
         ReportToUi(smoothed);
     }
 

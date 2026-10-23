@@ -62,7 +62,6 @@ public sealed record AnimationRequest(
     string Source = "unknown",
     TimeSpan? HoldFor = null)
 {
-    public DateTime CreatedUtc { get; init; } = DateTime.UtcNow;
 }
 
 /// <summary>逻辑动作到优先级的默认约定（调用方也可以显式指定）。</summary>

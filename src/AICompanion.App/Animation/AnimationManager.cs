@@ -72,47 +72,11 @@ public sealed class AnimationManager
     /// <summary>当前模型的嘴型参数名（口型同步用）。</summary>
     public string MouthOpenParameter => Profile.MouthOpenParameter;
 
-    public AnimationRequest? Current
-    {
-        get
-        {
-            lock (_sync)
-            {
-                return _current;
-            }
-        }
-    }
-
-    /// <summary>切换角色（换模型时调用）：替换映射表并重建告警集合。</summary>
-    public void ApplyProfile(AvatarProfile profile)
-    {
-        if (profile is null)
-        {
-            return;
-        }
-
-        lock (_sync)
-        {
-            _profile = profile;
-            _warnedMotions.Clear();
-        }
-
-        _logger.Info($"动作映射已切换到角色包：{profile.AvatarName}");
-    }
-
     /// <summary>提交动作请求。**任意线程可调用**，立即返回。</summary>
     public void Request(AnimationType type, AnimationPriority? priority = null,
         string source = "unknown", TimeSpan? holdFor = null)
     {
-        Request(new AnimationRequest(type, priority ?? AnimationPriorityDefaults.For(type), source, holdFor));
-    }
-
-    public void Request(AnimationRequest request)
-    {
-        if (request is null)
-        {
-            return;
-        }
+        var request = new AnimationRequest(type, priority ?? AnimationPriorityDefaults.For(type), source, holdFor);
 
         // 后台线程到此为止：真正执行切回 UI 线程
         _dispatcher.BeginInvoke(new Action(() => ApplyOnUiThread(request)));

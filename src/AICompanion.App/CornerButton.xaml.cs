@@ -110,11 +110,17 @@ public partial class CornerButton : Window
     /// <summary>更新按钮上的模式标记：覆盖态显示「覆」，透明态显示「透」。</summary>
     public void SetMode(bool clickThrough)
     {
-
         ModeText.Text = clickThrough ? "透" : "覆";
-        ModeText.Foreground = clickThrough
-            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xC9, 0x7A))
-            : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xF0, 0xF0, 0xF0));
+
+        // 冻结：每次切换模式都 new 两个画刷，未冻结的画刷带 Freezable 事件开销，
+        // 而且这两个颜色是常量，冻结后 WPF 可以走更快的渲染路径。
+        var brush = new System.Windows.Media.SolidColorBrush(
+            clickThrough
+                ? System.Windows.Media.Color.FromRgb(0xFF, 0xC9, 0x7A)
+                : System.Windows.Media.Color.FromRgb(0xF0, 0xF0, 0xF0));
+
+        brush.Freeze();
+        ModeText.Foreground = brush;
 
         ToggleButton.ToolTip = clickThrough
             ? "当前：透明（点击穿透）。点此切回覆盖（可交互）"

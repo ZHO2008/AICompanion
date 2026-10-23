@@ -46,7 +46,7 @@ public abstract class HttpTtsEngineBase : IHttpTtsEngine
 
     public abstract string Name { get; }
 
-    public string BaseUrl => $"http://{_host}:{_port}";
+    private string BaseUrl => $"http://{_host}:{_port}";
 
     public int Port => _port;
 

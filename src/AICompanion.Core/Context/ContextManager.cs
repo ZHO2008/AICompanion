@@ -32,6 +32,12 @@ public sealed class ContextManager
     private readonly List<SummaryEntry> _summaryStack = new();
     private readonly List<ChatMessage> _anchors = new();
 
+    /// <summary>
+    /// 摘要集合的总条数上限。token 上限只约束"单层"，锚点摘要与各层条目叠起来仍会长期增长，
+    /// 所以再加一道条数兜底：超出时丢弃最旧的（摘要只是窗口，原文另有归档，不丢数据）。
+    /// </summary>
+    private const int MaxSummaryEntries = 200;
+
     private readonly string _chatLogDirectory;
     private readonly string _archivePath;
 
@@ -63,6 +69,13 @@ public sealed class ContextManager
 
     /// <summary>手册里的常量 MaxRecentRounds，默认 30，可通过配置修改。</summary>
     public int MaxRecentRounds => Math.Max(1, _config.Context.MaxRecentRounds);
+
+    /// <summary>
+    /// 窗口的**消息条数**上限：一轮对话 = 用户消息 + 助手回复两条，因此是轮数 × 2。
+    /// 配置项 <c>context.max_recent_rounds</c> 的语义是"最近 N 轮"，
+    /// 拿它直接和 _recent.Count（条数）比较会让实际窗口只有 N/2 轮。
+    /// </summary>
+    private int MaxRecentMessages => Math.Max(2, MaxRecentRounds * 2);
 
     public IReadOnlyList<ChatMessage> RecentMessages
     {
@@ -113,9 +126,9 @@ public sealed class ContextManager
             _recent.Add(message);
 
             // 硬上限：压缩只发生在空闲维护里，若用户一直不空闲（连续对话），
-            // _recent 就会无止境地涨。这里按"轮数上限的 2 倍 + 余量"兜底裁剪，
+            // _recent 就会无止境地涨。这里按"消息窗口上限的 2 倍 + 余量"兜底裁剪，
             // 保证即使长时间不触发维护，内存窗口也不会失控（被裁掉的消息仍在聊天日志里）。
-            var hardCap = Math.Max(64, MaxRecentRounds * 4);
+            var hardCap = Math.Max(64, MaxRecentMessages * 2);
             while (_recent.Count > hardCap)
             {
                 _recent.RemoveAt(0);
@@ -163,6 +176,7 @@ public sealed class ContextManager
                 };
                 anchorSummary.EstimatedTokens = EstimateTokens(anchorSummary.Text);
                 _summaryStack.Add(anchorSummary);
+                TrimSummaryStackLocked();
 
                 _logger.Info($"锚点记忆达到上限 {limit}，最旧一条已压缩为锚点摘要。");
             }
@@ -310,17 +324,18 @@ public sealed class ContextManager
     {
         List<ChatMessage> overflow;
         var maxRounds = MaxRecentRounds;
+        var maxMessages = MaxRecentMessages;
 
         lock (_sync)
         {
-            // 手册步骤 1：未超过阈值直接返回。
-            if (_recent.Count <= maxRounds)
+            // 手册步骤 1：未超过阈值直接返回。阈值按**轮**配置，这里换算成消息条数再比较。
+            if (_recent.Count <= maxMessages)
             {
                 return false;
             }
 
             // 手册步骤 2：取出最早的一批（超出的部分）。
-            var count = _recent.Count - maxRounds;
+            var count = _recent.Count - maxMessages;
             overflow = _recent.GetRange(0, count);
         }
 
@@ -329,7 +344,7 @@ public sealed class ContextManager
             return false;
         }
 
-        _logger.Info($"上下文超出窗口（{overflow.Count + maxRounds} > {maxRounds}），开始压缩 {overflow.Count} 条最早消息。");
+        _logger.Info($"上下文超出窗口（{overflow.Count + maxMessages} 条 > {maxMessages} 条 = {maxRounds} 轮），开始压缩 {overflow.Count} 条最早消息。");
 
         // 手册步骤 3：调用 LLM（复用已有的聊天模型）生成摘要。
         var summaryText = await SummarizeAsync(overflow, cancellationToken).ConfigureAwait(false);
@@ -458,7 +473,25 @@ public sealed class ContextManager
                     EstimatedTokens = EstimateTokens(merged),
                 });
             }
+
+            TrimSummaryStackLocked();
         }
+    }
+
+    /// <summary>
+    /// 摘要条数兜底：超过 <see cref="MaxSummaryEntries"/> 时从最旧的开始丢弃。
+    /// 调用方必须已持有 <see cref="_sync"/>（方法名带 Locked 表示这一点）。
+    /// </summary>
+    private void TrimSummaryStackLocked()
+    {
+        var overflow = _summaryStack.Count - MaxSummaryEntries;
+        if (overflow <= 0)
+        {
+            return;
+        }
+
+        _summaryStack.RemoveRange(0, overflow);
+        _logger.Debug($"摘要条数超过上限 {MaxSummaryEntries}，已丢弃最旧的 {overflow} 条。");
     }
 
     private void RemoveFromWindow(List<ChatMessage> messages)

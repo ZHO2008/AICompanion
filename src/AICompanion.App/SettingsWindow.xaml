@@ -55,6 +55,16 @@
 
                     <TextBlock Style="{StaticResource SectionTitle}" Text="当前告警气泡" />
                     <ListBox x:Name="BubbleList" Height="120" />
+
+                    <!-- 手册 §1.6 步骤 7：HealthMonitor 的二次确认结果要能被看到，
+                         否则"服务到底在不在线"只能靠猜。 -->
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="服务健康（HealthMonitor）" />
+                    <ListBox x:Name="HealthList" Height="110" />
+
+                    <!-- SetStatus 写进来的状态栏标记（例如"当前实际引擎：Piper（降级）"）。
+                         这个字典之前没人读，等于写进去就丢了。 -->
+                    <TextBlock Style="{StaticResource SectionTitle}" Text="状态栏标记" />
+                    <ListBox x:Name="StatusList" Height="80" />
                 </StackPanel>
             </ScrollViewer>
         </TabItem>
@@ -78,6 +88,7 @@
                     <Button Content="刷新" Click="OnRefreshCandidates" />
                     <Button Content="确认入库" Click="OnConfirmCandidate" />
                     <Button Content="丢弃" Click="OnDiscardCandidate" />
+                    <Button Content="从文件夹导入角色包" Click="OnImportCharacterPack" />
                     <TextBlock x:Name="CandidateStatusText" VerticalAlignment="Center" Margin="10,0,0,0" />
                 </StackPanel>
             </Grid>

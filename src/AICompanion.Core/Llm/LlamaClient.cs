@@ -60,8 +60,6 @@ public sealed class LlamaClient : IDisposable
         HealthTimeout = healthTimeout ?? TimeSpan.FromSeconds(5);
     }
 
-    public string BaseUrl => _baseUrl;
-
     public TimeSpan HealthTimeout { get; }
 
     /// <summary>手册 §3.8 探活规则：状态码 200 且主体包含 "status":"ok"。</summary>

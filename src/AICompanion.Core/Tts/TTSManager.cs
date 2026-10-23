@@ -5,9 +5,9 @@ using AICompanion.Core.Models;
 namespace AICompanion.Core.Tts;
 
 /// <summary>合成结果。用结果对象而不是抛异常，是为了让对话管线在"没声音"时仍能继续。</summary>
-public sealed record TtsSynthesisResult(bool Success, byte[]? Audio, VoiceConfig UsedVoice, string? Error)
+public sealed record TtsSynthesisResult(bool Success, byte[]? Audio, string? Error)
 {
-    public static TtsSynthesisResult Fail(VoiceConfig voice, string error) => new(false, null, voice, error);
+    public static TtsSynthesisResult Fail(string error) => new(false, null, error);
 }
 
 /// <summary>
@@ -31,6 +31,20 @@ public sealed class TTSManager : IDisposable
 
     private ITTSEngine _engine;
     private ITTSEngine? _piperFallback;
+
+    /// <summary>
+    /// "换引擎 / 重建 / 卸载"的临界区。
+    ///
+    /// 合成线程只读 <see cref="_engine"/> 的本地快照，而 ResetAsync / 降级 / Dispose 会
+    /// Unload 旧引擎再装上新引擎。两者不互斥时会出现"同一个引擎被 Dispose 两次"或
+    /// "对已释放的引擎发起合成"。所有 engine 字段的替换都走 <see cref="InstallEngineAsync"/>。
+    /// </summary>
+    private readonly SemaphoreSlim _engineLock = new(1, 1);
+
+    /// <summary>已经尝试过自动拉起的外部引擎（每个引擎每进程只试一次，避免反复拉起进程）。</summary>
+    private readonly HashSet<string> _launchAttempted = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _launchSync = new();
+
     private volatile bool _restarting;
     private DateTime _lastRequestUtc = DateTime.UtcNow;
     private bool _disposed;
@@ -72,8 +86,6 @@ public sealed class TTSManager : IDisposable
     /// </summary>
     public IHttpTtsEngine? ActiveHttpEngine => _engine as IHttpTtsEngine;
 
-    /// <summary>是否正在使用外部 HTTP 语音服务。</summary>
-
     /// <summary>引擎标识 → 给人看的名字（日志与气泡用）。</summary>
     public static string EngineLabel(string name) => name switch
     {
@@ -90,28 +102,38 @@ public sealed class TTSManager : IDisposable
     {
         _logger.Info($"按配置创建 TTS 引擎：{_config.Tts.Engine}");
 
-        if (_engine is IHttpTtsEngine httpEngine)
+        // 先取本地快照：探活要 await 网络，绝不能持着 _engineLock 等外部服务。
+        var engine = _engine;
+
+        if (engine is IHttpTtsEngine httpEngine)
         {
             var available = await httpEngine.RefreshAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+
+            // 外部引擎不健康且配置了 launch_command → 用 Process.Start 拉起一次（每进程仅一次）。
+            if (!available && TryLaunchExternalEngine(engine.Name))
+            {
+                available = await WaitForExternalEngineAsync(httpEngine, cancellationToken).ConfigureAwait(false);
+            }
 
             if (!available)
             {
                 // 手册 §3.4 步骤 3：记录日志 + 气泡 + 改用 Piper + 状态栏标注降级。
-                var label = EngineLabel(_engine.Name);
+                var label = EngineLabel(engine.Name);
                 _logger.Warn($"{label} 不可用，按手册降级为 Piper。");
                 _bubble.Show(
                     "tts-degraded",
                     $"{label} 启动失败，已降级为 Piper。请在设置中调整。",
                     BubbleLevel.Warning);
 
-                _engine.Unload();
-                _engine = CreatePiper();
+                // 卸载 + 换引擎必须在锁内完成；事件回调留在锁外（不允许持锁调外部代码）。
+                var fallback = CreatePiper();
+                await InstallEngineAsync(fallback).ConfigureAwait(false);
                 IsDegraded = true;
-                EngineFellBack?.Invoke(this, _engine.Name);
+                EngineFellBack?.Invoke(this, fallback.Name);
             }
             else
             {
-                _logger.Info($"{EngineLabel(_engine.Name)} 已就绪，使用外部语音服务合成。");
+                _logger.Info($"{EngineLabel(engine.Name)} 已就绪，使用外部语音服务合成。");
                 _bubble.Clear("tts-degraded");
                 IsDegraded = false;
             }
@@ -120,7 +142,7 @@ public sealed class TTSManager : IDisposable
         {
             IsDegraded = false;
 
-            if (!_engine.IsAvailable)
+            if (!engine.IsAvailable)
             {
                 /*
                  * Piper 不可用（模型或 piper.exe 缺失）。
@@ -134,12 +156,12 @@ public sealed class TTSManager : IDisposable
                 _logger.Warn("Piper 不可用，降级为 Windows 内置语音（SAPI）。");
                 _bubble.Clear("tts-model-missing");
 
-                _engine.Unload();
-                _engine = new SapiEngine(_logger);
+                var sapi = new SapiEngine(_logger);
+                await InstallEngineAsync(sapi).ConfigureAwait(false);
                 IsDegraded = true;
-                EngineFellBack?.Invoke(this, _engine.Name);
+                EngineFellBack?.Invoke(this, sapi.Name);
 
-                if (_engine.IsAvailable)
+                if (sapi.IsAvailable)
                 {
                     _bubble.Show(
                         "tts-degraded",
@@ -214,11 +236,18 @@ public sealed class TTSManager : IDisposable
 
         if (string.IsNullOrWhiteSpace(text))
         {
-            return TtsSynthesisResult.Fail(voice, "文本为空。");
+            return TtsSynthesisResult.Fail("文本为空。");
         }
 
         // 软重启期间临时用 Piper 合成一次，但不改变主引擎标识（手册 §3.4 软重启）。
+        //
+        // 先取本地快照再判空：另一个线程可能正在 ResetAsync / 降级路径里换引擎，
+        // 直接读 _engine 会在"取到引用之后、调用之前"被 Unload，变成对已释放引擎合成。
         var engine = _restarting ? GetPiperFallback() : _engine;
+        if (engine is null)
+        {
+            return TtsSynthesisResult.Fail("TTS 引擎未就绪。");
+        }
 
         try
         {
@@ -230,18 +259,18 @@ public sealed class TTSManager : IDisposable
                 _logger.Info("软重启期间已临时使用 Piper 合成（主引擎标识未改变）。");
             }
 
-            return new TtsSynthesisResult(true, audio, voice, null);
+            return new TtsSynthesisResult(true, audio, null);
         }
         catch (OperationCanceledException)
         {
-            return TtsSynthesisResult.Fail(voice, "已取消。");
+            return TtsSynthesisResult.Fail("已取消。");
         }
         catch (Exception ex)
         {
             // 手册：记录详细错误日志 + 气泡提示，不做任何自动恢复。
             _logger.Error($"语音合成失败（引擎 {engine.Name}，音色 {voice.FallbackPiperVoice}）：{ex.Message}", ex);
             _bubble.Show("tts-failed", "语音合成失败。可在系统托盘点击\"重启语音服务\"重试。", BubbleLevel.Error);
-            return TtsSynthesisResult.Fail(voice, ex.Message);
+            return TtsSynthesisResult.Fail(ex.Message);
         }
     }
 
@@ -251,7 +280,8 @@ public sealed class TTSManager : IDisposable
     /// </summary>
     public async Task<bool> CheckSoftRestartAsync(TimeSpan userIdle, CancellationToken cancellationToken = default)
     {
-        if (_engine is not IHttpTtsEngine httpEngine || _restarting)
+        var engine = _engine;
+        if (engine is not IHttpTtsEngine httpEngine || _restarting)
         {
             return false;
         }
@@ -271,7 +301,7 @@ public sealed class TTSManager : IDisposable
         }
 
         _logger.Info(
-            $"{EngineLabel(_engine.Name)} 已连续运行 {httpEngine.Uptime.TotalHours:N1} 小时且空闲超过 " +
+            $"{EngineLabel(engine.Name)} 已连续运行 {httpEngine.Uptime.TotalHours:N1} 小时且空闲超过 " +
             $"{idleThreshold.TotalMinutes:N0} 分钟，开始软重启。");
 
         _restarting = true;
@@ -282,7 +312,7 @@ public sealed class TTSManager : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Error($"{EngineLabel(_engine.Name)} 软重启失败（不影响当前服务）：{ex.Message}", ex);
+            _logger.Error($"{EngineLabel(engine.Name)} 软重启失败（不影响当前服务）：{ex.Message}", ex);
             return false;
         }
         finally
@@ -299,16 +329,9 @@ public sealed class TTSManager : IDisposable
     {
         _logger.Info("收到\"重启语音服务\"请求，正在重建 TTS 引擎。");
 
-        try
-        {
-            _engine.Unload();
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn($"卸载旧 TTS 引擎时异常：{ex.Message}");
-        }
-
-        _engine = TTSEngineFactory.Create(_config.Tts.Engine, _context);
+        // 卸载旧引擎 + 装上新引擎在锁内一次完成（见 _engineLock 的说明），
+        // 避免与合成线程 / 降级路径同时对同一个引擎 Dispose。
+        await InstallEngineAsync(TTSEngineFactory.Create(_config.Tts.Engine, _context)).ConfigureAwait(false);
         IsDegraded = false;
         _lastRequestUtc = DateTime.UtcNow;
 
@@ -334,11 +357,131 @@ public sealed class TTSManager : IDisposable
 
     private PiperEngine GetPiperFallback()
     {
-        _piperFallback ??= new PiperEngine(_config, _logger, _bubble);
+        _piperFallback ??= new PiperEngine(_config, _logger);
         return (PiperEngine)_piperFallback;
     }
 
-    private PiperEngine CreatePiper() => new(_config, _logger, _bubble);
+    private PiperEngine CreatePiper() => new(_config, _logger);
+
+    /// <summary>
+    /// 在锁内换引擎：装上新引擎，再卸载被替换掉的旧引擎。
+    ///
+    /// 构造完成之后，只有这里能改写 <see cref="_engine"/> —— 这样"卸载 + 替换"是原子的，
+    /// 不会出现两个线程各自 Unload 同一个引擎（引擎被 Dispose 两次）。
+    /// 卸载异常只记 Warn：换引擎本身必须成功。整个过程不 await 任何外部代码，不会死锁。
+    /// </summary>
+    private async Task InstallEngineAsync(ITTSEngine replacement)
+    {
+        await _engineLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var previous = _engine;
+            _engine = replacement;
+
+            if (ReferenceEquals(previous, replacement))
+            {
+                return;
+            }
+
+            try
+            {
+                previous?.Unload();
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"卸载旧 TTS 引擎时异常：{ex.Message}");
+            }
+        }
+        finally
+        {
+            _engineLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 按引擎取配置里的 launch_command。<c>chatterbox</c> 不在这里处理：
+    /// 它由 AppHost.RestartChatterboxAsync 负责拉起，两处都拉会起两个进程。
+    /// </summary>
+    private string? LaunchCommandFor(string engineName) => engineName switch
+    {
+        TTSEngineFactory.GptSoVits => _config.Tts.GptSoVits.LaunchCommand,
+        TTSEngineFactory.CosyVoice => _config.Tts.CosyVoice.LaunchCommand,
+        _ => null,
+    };
+
+    /// <summary>
+    /// 外部 HTTP 引擎不健康且配置了 launch_command 时，用 <c>cmd /c</c> 拉起一次。
+    ///
+    /// 与 AppHost 里 Chatterbox 的自动拉起同一模式：命令原样交给 cmd，允许带参数或重定向；
+    /// 每个引擎**每进程只尝试一次**（失败后反复重试只会堆出僵尸进程、并拖慢每次初始化）；
+    /// 启动命令为空则直接跳过；拉起失败只记 Warn，绝不抛出 —— 外部服务起不来时
+    /// 仍要按手册降级到 Piper，而不是让启动失败。
+    /// </summary>
+    private bool TryLaunchExternalEngine(string engineName)
+    {
+        var command = LaunchCommandFor(engineName);
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return false;
+        }
+
+        lock (_launchSync)
+        {
+            if (!_launchAttempted.Add(engineName))
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            _logger.Info($"按配置拉起 {EngineLabel(engineName)}：{command}");
+
+            var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c {command}")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = AppPaths.Root,
+            };
+
+            using var launched = System.Diagnostics.Process.Start(psi);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"拉起 {EngineLabel(engineName)} 失败（不影响启动，可手动启动后点\"重启语音服务\"）：{ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 拉起后做几次短轮询探活（约 6 秒）—— 拉起成功却立刻降级等于白拉。
+    /// 不做长时间等待（不拖住启动）：外部服务加载模型动辄几十秒，等不到也不报错，
+    /// 用户仍可在服务起来后点"重启语音服务"切回配置的引擎（那时不会再重复拉起）。
+    /// </summary>
+    private async Task<bool> WaitForExternalEngineAsync(IHttpTtsEngine httpEngine, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+
+            if (await httpEngine.RefreshAvailabilityAsync(cancellationToken).ConfigureAwait(false))
+            {
+                _logger.Info($"{EngineLabel(httpEngine.Name)} 已由 launch_command 拉起并可用。");
+                return true;
+            }
+        }
+
+        _logger.Warn($"{EngineLabel(httpEngine.Name)} 拉起后 6 秒内仍未就绪，继续按降级判断处理。");
+        return false;
+    }
 
     private void UpdateStatusLine()
     {
@@ -358,14 +501,21 @@ public sealed class TTSManager : IDisposable
 
         _disposed = true;
 
+        // 与换引擎路径互斥：否则可能与降级/重置同时 Dispose 同一个引擎。
+        // Dispose 是同步方法，这里只能用 Wait()（临界区里没有 await，不会死锁）。
+        _engineLock.Wait();
         try
         {
-            _engine.Unload();
+            _engine?.Unload();
             _piperFallback?.Unload();
         }
         catch
         {
             // 忽略。
+        }
+        finally
+        {
+            _engineLock.Release();
         }
     }
 }

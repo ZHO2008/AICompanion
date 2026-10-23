@@ -35,6 +35,14 @@ public partial class MainWindow : Window
     private readonly BubbleNotifier _bubbles;
 
     /// <summary>
+    /// 窗口订阅外部服务事件时登记的退订动作，<see cref="OnClosed"/> 里逐个执行。
+    ///
+    /// 后台服务（管线 / ASR / 音频 / TTS）的生命周期比窗口长：窗口关闭后它们仍会触发事件，
+    /// 不退订的话这些 lambda 会一直持有已关闭的窗口，并把回调打到已释放的控件/渲染器上。
+    /// </summary>
+    private readonly List<Action> _unsubscribe = new();
+
+    /// <summary>
     /// 是否处于"透明"（鼠标穿透）模式。
     ///
     /// 默认取 config.yaml 的 ui.click_through，而它的默认值已改为 false ——
@@ -75,6 +83,9 @@ public partial class MainWindow : Window
     /// <summary>Live2D 渲染器；为 null 表示走静态图降级方案。</summary>
     private Live2DRenderer? _live2d;
 
+    /// <summary>角色包（AvatarProfile.json）自带的水平偏移；用户没在设置面板设过时用它。</summary>
+    private double _defaultHorizontalOffset;
+
     /// <summary>角色右上角的「透明/覆盖」切换按钮（独立窗口，两种模式下都可点）。</summary>
     private CornerButton? _cornerButton;
 
@@ -103,6 +114,9 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _expressionTimer;
     private DateTime? _hoverSince;
     private DateTime? _awaySince;
+
+    /// <summary>最后一次用户交互的时间（点击 / 拖动 / 对话 / 表情变化），用于 ui.idle_expression_seconds。</summary>
+    private DateTime _lastInteractionUtc = DateTime.UtcNow;
 
     /// <summary>当前「覆盖」态是否是悬停自动切过来的（只有这种才会自动退回透明）。</summary>
     private bool _hoverSwitched;
@@ -144,13 +158,13 @@ public partial class MainWindow : Window
         };
         _hoverTimer.Tick += (_, _) => OnHoverTick();
 
-        _expressionTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
-        {
-            Interval = TimeSpan.FromSeconds(8),
-        };
+        // 间隔不在这里设：每次都由 ScheduleExpressionRevert 按 ui.expression_hold_seconds 重设。
+        _expressionTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher);
         _expressionTimer.Tick += (_, _) => RevertExpression();
 
-        _bubbles.Changed += (_, _) => Dispatcher.BeginInvoke(new Action(RefreshBubbles));
+        EventHandler onBubblesChanged = (_, _) => Dispatcher.BeginInvoke(new Action(RefreshBubbles));
+        _bubbles.Changed += onBubblesChanged;
+        _unsubscribe.Add(() => _bubbles.Changed -= onBubblesChanged);
         RefreshBubbles();
 
         // Live2D 三级兜底在窗口构造阶段就要算出来，否则启动早期会显示空白。
@@ -189,12 +203,41 @@ public partial class MainWindow : Window
 
         _hostReady = true;
 
-        _host.Pipeline.StatusChanged += (_, status) => Dispatcher.BeginInvoke(new Action(() => OnPipelineStatus(status)));
-        _host.Pipeline.ReplyReady += (_, message) => Dispatcher.BeginInvoke(new Action(() => OnReplyReady(message)));
-        _host.Pipeline.UserMessageAccepted += (_, _) => Dispatcher.BeginInvoke(new Action(RefreshBubbles));
+        // 每个订阅都登记一条退订动作，窗口关闭时在 OnClosed 里统一执行（见 _unsubscribe）。
+        EventHandler<PipelineStatus> onPipelineStatus =
+            (_, status) => Dispatcher.BeginInvoke(new Action(() => OnPipelineStatus(status)));
+        _host.Pipeline.StatusChanged += onPipelineStatus;
+        _unsubscribe.Add(() => _host.Pipeline.StatusChanged -= onPipelineStatus);
 
-        _host.Asr.SpeechRecognized += (_, text) => Dispatcher.BeginInvoke(new Action(() => _ = SendAsync(text)));
-        _host.Asr.StateChanged += (_, state) => Dispatcher.BeginInvoke(new Action(() => UpdateStageText()));
+        EventHandler<Core.Models.ChatMessage> onReplyReady =
+            (_, message) => Dispatcher.BeginInvoke(new Action(() => OnReplyReady(message)));
+        _host.Pipeline.ReplyReady += onReplyReady;
+        _unsubscribe.Add(() => _host.Pipeline.ReplyReady -= onReplyReady);
+
+        EventHandler<Core.Models.ChatMessage> onUserMessageAccepted =
+            (_, _) => Dispatcher.BeginInvoke(new Action(RefreshBubbles));
+        _host.Pipeline.UserMessageAccepted += onUserMessageAccepted;
+        _unsubscribe.Add(() => _host.Pipeline.UserMessageAccepted -= onUserMessageAccepted);
+
+        EventHandler<string> onSpeechRecognized =
+            (_, text) => Dispatcher.BeginInvoke(new Action(() => _ = SendAsync(text)));
+        _host.Asr.SpeechRecognized += onSpeechRecognized;
+        _unsubscribe.Add(() => _host.Asr.SpeechRecognized -= onSpeechRecognized);
+
+        // Asr.StateChanged 只订阅一次（原先订阅了两个处理器：一个更新文字、一个请求 Listen），
+        // 合并后只需一条退订动作。
+        EventHandler<AsrState> onAsrStateChanged = (_, state) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            UpdateStageText();
+
+            // ASR 进入 Running（倾听中）→ Listen（StateChange）
+            if (state == AsrState.Running)
+            {
+                _animations?.Request(AnimationType.Listen, AnimationPriority.StateChange, "ASR", TimeSpan.FromSeconds(10));
+            }
+        }));
+        _host.Asr.StateChanged += onAsrStateChanged;
+        _unsubscribe.Add(() => _host.Asr.StateChanged -= onAsrStateChanged);
 
         // ---- 动作调度 + 口型同步 ----
         /*
@@ -259,7 +302,8 @@ public partial class MainWindow : Window
         if (modelInfo is not null)
         {
             // 用户滑块优先；没设过就用角色包里的默认值（都为空 → 自动居中）
-            var initialOffset = AppearanceStore.LoadHorizontalOffset() ?? profile.HorizontalOffset;
+            _defaultHorizontalOffset = profile.HorizontalOffset;
+            var initialOffset = AppearanceStore.LoadHorizontalOffset() ?? _defaultHorizontalOffset;
             _live2d = Live2DRenderer.TryCreate(modelInfo.ModelPath, initialOffset, _host.Logger);
 
             if (_live2d is not null)
@@ -299,17 +343,8 @@ public partial class MainWindow : Window
 
         _lipSync = new LipSyncDriver(Dispatcher, ApplyMouthOpen, _host.Logger);
 
-        // ASR 进入 Running（倾听中）→ Listen（StateChange）
-        _host.Asr.StateChanged += (_, state) =>
-        {
-            if (state == AsrState.Running)
-            {
-                _animations.Request(AnimationType.Listen, AnimationPriority.StateChange, "ASR", TimeSpan.FromSeconds(10));
-            }
-        };
-
         // TTS 开始播放 → Speak + 启动口型跟随 + 暂停 ASR
-        _host.ObservableAudio.PlaybackStarted += (_, wav) =>
+        EventHandler<byte[]> onPlaybackStarted = (_, wav) =>
         {
             /*
              * 回声抑制：TTS 一开口就停掉 ASR。
@@ -320,20 +355,32 @@ public partial class MainWindow : Window
             SuspendAsrForPlayback();
 
             _animations.Request(AnimationType.Speak, AnimationPriority.Speak, "TTS");
-            _lipSync?.Start(wav);
+
+            // 静态图模式下没有嘴可动：ApplyMouthOpen 只会写一行 Debug，
+            // 每 50ms 一次的 BeginInvoke 纯属空转，所以只在有 Live2D 模型时才启动口型。
+            if (_live2d is not null)
+            {
+                _lipSync?.Start(wav);
+            }
         };
+        _host.ObservableAudio.PlaybackStarted += onPlaybackStarted;
+        _unsubscribe.Add(() => _host.ObservableAudio.PlaybackStarted -= onPlaybackStarted);
 
         // 播放结束/被打断 → 嘴立刻归零 + 回到 Idle + 恢复 ASR
-        _host.ObservableAudio.PlaybackStopped += (_, _) =>
+        EventHandler onPlaybackStopped = (_, _) =>
         {
             _lipSync?.Stop(resetMouth: true, reason: "playback-stopped");
             _animations.ResetToIdle("playback-stopped");
             ScheduleAsrResume();
         };
+        _host.ObservableAudio.PlaybackStopped += onPlaybackStopped;
+        _unsubscribe.Add(() => _host.ObservableAudio.PlaybackStopped -= onPlaybackStopped);
 
         // TTS 引擎崩溃降级 → Confused（Critical，强行打断）
-        _host.Tts.EngineFellBack += (_, engine) =>
+        EventHandler<string> onTtsEngineFellBack = (_, engine) =>
             _animations.Request(AnimationType.Confused, AnimationPriority.Critical, $"TTS→{engine}");
+        _host.Tts.EngineFellBack += onTtsEngineFellBack;
+        _unsubscribe.Add(() => _host.Tts.EngineFellBack -= onTtsEngineFellBack);
 
         // config.yaml 已加载，AppPaths 现在指向真实根目录：
         // 重新算一次形象（这次会带上"更换外观"的覆盖值），并同步启动模式。
@@ -679,6 +726,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 表情变化算一次交互：待机计时（ui.idle_expression_seconds）从头开始。
+        NoteUserInteraction();
+
         AnimationText.Text = animation;
         AnimationBadge.Visibility = Visibility.Visible;
 
@@ -745,11 +795,55 @@ public partial class MainWindow : Window
         _host.Logger.Debug("表情已到期，恢复到默认立绘。");
     }
 
+    /// <summary>记录一次用户交互（ui.idle_expression_seconds 的计时起点）。</summary>
+    private void NoteUserInteraction() => _lastInteractionUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// 待机表情回退（config.yaml 的 ui.idle_expression_seconds，0 = 关闭）：
+    /// 最后一次交互之后超过 N 秒，把表情切回默认立绘。
+    ///
+    /// 复用已有的 _hoverTimer tick（100ms），不新增定时器；
+    /// 它与悬停判定无关，因此调用点在 OnHoverTick 里 TransparentHoverSwitch 判断之前，
+    /// 关掉悬停切换也不影响这条规则。
+    /// </summary>
+    private void CheckIdleExpression()
+    {
+        var idleSeconds = _host.Config.Ui.IdleExpressionSeconds;
+        if (idleSeconds <= 0 || _currentExpression is null)
+        {
+            return;
+        }
+
+        if ((DateTime.UtcNow - _lastInteractionUtc).TotalSeconds < idleSeconds)
+        {
+            return;
+        }
+
+        _host.Logger.Info($"已 {idleSeconds} 秒无交互，表情切回默认立绘（ui.idle_expression_seconds）。");
+        RevertExpression();
+    }
+
     // ------------------------------------------------------------------ 管线事件
 
     /// <summary>窗口关闭时释放渲染资源。GL 上下文与模型不释放会留下线程/显存。</summary>
     protected override void OnClosed(EventArgs e)
     {
+        // 先退订外部事件：后台服务在窗口关闭后仍会继续触发，
+        // 不退订就是往已释放的控件/渲染器上回调。
+        foreach (var unsubscribe in _unsubscribe)
+        {
+            try
+            {
+                unsubscribe();
+            }
+            catch (Exception ex)
+            {
+                _host.Logger.Debug($"退订窗口事件失败：{ex.Message}");
+            }
+        }
+
+        _unsubscribe.Clear();
+
         // 定时器必须先停：它们会在窗口关闭后继续 tick，去碰已经 Dispose 的控件/渲染器。
         _hoverTimer.Stop();
         _expressionTimer.Stop();
@@ -809,11 +903,8 @@ public partial class MainWindow : Window
     ///
     /// <paramref name="motionName"/> 是已经过映射与存在性校验的动作名。
     ///
-    /// 当前项目是"静态图 + 表情差分"（决策 Q4），所以这里的实现是：
+    /// 有真 Live2D 模型时直接播模型动作；没有模型时走"静态图 + 表情差分"（决策 Q4）：
     /// 按**逻辑动作名**找同名表情图（happy.png / sad.png …），有就切，没有就只更新角标。
-    ///
-    /// TODO: 接真 Live2D 后替换为
-    ///   live2dModel.SetMotion(motionName) 或 VPet 对应的动作播放 API。
     /// </summary>
     private void ApplyAnimation(AnimationType type, string motionName)
     {
@@ -828,19 +919,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        // 2) 静态图降级：按逻辑动作名找同名表情差分图（happy.png / sad.png …）
-        var expressionName = type.ToString().ToLowerInvariant();
-        var directory = AppPaths.Resolve(_host.Config.Live2d.ExpressionDirectory);
-        var candidate = Path.Combine(directory, expressionName + ".png");
-
-        if (File.Exists(candidate))
-        {
-            ApplyExpression(expressionName);
-        }
-        else
-        {
-            _host.Logger.Debug($"动作 {type}→{motionName} 无对应表情图，仅更新角标。");
-        }
+        // 2) 静态图降级：按逻辑动作名找同名表情差分图（happy.png / sad.png …）。
+        //
+        // 查找与扩展名支持统一交给 ApplyExpression：这里原先自己探一次 .png，
+        // 而 ApplyExpression 认 .png/.jpg，导致"只有 jpg 差分图"时两处行为不一致。
+        ApplyExpression(type.ToString().ToLowerInvariant());
     }
 
     /// <summary>
@@ -983,6 +1066,7 @@ public partial class MainWindow : Window
 
         InputBox.Clear();
         _host.Idle.NotifyUserActivity();
+        NoteUserInteraction();
 
         try
         {
@@ -1030,6 +1114,9 @@ public partial class MainWindow : Window
         {
             return;
         }
+
+        // 点击 / 拖动的起点都算一次交互（ui.idle_expression_seconds）。
+        NoteUserInteraction();
 
         if (!GetCursorPos(out var cursor))
         {
@@ -1359,6 +1446,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 打开功能栏也算一次交互（ui.idle_expression_seconds）。
+        NoteUserInteraction();
+
         e.Handled = true;
         ToggleTaskBar();
     }
@@ -1468,20 +1558,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 待机表情回退与悬停切换开关无关，所以放在 TransparentHoverSwitch 判断之前。
+        CheckIdleExpression();
+
         var ui = _host.Config.Ui;
         if (!ui.TransparentHoverSwitch)
         {
-            return;
-        }
-
-        bool over;
-        try
-        {
-            over = IsCursorOnCharacter();
-        }
-        catch (Exception ex)
-        {
-            _hoverDiag = $"异常：{ex.Message}";
             return;
         }
 
@@ -1489,9 +1571,32 @@ public partial class MainWindow : Window
 
         // 透明态下每 2 秒打一条诊断，便于定位"为什么没触发"。
         // 用 Debug 级别：正常使用时不该刷屏，排查时把 logging.minimum_level 调成 debug 即可。
-        if (_clickThrough && (now - _lastHoverDiag).TotalSeconds >= 2)
+        //
+        // 诊断字符串只在**确实要写日志时**才拼（IAppLogger 没有等级判断 API，
+        // 没法先问"Debug 会不会被过滤"，所以用惰性采样把每 100ms 一次的拼接省掉）。
+        var needDiag = _clickThrough && (now - _lastHoverDiag).TotalSeconds >= 2;
+        if (needDiag)
         {
             _lastHoverDiag = now;
+        }
+
+        bool over;
+        try
+        {
+            over = IsCursorOnCharacter(collectDiag: needDiag);
+        }
+        catch (Exception ex)
+        {
+            if (needDiag)
+            {
+                _host.Logger.Debug($"悬停诊断（透明态）异常：{ex.Message}");
+            }
+
+            return;
+        }
+
+        if (needDiag)
+        {
             _host.Logger.Debug($"悬停诊断（透明态）：over={over}，{_hoverDiag}");
         }
 
@@ -1563,17 +1668,29 @@ public partial class MainWindow : Window
     /// 视觉上明明贴着窗口边缘却不算命中，鼠标移上去没反应，非常反直觉。
     /// 现在只要光标进了窗口矩形就算命中，与用户看到的窗口边界一致。
     /// </summary>
-    private bool IsCursorOnCharacter()
+    /// <param name="collectDiag">
+    /// 是否采集诊断文本。常态轮询传 false：<see cref="_hoverDiag"/> 只用于写 Debug 日志，
+    /// 没必要每 100ms 拼一次字符串。
+    /// </param>
+    private bool IsCursorOnCharacter(bool collectDiag = false)
     {
         if (!IsVisible)
         {
-            _hoverDiag = "窗口不可见";
+            if (collectDiag)
+            {
+                _hoverDiag = "窗口不可见";
+            }
+
             return false;
         }
 
         if (!GetCursorPos(out var screen))
         {
-            _hoverDiag = "GetCursorPos 失败";
+            if (collectDiag)
+            {
+                _hoverDiag = "GetCursorPos 失败";
+            }
+
             return false;
         }
 
@@ -1585,7 +1702,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            _hoverDiag = $"PointFromScreen 失败：{ex.Message}";
+            if (collectDiag)
+            {
+                _hoverDiag = $"PointFromScreen 失败：{ex.Message}";
+            }
+
             return false;
         }
 
@@ -1599,8 +1720,11 @@ public partial class MainWindow : Window
         var over = windowPoint.X >= 0 && windowPoint.Y >= 0 &&
                    windowPoint.X < width && windowPoint.Y < height;
 
-        _hoverDiag = $"cursor={screen.X},{screen.Y} window={windowPoint.X:F0},{windowPoint.Y:F0} " +
-                     $"size={width:F0}x{height:F0} → {(over ? "窗口内" : "窗口外")}";
+        if (collectDiag)
+        {
+            _hoverDiag = $"cursor={screen.X},{screen.Y} window={windowPoint.X:F0},{windowPoint.Y:F0} " +
+                         $"size={width:F0}x{height:F0} → {(over ? "窗口内" : "窗口外")}";
+        }
 
         return over;
     }
@@ -1644,7 +1768,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 应用"外观"类用户设置：气泡显示时长 + 透明态不透明度。
+    /// 应用"外观"类用户设置：气泡显示时长 + 透明态不透明度 + Live2D 水平微调。
     ///
     /// 来源优先级统一为"设置面板保存的值 → config.yaml"，
     /// 这样设置面板改完能立刻生效，而删掉 Assets\appearance.json 又能回到配置。
@@ -1661,6 +1785,10 @@ public partial class MainWindow : Window
 
         // 重新套一次当前模式（不透明度是在 ApplyClickThrough 里生效的）
         ApplyClickThrough(_clickThrough);
+
+        // 设置面板改完"水平微调"要立刻生效：渲染器只在 OnHostReady 里读过一次配置，
+        // 不在这里补一次就必须重启才能看到效果。没设过滑块时回到角色包的默认偏移。
+        _live2d?.SetUserOffset(AppearanceStore.LoadHorizontalOffset() ?? _defaultHorizontalOffset);
 
         _host.Logger.Info(
             $"外观设置：气泡 {_bubbles.DefaultDuration.TotalSeconds:F0} 秒，透明态不透明度 {_transparentOpacity:P0}");

@@ -16,6 +16,9 @@ public sealed class LogSink
 {
     private const int RecentCapacity = 500;
 
+    /// <summary>单文件大小上限：超过就滚动一次，只保留一代 xxx-yyyyMMdd.log.1。</summary>
+    private const long MaxFileBytes = 32L * 1024 * 1024;
+
     private readonly string _directory;
     private readonly string _filePrefix;
     private readonly LogLevel _minimum;
@@ -25,6 +28,14 @@ public sealed class LogSink
 
     private StreamWriter? _writer;
     private DateOnly _writerDate;
+
+    /// <summary>
+    /// 上次"滚动失败"时的文件长度（-1 = 没失败过），失败后要等文件再长一段才重试。
+    ///
+    /// 为什么需要它：文件被别的进程独占时 <c>File.Move</c> 会失败，若每次写盘都重试，
+    /// 就会每写一行都做一遍"关闭 → 改名 → 重开"，把日志变成 I/O 风暴。
+    /// </summary>
+    private long _rollRetryAfterLength = -1;
 
     /// <param name="filePrefix">
     /// 日志文件名前缀。**每个进程必须用不同前缀**：
@@ -61,17 +72,7 @@ public sealed class LogSink
         }
 
         var now = DateTime.Now;
-        var line = new StringBuilder(message.Length + 96)
-            .Append(now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
-            .Append(" [").Append(LevelTag(level)).Append(']')
-            .Append(" [").Append(category).Append("] ")
-            .Append(message)
-            .ToString();
-
-        if (exception is not null)
-        {
-            line = line + Environment.NewLine + "    " + exception;
-        }
+        var line = FormatLine(now, level, category, message, exception);
 
         lock (_sync)
         {
@@ -86,6 +87,9 @@ public sealed class LogSink
                 EnsureWriter(now);
                 _writer?.WriteLine(line);
                 _writer?.Flush();
+
+                // 大小上限检查放在写盘之后：先保证这一行落地，再决定要不要滚动。
+                RollIfTooLarge(now);
             }
             catch
             {
@@ -105,7 +109,16 @@ public sealed class LogSink
         _writer?.Dispose();
         _writer = null;
 
-        var path = Path.Combine(_directory, $"{_filePrefix}-{today:yyyyMMdd}.log");
+        // 换日或换目录后，上一份文件的"滚动失败"记录作废（滚动路径直接调 OpenWriter，不会经过这里）。
+        _rollRetryAfterLength = -1;
+
+        OpenWriter(today);
+    }
+
+    /// <summary>按指定日期打开追加写句柄（调用方负责先关掉旧 writer）。</summary>
+    private void OpenWriter(DateOnly date)
+    {
+        var path = Path.Combine(_directory, $"{_filePrefix}-{date:yyyyMMdd}.log");
 
         // FileShare.ReadWrite 而不是 Read：引导日志器与正式日志器、甚至本程序与 GameMonitor
         // 都可能同时写同一个日志文件。用 FileShare.Read 时第二个写入者会直接 IOException，
@@ -116,7 +129,107 @@ public sealed class LogSink
         {
             AutoFlush = false,
         };
-        _writerDate = today;
+        _writerDate = date;
+    }
+
+    /// <summary>
+    /// 单文件大小上限：超过 <see cref="MaxFileBytes"/> 就把当前文件滚动一次
+    /// （关闭 writer → 把 xxx-yyyyMMdd.log 改名为 .log.1 → 重新打开当日日志文件）。
+    ///
+    /// 调用点必须已持有 _sync 且刚写完一行：改名与写盘必须串行，
+    /// 否则会把另一个线程刚写进去的内容挪到 .1 里。
+    /// 这里吞掉一切 IO 异常 —— 日志设施不允许反过来打断业务（与本类其它写路径一致）。
+    /// </summary>
+    private void RollIfTooLarge(DateTime now)
+    {
+        if (_writer is null)
+        {
+            return;
+        }
+
+        long length;
+        try
+        {
+            // StreamWriter 会缓冲，但调用点刚 Flush 过，这里就是磁盘上的真实长度。
+            length = _writer.BaseStream.Length;
+        }
+        catch
+        {
+            return;
+        }
+
+        if (length <= MaxFileBytes || length < _rollRetryAfterLength)
+        {
+            return;
+        }
+
+        var date = _writerDate;
+        var path = Path.Combine(_directory, $"{_filePrefix}-{date:yyyyMMdd}.log");
+        var rolledPath = path + ".1";
+
+        try
+        {
+            _writer.Flush();
+            _writer.Dispose();
+        }
+        catch
+        {
+            // 关不掉也继续往下走：改名与重新打开仍可能成功。
+        }
+
+        _writer = null;
+
+        var moved = false;
+        try
+        {
+            // 只保留一代滚动文件：旧的 .1 直接覆盖。
+            // 不用"先 Delete 再 Move"——中途失败会两个文件都没有。
+            File.Move(path, rolledPath, overwrite: true);
+            moved = true;
+            _rollRetryAfterLength = -1;
+        }
+        catch
+        {
+            // 改名失败（文件被其它进程独占等）不影响继续写日志；
+            // 等文件再长 1/4 个上限才重试，避免每写一行都重试一遍。
+            _rollRetryAfterLength = length + (MaxFileBytes / 4);
+        }
+
+        try
+        {
+            OpenWriter(date);
+        }
+        catch
+        {
+            // 打不开就退化为"仅内存日志"，下次写盘时 EnsureWriter 还会再试。
+            _writer = null;
+        }
+
+        // 滚动这件事本身要留痕，而且成功时必须写进**新**文件（旧文件已经改名）。
+        var notice = FormatLine(
+            now,
+            LogLevel.Info,
+            "Log",
+            moved
+                ? $"日志文件超过 {MaxFileBytes / (1024 * 1024)} MB，已滚动为 {Path.GetFileName(rolledPath)}，继续写入新文件。"
+                : $"日志文件超过 {MaxFileBytes / (1024 * 1024)} MB，但滚动失败（可能被其它进程占用），继续写入当前文件。",
+            null);
+
+        _recent.AddLast(notice);
+        while (_recent.Count > RecentCapacity)
+        {
+            _recent.RemoveFirst();
+        }
+
+        try
+        {
+            _writer?.WriteLine(notice);
+            _writer?.Flush();
+        }
+        catch
+        {
+            // 忽略。
+        }
     }
 
     /// <summary>关闭当前日志文件句柄。切换日志目录（引导 → 正式）时必须调用，否则会互相占住文件。</summary>
@@ -245,6 +358,24 @@ public sealed class LogSink
         }
 
         return deleted;
+    }
+
+    /// <summary>拼一行日志文本（普通写入与滚动通知共用，保证格式一致）。</summary>
+    private static string FormatLine(DateTime now, LogLevel level, string category, string message, Exception? exception)
+    {
+        var line = new StringBuilder(message.Length + 96)
+            .Append(now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
+            .Append(" [").Append(LevelTag(level)).Append(']')
+            .Append(" [").Append(category).Append("] ")
+            .Append(message)
+            .ToString();
+
+        if (exception is not null)
+        {
+            line = line + Environment.NewLine + "    " + exception;
+        }
+
+        return line;
     }
 
     private static string LevelTag(LogLevel level) => level switch

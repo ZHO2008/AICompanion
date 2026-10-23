@@ -47,15 +47,4 @@ public static class AppPaths
         return Path.GetFullPath(Path.Combine(_root, normalized));
     }
 
-    /// <summary>确保目录存在，返回其绝对路径。</summary>
-    public static string EnsureDirectory(string? path)
-    {
-        var full = Resolve(path);
-        if (!string.IsNullOrEmpty(full))
-        {
-            Directory.CreateDirectory(full);
-        }
-
-        return full;
-    }
 }

@@ -13,8 +13,6 @@ namespace AICompanion.Core.Abstractions;
 /// </summary>
 public interface IHttpTtsEngine : ITTSEngine
 {
-    /// <summary>服务根地址，例如 http://127.0.0.1:9880。</summary>
-    string BaseUrl { get; }
 
     /// <summary>服务端口。游戏模式要按端口反查进程并释放显存，所以必须暴露出来。</summary>
     int Port { get; }

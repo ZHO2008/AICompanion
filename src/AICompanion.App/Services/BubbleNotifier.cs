@@ -20,7 +20,7 @@ public sealed record BubbleItem(string Key, string Message, BubbleLevel Level, D
 public sealed class BubbleNotifier : IBubbleNotifier
 {
     private readonly Dispatcher _dispatcher;
-    private readonly IAppLogger _logger;
+    private IAppLogger _logger;
     private readonly object _sync = new();
     private readonly Dictionary<string, BubbleItem> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _statuses = new(StringComparer.OrdinalIgnoreCase);
@@ -42,6 +42,22 @@ public sealed class BubbleNotifier : IBubbleNotifier
 
     /// <summary>气泡内容发生变化（UI 订阅后刷新显示）。</summary>
     public event EventHandler? Changed;
+
+    /// <summary>
+    /// 换掉内部日志器。
+    /// 启动早期构造本类时用的是"引导期"日志器（目录来自默认值）；等配置解析完、
+    /// 日志目录可能已经切换，原来的 sink 会被关闭。若不重绑，之后每写一条气泡日志
+    /// 都会把旧目录的文件重新打开（日志分流 + 多一个文件句柄）。
+    /// </summary>
+    public void SetLogger(IAppLogger logger)
+    {
+        if (logger is null)
+        {
+            return;
+        }
+
+        _logger = logger.ForCategory("Bubble");
+    }
 
     /// <summary>当前应显示的气泡（按创建时间排序，最新的在前）。</summary>
     public IReadOnlyList<BubbleItem> Current

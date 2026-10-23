@@ -44,10 +44,6 @@ public sealed class AppConfig
     /// <summary>config.yaml 的绝对路径，用于解析相对路径（准则 8）。</summary>
     [YamlIgnore]
     public string ConfigFilePath { get; set; } = string.Empty;
-
-    /// <summary>加载过程中被兜底修正的字段清单，用于启动后一次性气泡提示。</summary>
-    [YamlIgnore]
-    public List<string> FillWarnings { get; set; } = new();
 }
 
 public sealed class LlmConfig
@@ -503,6 +499,12 @@ public sealed class UiConfig
     /// </summary>
     public int ExpressionHoldSeconds { get; set; } = 8;
 
-    /// <summary>待机时每隔多少秒播放一次随机表情，0 表示不播放。</summary>
+    /// <summary>
+    /// 闲置多久没交互就把表情切回默认立绘（秒），0 表示关闭这条规则。
+    ///
+    /// 与 <see cref="ExpressionHoldSeconds"/> 的区别：Hold 是"每次表情播完固定等几秒就退"，
+    /// 这里是"最后一次交互（说话、点击、拖动、悬停诊断）之后 N 秒，无论表情是何时贴上的都退"。
+    /// 用它兜住 Hold 被配成 0（永不回退）或配得比待机时间更长的情况。
+    /// </summary>
     public int IdleExpressionSeconds { get; set; } = 20;
 }

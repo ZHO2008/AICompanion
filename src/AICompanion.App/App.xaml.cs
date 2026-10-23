@@ -75,7 +75,28 @@ public partial class App : Application
 
             try
             {
-                _tray ??= new TrayIcon(_host!, _mainWindow!, _bubbles!);
+                if (_tray is null)
+                {
+                    /*
+                     * 兜底托盘只在三个依赖都就绪时才建。
+                     *
+                     * 异常可能发生在 MainWindow / TrayIcon 构造之前：那时 _mainWindow 是 null，
+                     * 而 TrayIcon 的构造不校验参数，用户点托盘"显示/隐藏角色"就会在
+                     * _window.ToggleVisibility() 上 NRE；_host 为 null 时"设置…""重启语音服务"同样会炸。
+                     * 没有主窗口也就没有可托管的界面，与其建一个点了就崩的托盘，
+                     * 不如直接退出，避免留下一个看不见的僵尸进程。
+                     */
+                    if (_host is not null && _mainWindow is not null && _bubbles is not null)
+                    {
+                        _tray = new TrayIcon(_host, _mainWindow, _bubbles);
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            "[AICompanion] 启动失败且宿主/主窗口未就绪，无法建立可用托盘，直接退出。");
+                        Shutdown(1);
+                    }
+                }
             }
             catch
             {
@@ -126,11 +147,29 @@ public partial class App : Application
         try
         {
             // 退出时必须等待：llama-server 由本程序拉起，不清理会留下占显存的孤儿进程。
-            _host?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(10));
+            if (_host is not null)
+            {
+                var dispose = _host.DisposeAsync().AsTask();
+                if (!dispose.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    /*
+                     * 超时了不能静默：llama-server（以及 GameMonitor 的清理）可能没走完，
+                     * 结果是留下占显存的孤儿进程，而日志里一个字都没有，事后无从排查。
+                     *
+                     * 这里刻意**不写日志文件**：此刻 AppHost 可能已经走到 DisposeAsync 末尾
+                     * 关掉了 LogSink，往已 Close 的 sink 写日志会把旧目录的文件重新打开
+                     * （正是要避免的日志分流）。Debug.WriteLine 在 DebugView / 调试器下可见，
+                     * 且完全没有副作用。
+                     */
+                    System.Diagnostics.Debug.WriteLine(
+                        "[AICompanion] 退出时等待 AppHost.DisposeAsync 超过 10 秒，llama-server 可能残留。");
+                }
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // 忽略。
+            // 退出清理失败也不能抛（会盖住正常退出），留一条调试线索即可。
+            System.Diagnostics.Debug.WriteLine($"[AICompanion] 退出清理异常：{ex}");
         }
 
         base.OnExit(e);

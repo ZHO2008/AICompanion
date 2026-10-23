@@ -81,7 +81,6 @@ public static class ConfigLoader
 
         Validate(config, warnings);
 
-        config.FillWarnings = warnings;
         config.ConfigFilePath = path;
 
         logger.Info($"配置已加载：{path}（兜底修正 {warnings.Count} 项，自动生成={generated}，解析错误={parseError ?? "无"}）");

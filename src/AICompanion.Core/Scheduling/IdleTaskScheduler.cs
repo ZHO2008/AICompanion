@@ -72,8 +72,6 @@ public sealed class IdleTaskScheduler : IDisposable
         _tts = tts;
     }
 
-    /// <summary>是否正在执行维护任务。</summary>
-    public bool IsTaskRunning => _taskRunning;
 
     /// <summary>最后一次用户活动时间，供其它模块（如 TTS 软重启）判断空闲。</summary>
     public DateTime LastUserActivityUtc

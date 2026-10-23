@@ -50,6 +50,16 @@ internal static class Program
         bootstrap.Info($"可执行文件目录：{AppContext.BaseDirectory}");
         bootstrap.Info($"命令行：{string.Join(' ', args)}");
 
+        /*
+         * 退出信号有两条：ManualResetEventSlim（循环条件）与 CancellationToken（打断正在 await 的调用）。
+         *
+         * 之前 RunAsync 收的是 CancellationToken.None，于是它内部的
+         * `catch (OperationCanceledException)` 与 `IsCancellationRequested` 分支全是死代码 ——
+         * 进程退出时循环还得把当前这一轮 Task.Delay 睡完才结算。
+         * WinExe 拿不到控制台 Ctrl+C，所以用已有的 ProcessExit 钩子同时置位句柄并 Cancel 这个 CTS。
+         */
+        using var cts = new CancellationTokenSource();
+
         try
         {
             var load = ConfigLoader.Load(explicitPath: null, bootstrap);
@@ -86,11 +96,23 @@ internal static class Program
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
                 logger.Info("GameMonitor 正在退出。");
+
+                try
+                {
+                    // 真正唤醒 RunAsync 的取消路径：只 Set 句柄的话，
+                    // 循环仍会在一整轮 Task.Delay（空闲时 30 秒）里睡到超时才退出。
+                    cts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // 进程退出时 Main 的 finally 可能已释放 CTS，忽略。
+                }
+
                 Shutdown.Set();
             };
 
             var runner = new MonitorRunner(config, logger, smi, scanner, client, cooldown);
-            await runner.RunAsync(Shutdown, CancellationToken.None);
+            await runner.RunAsync(Shutdown, cts.Token);
 
             return 0;
         }
@@ -223,12 +245,26 @@ internal sealed class MonitorRunner
             }
         }
 
-        _logger.Info("检测循环已退出。");
+        // 取消分支的收尾就是这里：RunAsync 返回后，Main 的 finally 会 DisposeAsync MonitorClient，
+        // socket 一关，主程序那边的读循环立刻读到 EOF 并判定断连（协议里没有 offline 消息，
+        // 断连本身就是"我要下线了"的信号，所以不需要额外发消息）。
+        _logger.Info(cancellationToken.IsCancellationRequested
+            ? "检测循环已退出（收到退出信号）。"
+            : "检测循环已退出。");
     }
 
     private async Task<TimeSpan> TickAsync(TimeSpan idleInterval, TimeSpan activeInterval, CancellationToken cancellationToken)
     {
         var running = _scanner.GetRunningGames();
+
+        // 冷却字典只在"被查询"时才会惰性删除，那些设过一次就再没被查过的进程名会一直留着
+        // （长驻进程的慢泄漏）。每个检测周期顺手清一遍，代价是一次字典遍历。
+        var pruned = _cooldown.PruneExpired();
+        if (pruned > 0)
+        {
+            _logger.Debug($"已清理 {pruned} 条过期冷却记录。");
+        }
+
         var gpu = await _smi.QueryUtilizationPercentAsync(cancellationToken).ConfigureAwait(false);
         var now = DateTime.UtcNow;
 

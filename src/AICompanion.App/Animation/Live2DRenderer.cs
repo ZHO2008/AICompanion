@@ -35,7 +35,6 @@ public sealed class Live2DRenderer : IDisposable
     private readonly GLWpfControl _control;
     private readonly LAppDelegate _lapp;
     private readonly LAppModel _model;
-    private readonly DateTime _startedUtc = DateTime.UtcNow;
     private readonly string _mouthParameter;
 
     /// <summary>模型是否已经画过至少一帧（贴图 id 之后才有效）。</summary>
@@ -121,6 +120,19 @@ public sealed class Live2DRenderer : IDisposable
     /// </summary>
     public static Live2DRenderer? TryCreate(string modelPath, double horizontalOffset, IAppLogger logger)
     {
+        /*
+         * 这三个对象的生命周期必须在这里显式管起来：一旦创建成功又中途失败，
+         * 它们是**非托管资源**，GC 收不掉 —— control.Start() 已经建了 GL 上下文与
+         * 渲染线程，new LAppDelegateOpenGL() 已经建了 Cubism 的纹理/离屏表面。
+         * 因此放在 try 外面，失败时在 finally 里按 model → lapp → control 释放。
+         */
+        GLWpfControl? control = null;
+        LAppDelegate? lapp = null;
+        LAppModel? model = null;
+
+        // 成功返回时所有权已经交给 renderer，finally 里就不能再释放一次。
+        var handedOver = false;
+
         try
         {
             if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
@@ -157,7 +169,7 @@ public sealed class Live2DRenderer : IDisposable
 
             // 注意：不要设 IsHitTestVisible=false。实测那样做会让 GL 图层在**桌面合成**里
             // alpha 变成 0（画面看不到、点不到），而 PrintWindow 仍能拍到内容。
-            var control = new GLWpfControl();
+            control = new GLWpfControl();
 
             control.Start(new GLWpfControlSettings
             {
@@ -189,20 +201,19 @@ public sealed class Live2DRenderer : IDisposable
                  */
             });
 
-            var lapp = new LAppDelegateOpenGL(new OpenTKWPFApi(control));
+            lapp = new LAppDelegateOpenGL(new OpenTKWPFApi(control));
 
             var dir = directory.EndsWith(System.IO.Path.DirectorySeparatorChar)
                 ? directory
                 : directory + System.IO.Path.DirectorySeparatorChar;
 
             var name = fileName[..^".model3.json".Length];
-            var model = lapp.Live2dManager.LoadModel(dir, name);
+            model = lapp.Live2dManager.LoadModel(dir, name);
 
             if (model is null)
             {
+                // lapp / control 交给 finally 释放（这里不再各写一遍，避免只释放一半）。
                 logger.Warn($"Live2D 模型加载失败：{modelPath}");
-                lapp.Dispose();
-                control.Dispose();
                 return null;
             }
 
@@ -215,12 +226,68 @@ public sealed class Live2DRenderer : IDisposable
                 $"Live2D 渲染器已就绪：{name}，动作 {model.Motions.Count} 个，参数 {model.Parameters.Count} 个，" +
                 $"口型={renderer.MouthParameter}(index={renderer._mouthIndex})");
 
+            // 所有权已交给 renderer：finally 不得再释放（日志万一抛异常，仍算失败路径）。
+            handedOver = true;
+
             return renderer;
         }
         catch (Exception ex)
         {
             logger.Warn($"创建 Live2D 渲染器失败，保持静态图：{ex.Message}");
             return null;
+        }
+        finally
+        {
+            /*
+             * 只有失败路径（含上面的 model is null）才走到"需要释放"的分支。
+             * 静态 _frameworkStarted 有意不复位：Cubism 的 StartUp 全进程只允许一次，
+             * 这次失败后再建渲染器仍复用它，重复 StartUp 会直接崩。
+             */
+            if (!handedOver)
+            {
+                ReleaseNativeResources(model, lapp, control, logger);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 按 model → lapp → control 的顺序释放 Cubism / OpenGL 资源，**每一步各自 try**。
+    ///
+    /// 顺序不能反：lapp 持有模型用到的贴图与离屏表面，control 提供 lapp 依赖的 GL 上下文。
+    /// 也不能挤在一个 try 里：<c>model.Dispose()</c> 抛一次就会漏掉 lapp 与 control，
+    /// 而 control 最贵（GL 上下文 + D3D 表面 + 渲染线程），漏一次就泄漏一整套。
+    /// </summary>
+    private static void ReleaseNativeResources(
+        LAppModel? model,
+        LAppDelegate? lapp,
+        GLWpfControl? control,
+        IAppLogger logger)
+    {
+        try
+        {
+            model?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"释放 Live2D 模型失败：{ex.Message}");
+        }
+
+        try
+        {
+            lapp?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"释放 LAppDelegate 失败：{ex.Message}");
+        }
+
+        try
+        {
+            control?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"释放 GLWpfControl 失败：{ex.Message}");
         }
     }
 
@@ -365,7 +432,8 @@ public sealed class Live2DRenderer : IDisposable
                 // 忽略
             }
 
-            _logger.Info(
+            // 用 Debug：SizeChanged 在拖拽窗口时会高频触发，Info 每次都 Flush 会持续写盘。
+            _logger.Debug(
                 $"渲染视口：{width}x{height} 像素｜控件 {_control.ActualWidth:F0}x{_control.ActualHeight:F0} DIP" +
                 $"｜DPI {dpi.DpiScaleX:F2}×｜**屏幕上实际 {screenW}x{screenH} 像素**");
 
@@ -566,18 +634,20 @@ public sealed class Live2DRenderer : IDisposable
 
         _disposed = true;
 
+        // 先退订事件：否则释放过程中合成器回调还可能进来，用一个正在销毁的 GL 上下文。
         try
         {
             CompositionTarget.Rendering -= OnCompositionRendering;
             _control.SizeChanged -= OnSizeChanged;
             _control.Render -= OnRender;
-            _model.Dispose();
-            _lapp.Dispose();
-            _control.Dispose();
         }
         catch (Exception ex)
         {
-            _logger.Warn($"释放 Live2D 渲染器失败：{ex.Message}");
+            _logger.Warn($"退订 Live2D 渲染事件失败：{ex.Message}");
         }
+
+        // 三步各自 try（在 ReleaseNativeResources 里）：_model.Dispose() 抛一次
+        // 不能连带漏掉 lapp 与 control —— control 最贵，会泄漏 GL 上下文、D3D 表面和渲染线程。
+        ReleaseNativeResources(_model, _lapp, _control, _logger);
     }
 }
