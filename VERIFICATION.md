@@ -3141,3 +3141,178 @@ Motions 组名判断），注释已改成描述现状。
   追加 §30 时统一成 CRLF。逐文件用 `--ignore-cr-at-eol` 对比过，除上述 2 行外没有行尾噪声。
 - 全部为静态代码修改 + 文档，**没有跑任何模型推理、没有运行程序**（遵守"低负载"要求）。
 - 没有改 `config.yaml`（准则 9），没有关机。
+
+## 31. 第四轮：真机运行验证（2026-10-23 白天）
+
+第三轮结束时我明确记了"没有运行程序（遵守低负载要求）"（§30.16）。用户随后说"继续啊，已经第二天了，
+正常完成"，低负载限制解除，于是这一轮改成**真跑**：启动 `AICompanion.App`、看日志、走退出，
+把前三轮靠读代码得出的结论逐条对现实核验。结果抓到一个**每次退出必崩**的真问题（§31.3），
+修掉并复验通过（§31.5）。
+
+### 31.1 跑之前先核对前置条件
+
+- `src\AICompanion.App\bin\Debug\net8.0-windows\AICompanion.exe` 存在（10-23 08:19 构建）。
+- `config.yaml` 里 `llm.server_executable_path=bin/llama-server.exe`、模型
+  `models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf`（1.04 GB）、`asr.model_path=models/asr/ggml-base.bin`
+  （141 MB）、`bin/ai_asr.dll` + `bin/libfvad.dll`、`Hiyori/Hiyori.model3.json` 均存在。
+- **`models/piper/` 是空目录**：没有 `model.onnx`，也没有 `bin/piper.exe`。所以 TTS 必然降级 SAPI，
+  这是环境事实，不是代码缺陷（见 §31.9）。
+- 启动方式：`Start-Process -WorkingDirectory E:\DEEPSEEK`。`ConfigLoader.ResolveConfigPath` 先看
+  当前目录再看 `AppContext.BaseDirectory`，`AppPaths.Root` 由 config.yaml 所在目录决定
+  （`AppPaths.Configure`），因此在根目录起就能正确解析所有相对路径。
+
+### 31.2 启动链路实测（10:33:51 → 10:33:59，8.4 秒到"启动完成"）
+
+日志 `logs/app/app-20261023.log` 原文摘录（时间戳保留）：
+
+```
+10:33:53.286 [INF] [Bootstrap] 配置已加载：E:\DEEPSEEK\config.yaml（兜底修正 0 项，自动生成=False，解析错误=无）
+10:33:53.338 [INF] [Knowledge] 知识库已就绪：E:\DEEPSEEK\Knowledge，条目数 0。
+10:33:53.347 [INF] [TTS.Piper] 未找到 Piper 动态库：...\third_party\piper\build\piper.dll 将使用进程外 piper.exe 兜底。
+10:33:53.532 [INF] [Gpu] 从 GGUF 探测到模型层数 L=28。
+10:33:53.534 [INF] [Gpu] GPU 计划：mode=Gpu, ngl=8, free=6565MB, L=28, conservative=1,300MB | ...
+10:33:56.656 [INF] [LlamaServer] llama-server 已就绪（ngl=8）。        ← 3.1 秒
+10:33:56.658 [WRN] [TTS] Piper 不可用，降级为 Windows 内置语音（SAPI）。   ← 全程唯一 WRN
+10:33:56.839 [INF] [TTS] TTS 初始化完成：配置引擎=piper，实际引擎=sapi，降级=True。
+10:33:57.049 [INF] [ASR] whisper 模型已加载：models\asr\ggml-base.bin（线程 0，CPU 模式）
+10:33:57.069 [INF] [VAD] 使用 WebRTC VAD（libfvad）：bin\libfvad.dll
+10:33:57.070 [INF] [PTT] 按住说话监听已启动：按住 Home 录音，松开识别。
+10:33:57.074 [INF] [Health] 健康监控已启动（间隔 30 秒，离线阈值 2 次）。
+10:33:57.079 [INF] [GameMonitor] GameMonitor 通信服务已监听 127.0.0.1:47777。
+10:33:57.079 [INF] [Idle] 空闲调度器已启动（轮询 500 ms，空闲阈值 5 分钟，CPU 上限 50%）。
+10:33:57.080 [INF] [App] 启动完成：运行模式=GPU 模式（ngl=8/28，空闲显存 6565 MB），LLM 就绪=True，TTS=sapi（降级=True），ASR=Stopped，知识库 0 条，启动问题 0 项。
+10:33:58.812 [INF] [App] Live2D 渲染器已就绪：Hiyori，动作 10 个，参数 70 个，口型=ParamMouthOpenY(index=19)
+10:33:58.926 [INF] [Live2D] OpenGL 环境：Vendor=NVIDIA Corporation，Renderer=RTX 5060 Laptop GPU/PCIe/SSE2，Version=3.3.0 NVIDIA 617.42
+10:33:58.963 [INF] [Live2D] 已为 2 张模型贴图生成 mipmap 并启用三线性过滤（改善降采样清晰度）。
+10:33:58.997 [INF] [App] 显示环境：DPI 150%（1.50×），主屏 1707×1067 DIP（物理约 2560×1600 px）
+10:33:59.050 [INF] [App] 角色大小设为 104%，窗口 353×479 DIP（未持久化）
+```
+
+对照第三轮改动的结论，全部成立：配置零兜底、GPU 规划与 `ngl` 计算一致、TTS 降级有气泡、
+ASR/VAD/PTT 三件套就绪、Live2D 参数树与口型索引正确、DPI 150% 下窗口尺寸合理。
+`llama-server` 子进程命令行与日志一致（`-ngl 8 -c 4096`），`/health` 返回 HTTP 200 `{"status":"ok"}`。
+
+### 31.3 发现（真问题）：**每次关窗都崩，并且把 llama-server 留成孤儿**
+
+第一轮测试我用 `Process.CloseMainWindow()` 关窗，返回 `False`；`taskkill /PID` 也没退。原因是
+`App.xaml:4` 的 `ShutdownMode="OnExplicitShutdown"`——关窗**本来就不退出**，真正的退出只在托盘
+"退出"→`ExitApplication()`→`Application.Current.Shutdown()`。所以改用
+`EnumWindows` + `PostMessage(WM_CLOSE)` 精确投递到 `HwndWrapper[AICompanion...]` 窗口再观察。
+
+进程确实"没了"，但**不是正常退出**，事件日志里两条硬证据：
+
+| 尝试 | 最后一次日志 | 系统事件 | 现场 |
+| --- | --- | --- | --- |
+| A：按原顺序 `model → lapp → control` 释放 | `10:38:35 [Live2D] model 已释放` | `10:38:35 Application Error`：`ntdll.dll`，异常码 **0xC0000374**（STATUS_HEAP_CORRUPTION） | 进程被内核杀掉，`llama-server` PID 5092 仍在跑，占着显存 |
+| B：改成只 `lapp → control` | `10:41:00 [Live2D] lapp 已释放` | `10:41:01 Application Error`：**`nvoglv64.dll`**（NVIDIA OpenGL 驱动），异常码 **0xC0000005**，偏移 `0xa3c36c`；`.NET Runtime`：`The process was terminated due to an unhandled exception ... c0000005` | 同上，`llama-server` 变孤儿 |
+
+两条推论：
+
+1. **A 的崩因不是"顺序不对"**，而是 `LAppModel` 归 `LAppDelegate` 的 `Live2dManager` 所有，
+   单独 `model.Dispose()` 再让 lapp 释放一遍 = 同一批渲染器/贴图二次释放（堆破坏）。
+2. **B 的崩因更根本**：`lapp.Dispose()`（删贴图）与 `control.Dispose()`（毁上下文）都要求
+   **GL 上下文在调用线程上为当前上下文**，而 GL 上下文只活在 `GLWpfControl` 自己的渲染线程上。
+   在 WPF UI 线程（`OnClosed` 就是在 UI 线程）调这些原生释放，等于拿一个属于别的线程的上下文
+   去 `glDeleteTextures`，驱动层直接访问违例——`nvoglv64.dll` 的崩溃地址说明得很清楚。
+
+连带后果比"崩一下"严重：`OnClosed` 崩掉后 `App.OnExit` 根本轮不到执行，
+`AppHost.DisposeAsync` 里"正在关闭 → 终止 llama-server"整段被跳过，于是每次退出都留下一个
+**占 1.4 GB 显存的孤儿 `llama-server`**，而日志里连一句"退出"都没有（`OnExit` 里只有超时才写
+`Debug.WriteLine`，这也是当时没察觉的原因之一）。
+
+> 这一条推翻了我第三轮的两处记录：§29.9 第 1 条把"`model → lapp → control` 三步各自 try"记为
+> 正确释放顺序、§30.13 据此把它保留下来。实测两种顺序都会崩，**问题不在顺序与 try 粒度，
+> 而在"在错误的线程上释放原生对象"**。下面 §31.4 的改法取代该结论。
+
+### 31.4 修复：关窗只"停止使用"，不在 UI 线程释放原生对象
+
+`Animation/Live2DRenderer.cs`：
+
+- 新增 `private void StopRenderLoop()`：退订 `CompositionTarget.Rendering`、`_control.SizeChanged`、
+  `_control.Render`，置 `_rendering = false`。这是**唯一**在关窗时做的清理。
+- `Dispose()` 改为调用 `StopRenderLoop()`，然后记一行
+  `Live2D 渲染已停止（原生上下文交由进程退出回收）。`；不再碰 `_lapp` / `_control` / `_model`。
+- 删除 `ReleaseNativeResources(...)`（原先三步释放的辅助方法）——留着就是留一个随时会被再次调用的坑。
+- `TryCreate` 的失败路径同样不再释放：改为记一条
+  `Live2D 创建失败，原生上下文交由进程退出回收（不在 UI 线程释放，避免驱动崩溃）。`
+  这是**明知取舍**：失败路径会漏一次 GL 上下文到进程退出，但换来"绝不因清理而崩"。
+  该路径只有模型文件损坏/加载异常才会走到。
+
+`MainWindow.xaml.cs` 的 `OnClosed`：顺序改为
+退订外部事件 → 停三个定时器 → `_animations.Dispose()` → `_live2d.Dispose()` + `_live2d = null`
+→ **把控件从可视树上摘下来**（`Live2DHost.Child = null; Live2DHost.Visibility = Collapsed;`）
+→ `_lipSync.Dispose()` → 关两个子窗口 → `base.OnClosed(e)`。
+
+摘控件这一步是必要的：渲染循环已停，若控件还挂在可视树上，窗口销毁过程中 WPF 还会再量一次、
+画一次它，等于拿一个没有当前上下文的控件走合成管线。
+
+### 31.5 复验：干净退出（无崩溃、无孤儿）
+
+托盘"退出"要鼠标点，没法在脚本里点（`NotifyIcon` 的菜单是 WinForms 自绘，UIA 拿不到）。
+于是临时在 `App.OnStartup` 末尾加了一个 5 行的验证钩子：读环境变量
+`AICOMPANION_EXIT_AFTER_SECONDS`，到点调用 `Shutdown()`——与托盘"退出"**完全同一条路径**。
+验证完已删除（`grep` 确认无残留，重新构建 0/0）。实测日志：
+
+```
+10:46:57.387 [INF] [App] [退出诊断] 测试钩子生效：25 秒后调用 Shutdown()。
+10:47:22.399 [INF] [Live2D] Live2D 渲染已停止（原生上下文交由进程退出回收）。
+10:47:22.412 [INF] [App] 正在关闭 AI 伴侣…
+10:47:22.588 [INF] [LlamaServer] 正在终止 llama-server（PID=7496）...
+10:47:22.625 [INF] [App] 已退出。
+```
+
+退出后核对：`AICompanion` 进程消失、`llama-server` 进程消失、Windows 事件日志**没有任何**
+`Application Error` / `.NET Runtime` 错误级条目。整段退出 0.23 秒。
+
+再用**去掉钩子的生产版**复跑一次：20 秒到"启动完成"、`WM_CLOSE` 关窗后进程存活（`OnExplicitShutdown`
+的预期行为）、日志停在 `Live2D 渲染已停止`、事件日志无崩溃记录。测试实例随后手工清理。
+
+### 31.6 顺手清理：`Knowledge\.pending` 里 403 条测试候选
+
+启动气泡报"有 403 条新记忆待确认"，查 `Knowledge\.pending`：404 个文件
+（403 个 `candidate_*.json` + 1 个 `.notify_state.json`），时间集中在 10-19（1 个）与 10-21（402 个），
+`source` 全是 `Candidate`，66 种 `replyTemplate` 全是"作为一个AI助手…""好的，有什么可以帮你的吗？"
+这类兜底回复——是之前自动化测试聊天留下的产物，与第一轮"删除测试数据"的要求一致。
+
+处理：403 个候选打包到 `artifacts\pending-candidates-backup-20261023.zip`（229 KB，可随时回滚），
+原文件删除；保留 `.notify_state.json`（只是通知时间去重状态，删不删都会自动重建）。
+删除后 `.pending` 只剩 1 个状态文件，下次启动不会再报 403 条。`artifacts/`、`logs/`、
+`Knowledge/.pending/` 都在 `.gitignore` 里，不污染仓库。
+
+### 31.7 实测中另外几条观察（不是缺陷，但值得记）
+
+1. **`logs/app/*.log` 用 `FileShare.ReadWrite` 打开**，所以排查时必须同样以读写共享方式读
+   （`[System.IO.File]::Open($p,'Open','Read','ReadWrite')`）。用 `File.ReadAllLines` 会报
+   "文件正由另一进程使用"——这是共享模式互斥，不是日志写坏了。
+2. **`Assets\appearance.json` 里还留着 `savedAt` 键**（10-21 写下的 179 B 文件）。当前
+   `AppearanceStore` 已经不再读写该字段，反序列化忽略未知键，下次用户调整外观时会被自然覆盖掉；
+   不对它做写操作（准则 9 只管 config.yaml，但没必要为一行陈旧键去改用户文件）。
+3. **`ngl=8/28` 不是缺陷**：`gpu.reserved_mb=4096` + `kv_cache_reserved_mb=1024` 的保守策略
+   在 6565 MB 空闲显存下算出 1300 MB 可用、8 层。想要更快可以调小 `reserved_mb`，但那是用户的
+   配置选择（不改 config.yaml）。
+4. **`Process.MainWindowHandle` 对这个窗口恒为 0**：`ShowInTaskbar=false` 让窗口带
+   `WS_EX_TOOLWINDOW`，.NET 枚举主窗口时会跳过它。自动化测试要用 `EnumWindows` 自己找。
+
+### 31.8 第三轮记录的两处修正
+
+- §29.9 第 1 条 / §30.13：Live2D 释放顺序与 try 粒度的结论作废，见 §31.3–§31.4。
+- §30.16 "没有运行程序"：本轮已真跑，并据此修掉退出崩溃。
+
+### 31.9 遗留（诚实清单）
+
+- `models/piper/` 是空目录，TTS 永远降级到 SAPI。要用 Piper 得放 `model.onnx` + 语音文件；
+  当前 SAPI 能说话，所以功能不残缺，只是音质一般。
+- 关窗（非退出）后经托盘"显示/隐藏角色"重开窗口，**Live2D 不会恢复**（`_live2d` 已置空）。
+  正常用户路径是托盘退出/重开程序，不受影响；要支持"重开窗口还原角色"得给渲染器加重启能力，
+  属于新功能，不在本轮范围。
+- `TryCreate` 失败路径漏一次 GL 上下文（§31.4 的取舍），直到进程退出。
+- 本轮**没有改 `config.yaml`**（准则 9），**没有关机**。
+
+### 31.10 本轮最终状态
+
+- `dotnet build AICompanion.sln -c Debug` → **0 Warning / 0 Error**。
+- 改动：`Animation/Live2DRenderer.cs`（`StopRenderLoop` 取代三步释放、失败路径改为不释放）、
+  `MainWindow.xaml.cs`（`OnClosed` 摘控件、`_live2d`/`_lipSync` 置空）、`App.xaml.cs`
+  （临时钩子加入后删除，净改动为 0 行）、本文档。
+- 运行证据：启动 8.4 秒到"启动完成"、退出 0.23 秒、两次崩溃已消除、事件日志干净、
+  `llama-server` 不再残留。

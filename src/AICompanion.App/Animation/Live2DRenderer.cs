@@ -239,56 +239,52 @@ public sealed class Live2DRenderer : IDisposable
         finally
         {
             /*
-             * 只有失败路径（含上面的 model is null）才走到"需要释放"的分支。
+             * 只有失败路径（含上面的 model is null）才走到这里。
+             *
+             * 这里**刻意不释放** control / lapp / model：见 StopRenderLoop 的注释，
+             * 在 UI 线程上释放这些原生对象会在 nvoglv64.dll 里 0xC0000005 直接杀进程
+             * （GL 上下文只活在 GLWpfControl 的渲染线程上）。失败路径本就很少见
+             * （模型文件损坏/加载异常），宁可让这次失败的上下文活到进程退出，也不要崩。
+             *
              * 静态 _frameworkStarted 有意不复位：Cubism 的 StartUp 全进程只允许一次，
              * 这次失败后再建渲染器仍复用它，重复 StartUp 会直接崩。
              */
             if (!handedOver)
             {
-                ReleaseNativeResources(model, lapp, control, logger);
+                logger.Warn("Live2D 创建失败，原生上下文交由进程退出回收（不在 UI 线程释放，避免驱动崩溃）。");
             }
         }
     }
 
     /// <summary>
-    /// 按 model → lapp → control 的顺序释放 Cubism / OpenGL 资源，**每一步各自 try**。
+    /// 停止使用这个渲染器：退订事件 + 关掉渲染循环，**不碰任何原生对象**。
     ///
-    /// 顺序不能反：lapp 持有模型用到的贴图与离屏表面，control 提供 lapp 依赖的 GL 上下文。
-    /// 也不能挤在一个 try 里：<c>model.Dispose()</c> 抛一次就会漏掉 lapp 与 control，
-    /// 而 control 最贵（GL 上下文 + D3D 表面 + 渲染线程），漏一次就泄漏一整套。
+    /// 为什么不在关闭时释放 GL / Cubism 资源（2026-10-23 实测，两次退出崩溃）：
+    ///   - 先 <c>model.Dispose()</c>、再 <c>lapp.Dispose()</c>：崩在 lapp 里，0xC0000374
+    ///     （STATUS_HEAP_CORRUPTION）—— 模型归 <c>Live2dManager</c> 所有，单独释放造成二次释放。
+    ///   - 只 <c>lapp.Dispose()</c>、再 <c>control.Dispose()</c>：崩在 nvoglv64.dll，0xC0000005
+    ///     —— GL 上下文只活在 <c>GLWpfControl</c> 的渲染线程上，在 UI 线程关它就是在操作野指针。
+    ///   两次崩溃都发生在 <c>MainWindow.OnClosed</c> 里，进程直接死掉，<c>App.OnExit</c> 来不及执行，
+    ///   结果 llama-server 变成占显存的孤儿进程（日志里连一句"退出"都没有）。
+    ///
+    /// 因此这里只做"停止使用"，把非托管资源交给进程退出回收。这不会造成长期泄漏：
+    /// <see cref="Dispose"/> 只在关窗时调用一次，而且当前没有任何"重建渲染器"的路径
+    /// （换模型能力未实现，见 VERIFICATION.md §30.15）。
     /// </summary>
-    private static void ReleaseNativeResources(
-        LAppModel? model,
-        LAppDelegate? lapp,
-        GLWpfControl? control,
-        IAppLogger logger)
+    private void StopRenderLoop()
     {
         try
         {
-            model?.Dispose();
+            CompositionTarget.Rendering -= OnCompositionRendering;
+            _control.SizeChanged -= OnSizeChanged;
+            _control.Render -= OnRender;
         }
         catch (Exception ex)
         {
-            logger.Warn($"释放 Live2D 模型失败：{ex.Message}");
+            _logger.Warn($"退订 Live2D 渲染事件失败：{ex.Message}");
         }
 
-        try
-        {
-            lapp?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            logger.Warn($"释放 LAppDelegate 失败：{ex.Message}");
-        }
-
-        try
-        {
-            control?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            logger.Warn($"释放 GLWpfControl 失败：{ex.Message}");
-        }
+        _rendering = false;
     }
 
     /// <summary>开始逐帧渲染。用 WPF 的逐帧回调驱动（RenderContinuously 实测无效）。</summary>
@@ -634,20 +630,10 @@ public sealed class Live2DRenderer : IDisposable
 
         _disposed = true;
 
-        // 先退订事件：否则释放过程中合成器回调还可能进来，用一个正在销毁的 GL 上下文。
-        try
-        {
-            CompositionTarget.Rendering -= OnCompositionRendering;
-            _control.SizeChanged -= OnSizeChanged;
-            _control.Render -= OnRender;
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn($"退订 Live2D 渲染事件失败：{ex.Message}");
-        }
+        // 只停循环、不退原生的 GL/Cubism 对象（原因见 StopRenderLoop 的注释：
+        // 在 UI 线程释放它们会在 nvoglv64.dll 里 0xC0000005 杀进程）。
+        StopRenderLoop();
 
-        // 三步各自 try（在 ReleaseNativeResources 里）：_model.Dispose() 抛一次
-        // 不能连带漏掉 lapp 与 control —— control 最贵，会泄漏 GL 上下文、D3D 表面和渲染线程。
-        ReleaseNativeResources(_model, _lapp, _control, _logger);
+        _logger.Info("Live2D 渲染已停止（原生上下文交由进程退出回收）。");
     }
 }

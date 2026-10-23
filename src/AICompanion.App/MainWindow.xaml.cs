@@ -852,15 +852,20 @@ public partial class MainWindow : Window
         // 动作调度里的 hold 定时器也要停，否则关窗后它还会回调到已释放的渲染器上。
         _animations?.Dispose();
 
-        try
+        // Live2D：只停渲染循环（GL 原生对象不在这里释放，见 Live2DRenderer.StopRenderLoop）。
+        _live2d?.Dispose();
+        _live2d = null;
+
+        // 把 OpenGL 控件从可视树上摘下来：否则窗口销毁过程中 WPF 还会再量一次/画一次它，
+        // 而此时渲染循环已停，等于拿一个没有当前上下文的控件去走合成管线。
+        if (Live2DHost is not null)
         {
-            _live2d?.Dispose();
-            _lipSync?.Dispose();
+            Live2DHost.Child = null;
+            Live2DHost.Visibility = Visibility.Collapsed;
         }
-        catch (Exception ex)
-        {
-            _host.Logger.Warn($"关闭时释放渲染资源失败：{ex.Message}");
-        }
+
+        _lipSync?.Dispose();
+        _lipSync = null;
 
         // 子窗口是独立 HWND，不关掉的话应用退出前它们还挂在桌面上。
         try
