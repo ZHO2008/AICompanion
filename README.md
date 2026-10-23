@@ -1,10 +1,15 @@
 # AI 伴侣桌面程序
 
+[![最新版本](https://img.shields.io/github/v/release/ZHO2008/AICompanion?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/ZHO2008/AICompanion/releases/latest)
+[![许可证](https://img.shields.io/github/license/ZHO2008/AICompanion)](LICENSE)
+
 在 Windows 上运行的本地化 AI 桌面伴侣。完全本地推理、低延迟语音对话、桌宠交互、
 长对话记忆与角色一致性，GPU 优先、CPU 兜底，并在检测到游戏时自动让出显存。
 
 本文件是**唯一权威的实现说明**：手册里存在内部矛盾或不可实现之处的地方，
 这里逐条记录了「手册怎么写」「实际怎么做」「为什么」，便于后续接手者判断。
+各版本改了什么见 [CHANGELOG.md](./CHANGELOG.md)，发布包见
+[Releases](https://github.com/ZHO2008/AICompanion/releases)。
 
 ---
 
