@@ -58,6 +58,16 @@
 
 ## 二、快速开始
 
+### 2.0 只想先跑起来（不编译）
+
+到 [Releases](https://github.com/ZHO2008/AICompanion/releases/latest) 下
+`AICompanion-<版本>-full-setup.exe`（0.9.1 是 1621.4 MB），双击安装 —— 自带 .NET 8 运行时、
+LLM/ASR 模型与 CUDA 运行库，装完即可对话，不需要管理员权限，装到
+`%LOCALAPPDATA%\Programs\AICompanion`。校验值在同页的 `SHA256SUMS.txt`。
+
+包里不含需要单独授权的 Live2D 素材，按包内 `素材说明.md` 自取；缺了会降级到静态立绘，不会崩。
+下面 2.1 起是"从源码自己构建"的路子。
+
 ### 2.1 先决条件：全新 clone 与"开发机"的差别
 
 仓库里只放代码与文档。上游源码、专有库、模型都因为体积或许可原因**不入库**，

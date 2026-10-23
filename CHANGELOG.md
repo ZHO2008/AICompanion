@@ -41,6 +41,9 @@
 - 异目录启动验证（`tools/verify_dist.ps1`）：必需文件 7/7、无授权素材、主窗口出现、
   内存 359.9 MB / 句柄 766、日志 **0 错误行**、`ngl=10/28`、子进程清理干净 → 通过
 - 构建：`dotnet build AICompanion.sln -c Debug` → 0 Warning / 0 Error
+- GitHub Release [`v0.9.1`](https://github.com/ZHO2008/AICompanion/releases/tag/v0.9.1) 附带
+  `AICompanion-0.9.1-full-setup.exe`（1621.4 MB，SHA256 `c01d7315…249cc7`）与 `SHA256SUMS.txt`；
+  GitHub 记录的 `digest` 与本机计算的哈希一致
 
 ---
 
