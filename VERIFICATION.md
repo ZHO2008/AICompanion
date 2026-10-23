@@ -3060,7 +3060,7 @@ Motions 组名判断），注释已改成描述现状。
 - `Append` 是唯一"只新增、绝不改动已有条目"的策略（`Merge` 会按 Id/触发器改写，`Overwrite` 会备份后替换整库）；
 - `Warnings` 逐条 Warn，成功刷新候选列表并提示条数，失败显示 `Error`，异常记 `Error(ex)`。
 
-### 30.12 本轮删除的死代码（25 项）
+### 30.12 本轮删除的死代码（27 项）
 
 | # | 位置 | 判据 |
 | --- | --- | --- |
@@ -3089,6 +3089,8 @@ Motions 组名判断），注释已改成描述现状。
 | 23 | `MainWindow._expressionTimer.Interval` 初始化 | 死赋值 |
 | 24 | `SettingsWindow` 3 处恒假 null 守卫 | `InitializeComponent()` 之后恒非 null |
 | 25 | `GameCooldownTracker` 重复的清理实现 | 两套等价逻辑合并成 `PruneExpiredLocked` |
+| 26 | `ContextManager.GetAnchorMemories()` | 0 调用（`AnchorMemory` 属性本身有用，这个包装是多余的） |
+| 27 | `ContextManager.RemoveAnchorMemory(DateTime)` | 0 调用，也没有任何 UI 能删单条锚点 |
 
 每个名字都按词边界全仓计数（`src` + `tools/probes`，排除 `obj/bin`），确认只剩声明本身才动。
 `tools/probes` 对以上成员 0 引用，已逐名核对。
@@ -3133,10 +3135,9 @@ Motions 组名判断），注释已改成描述现状。
 
 ### 30.16 最终状态
 
-- `dotnet build AICompanion.sln -c Debug` → **0 Warning / 0 Error**（本轮共跑 5 次，最后一次在全部改动之后）。
-- 改动 **33 个文件**，`+1143 / -284`（不含本文档）。
-- 行尾：`Live2DRenderer.cs` 的 2 行 CRLF 归一为 LF（该文件其余为 LF）；本文档本身原有 224 行 LF-only，
-  追加 §30 时统一成 CRLF，`git diff --ignore-cr-at-eol` 显示真实内容改动为 `+282 / -1`。代码文件的改动逐文件
-  用 `--ignore-cr-at-eol` 对比过，除上述 2 行外没有行尾噪声。
+- `dotnet build AICompanion.sln -c Debug` → **0 Warning / 0 Error**（本轮每批改动后都跑，最后一次在全部改动之后）。
+- 改动 **34 个文件**（33 个代码 + 本文档），相对第二轮提交 `9b6abb4`：`+1663 / -530`；忽略行尾后 `+1437 / -304`。
+- 行尾：代码文件里只有 `Live2DRenderer.cs` 的 2 行 CRLF 归一为 LF（详见 §30.1）；本文档原有 224 行 LF-only，
+  追加 §30 时统一成 CRLF。逐文件用 `--ignore-cr-at-eol` 对比过，除上述 2 行外没有行尾噪声。
 - 全部为静态代码修改 + 文档，**没有跑任何模型推理、没有运行程序**（遵守"低负载"要求）。
 - 没有改 `config.yaml`（准则 9），没有关机。

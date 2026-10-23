@@ -187,23 +187,6 @@ public sealed class ContextManager
         _logger.Info($"已新增锚点记忆（当前 {AnchorMemory.Count} 条）。");
     }
 
-    public IReadOnlyList<ChatMessage> GetAnchorMemories() => AnchorMemory;
-
-    public bool RemoveAnchorMemory(DateTime timestamp)
-    {
-        lock (_sync)
-        {
-            var index = _anchors.FindIndex(a => a.Timestamp == timestamp);
-            if (index < 0)
-            {
-                return false;
-            }
-
-            _anchors.RemoveAt(index);
-            return true;
-        }
-    }
-
     /// <summary>
     /// 构建发送给 LLM 的上下文（手册 §3.2）。
     ///
