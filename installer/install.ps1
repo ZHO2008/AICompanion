@@ -109,7 +109,7 @@ Write-Host '==> 注册卸载信息'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AICompanion'
 New-Item -Path $uninstallKey -Force | Out-Null
 
-$version = '0.9.0'
+$version = '0.9.1'
 $versionFile = Join-Path $InstallDir 'VERSION.txt'
 if (Test-Path $versionFile) {
     $first = (Get-Content $versionFile -Encoding UTF8 | Select-Object -First 1)

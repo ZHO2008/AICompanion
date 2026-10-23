@@ -3,7 +3,7 @@
 #
 #  用法：
 #    powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1
-#    powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1 -DistDir dist\AICompanion-0.9.0-win-x64
+#    powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1 -DistDir dist\AICompanion-0.9.1-win-x64
 #
 #  为什么需要它：
 #    开发时程序依赖仓库根目录（config.yaml、Assets、Hiyori、models 都在那），

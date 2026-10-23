@@ -598,6 +598,11 @@ WPF 按新 DPI 重新布局，不会被 Windows 位图拉伸（变模糊）也�
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
+> **当前版本 0.9.1**（2026-10-23 重打）：修掉了第四轮发现的"退出必崩 + llama-server 变孤儿"，
+> 版本号从 `AICompanion.App.csproj` 的 `<Version>` 读，目录名/安装包名/`VERSION.txt` 全跟着走。
+> 旧包 0.9.0 备份在 `artifacts\dist-backup-0.9.0\`（不进版本库）。
+> 出包后用 `tools\verify_dist.ps1` 异目录验证一遍，见 VERIFICATION §32。
+
 默认是**「带所有环境、但不带需要授权的素材」**的包：
 
 | 开关 | 默认 | 含义 |
@@ -620,9 +625,9 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 产物：
 
 ```
-dist\AICompanion-0.9.0-win-x64\              可直接运行的分发目录（默认含模型与 CUDA 运行库，约 1.90 GB）
-dist\AICompanion-0.9.0-win-x64.zip           加 -Zip 才生成
-dist\AICompanion-0.9.0-full-setup.exe        安装包（约 1.62 GB；-NoInstaller 则不生成）
+dist\AICompanion-0.9.1-win-x64\              可直接运行的分发目录（默认含模型与 CUDA 运行库，约 1.90 GB）
+dist\AICompanion-0.9.1-win-x64.zip           加 -Zip 才生成
+dist\AICompanion-0.9.1-full-setup.exe        安装包（约 1.62 GB；-NoInstaller 则不生成）
 ```
 
 只出不含模型的轻量包（约 249 MB）：
@@ -706,7 +711,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeLicensedAssets
 ### 10.6 分发包里有什么
 
 ```
-AICompanion.exe              主程序（WinExe，带图标与版本信息 0.9.0）
+AICompanion.exe              主程序（WinExe，带图标与版本信息 0.9.1）
 AICompanion.dll / Core.dll   托管程序集
 GameMonitor.exe              游戏检测子进程（必须与主程序同目录）
 <运行时文件>                  self-contained 的 .NET 8 + WPF 程序集

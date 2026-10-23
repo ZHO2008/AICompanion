@@ -3335,3 +3335,109 @@ POST /v1/chat/completions  {"messages":[{"role":"user","content":"用一句话�
 口型同步 → SAPI 出声"这条**纯视觉/听觉**链路没有用人眼确认过；托盘"退出"菜单也没有真的点过，
 退出验证走的是与它完全相同的 `Shutdown()` 路径（§31.5）。这两点属于验证手段的限制，
 不是没验证就宣称通过。
+
+## 32. 0.9.1 打包（2026-10-23 中午）
+
+第四节修完退出崩溃后，`dist\AICompanion-0.9.0-full-setup.exe` 就成了"装上去会崩"的旧包。
+按用户指示：**先备份旧包，再重打，版本号提到 0.9.1**（推送远端的事按用户回复先不做）。
+
+### 32.1 版本号从 0.9.0 提到 0.9.1
+
+| 位置 | 改动 |
+| --- | --- |
+| `AICompanion.App.csproj` | `Version`、`AssemblyVersion`、`FileVersion` → `0.9.1` / `0.9.1.0` |
+| `installer\AICompanion.iss` | 注释里的 `/DMyVersion=0.9.1`、`#define MyVersion`、兜底 `StageDir` |
+| `installer\install.ps1` | 卸载信息里读不到 `VERSION.txt` 时的兜底 `$version = '0.9.1'` |
+| `tools\verify_dist.ps1` | 用法示例里的包目录名 |
+| `README.md` | §10.2 产物清单、§10.6 的 exe 版本号 |
+
+`pack.ps1` 的版本是从 csproj 现读的（`<Version>`），所以只要 csproj 改了，分发目录名、zip 名、
+安装包名、`VERSION.txt` 全都会跟着变——这也是为什么只改一处 `Version` 就够。
+
+### 32.2 打包过程（`tools\pack.ps1`，默认参数）
+
+```
+版本：0.9.1   自带运行时：True   ReadyToRun：True   含模型：True   含授权素材：False
++ Assets\ (8.7 MB)                  + bin\ (18 个原生库, 101.2 MB)
++ CUDA 运行库 493 MB                来自 CUDA v13.3 的 cublas64_13 / cublasLt64_13 / cudart64_13
++ models\llm (1.04 GB)              + models\asr (141.1 MB)     + models\tts (0.3 MB)
+- models\piper 是空目录，跳过        - Hiyori\ / character.png / Live2DCubismCore.dll 未打包（授权素材）
+    精简语言资源省 13.3 MB，排除 3 个 .pdb 省 0.2 MB
+    分发目录体积：1.90 GB
+    ISCC 编译：Successful compile (233.4 秒)
+```
+
+产物：
+
+```
+dist\AICompanion-0.9.1-win-x64\          1.90 GB（可直接运行的分发目录）
+dist\AICompanion-0.9.1-full-setup.exe    1621.4 MB（安装包）
+```
+
+exe 版本信息核对：`FileVersion=0.9.1.0`，`ProductVersion=0.9.1+c87e9ee0a757...`（提交号自动进版本串）。
+`VERSION.txt` 内容首行 `AICompanion 0.9.1`，构建时间 `2026-10-23 11:42:22`。
+
+旧包没有删，移到了 `artifacts\dist-backup-0.9.0\AICompanion-0.9.0-full-setup.exe`（1621 MB），
+要回退直接搬回来即可。
+
+### 32.3 异目录启动验证（`tools\verify_dist.ps1`）
+
+把分发目录整份复制到 `%TEMP%`，用**另一个工作目录**启动，跑 45 秒后检查：
+
+```
+[OK] 必需文件 7/7（exe / dll / Core.dll / GameMonitor.exe / config.yaml / bin\llama-server.exe / bin\ai_asr.dll）
+[OK] 未包含需单独授权的素材（Live2DCubismCore.dll / Hiyori / character.png / Assets\source 都不在包里）
+[OK] 含 素材说明.md
+[OK] 进程存活，内存 359.9 MB，句柄 766
+[OK] 主窗口已出现
+[OK] 日志：...\app\logs\app\app-20261023.log   错误行：0
+     11:47:54 启动完成：运行模式=GPU 模式（ngl=10/28，空闲显存 6811 MB），LLM 就绪=True，TTS=sapi（降级=True）
+[OK] 清理：已停 1 个 llama-server 子进程，删除临时目录
+=== 验证通过 ===
+```
+
+这一次顺带证明了"包是自洽的"：缺 Live2D 素材时按设计降级（日志里没有 ERR），
+GPU 规划在干净环境里照样算到 `ngl=10/28`，退出时子进程被清掉。
+
+### 32.4 途中发现并修掉的一个真缺陷：**PS 脚本丢了 UTF-8 BOM**
+
+第一次跑 `verify_dist.ps1` 直接语法报错：
+
+```
++     Write-Host "    宸叉竻鐞?$($strays.Count) 涓?llama-server 瀛愯繘绋?
+The string is missing the terminator: ".
+```
+
+原因不是脚本内容坏了，是**文件编码**：Windows PowerShell 5.1 用 `-File` 执行脚本时按
+"有没有 BOM"判断编码——有 BOM 当 UTF-8，没有就按系统 ANSI（本机 GBK）解。`verify_dist.ps1`
+被文本编辑器改过一次后 BOM 丢了，中文注释被当 GBK 解成乱码，连引号都配不上，整份脚本解析失败。
+
+同一批检查还发现 `installer\install.ps1` 也丢了 BOM（它的中文提示会同样乱码）。
+两个文件都已补回 BOM，并用 PS 5.1 的语法解析器逐个验证 `tools\*.ps1` 与 `installer\*.ps1`：
+**8 个脚本，语法错误 0**。
+
+> 教训记在这里：本项目的 `.ps1` 必须存成 **UTF-8 with BOM**（`pack.ps1`/`soak_test.ps1`/
+> `ptt_smoke.ps1`/`make_*.ps1`/`start-cosyvoice.ps1` 本来就有 BOM）。`.bat` 与 `.cs` 没有这个要求
+> （`.bat` 里全 ASCII，C# 由 Roslyn 按 UTF-8 读）。
+
+### 32.5 当前分发状态
+
+- 本地 `dist\` 只有 0.9.1 两个产物；0.9.0 的安装包在 `artifacts\dist-backup-0.9.0\` 备份。
+- `dist/`、`artifacts/` 都在 `.gitignore` 里，不进版本库。
+- 远端未推送（用户选择先不推）：本地 `main` 领先 `origin/main` 18 个提交。
+- `artifacts\repo-full-history.bundle` 已重打到 `main@c87e9ee`（bundle verify 通过）。
+
+### 32.6 这次改动带来的行尾归一（记录，不掩盖）
+
+`git diff` 里 `csproj` 与 `.iss` 会显示十几行"改动"，其实多数是行尾被归一，用
+`git diff --ignore-cr-at-eol` 看只剩版本号那几行：
+
+| 文件 | 改前 | 改后 | 忽略行尾后的真实改动 |
+| --- | --- | --- | --- |
+| `AICompanion.App.csproj` | 56 CRLF + 10 LF（混排） | 66 CRLF | 3 行（三个版本号） |
+| `installer\AICompanion.iss` | 139 LF + 4 CRLF（混排） | 143 LF | 3 行（`MyVersion`、`StageDir`、注释） |
+| `installer\install.ps1` | 194 LF | 194 LF（未变） | 1 行（兜底版本号，另补回 BOM） |
+| `tools\verify_dist.ps1` | 246 CRLF | 246 CRLF（未变） | 1 行（用法示例，另补回 BOM） |
+
+两个混排文件各自被统一成"占多数的那种"，算是顺手清掉了行尾噪声；`.ps1` 的 BOM 与行尾是两件事，
+BOM 决定 PS 5.1 能不能解析（§32.4），行尾只影响 diff 观感。
