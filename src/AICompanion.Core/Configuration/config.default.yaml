@@ -7,8 +7,8 @@
 # ============================================================================
 
 llm:
-  # 手册基准是 7B Q4_K_M；本机（开发机 RTX 5060 8GB）建议先用 1.5B 跑通链路。
-  model_path: "models/qwen2.5-7b-q4_k_m.gguf"
+  # 默认用安装包里自带的那份（models/llm/，开箱即用）。想换 7B：把 gguf 放进 models/ 后改这里即可。
+  model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
   host: "127.0.0.1"
   port: 8080
   context_length: 4096

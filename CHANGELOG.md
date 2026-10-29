@@ -18,6 +18,11 @@
 
 ### 变更
 
+- `config.default.yaml` 的默认模型改成包里真正自带的那份
+  （`models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf`）。以前指向 `models/qwen2.5-7b-q4_k_m.gguf`，
+  新装的机器必然报"LLM 模型文件缺失"，开箱不可用。
+- 打包时若没有角色图，自动用 `tools/draw_avatar.ps1` 生成一张占位立绘（自己画的，无第三方版权），
+  新用户装完不会只看到一块纯色背景。
 - 分发目录不再带运行期个人状态：`Assets/appearance.json`（窗口尺寸/缩放）、`Knowledge/.pending`（提醒状态）。
 - 仓库里最后几处写死的本机绝对路径（`E:\DEEPSEEK`）清掉了：
   `tools/Fetcher`、`tools/probes/ExportProbe`、`tools/probes/OomProbe`、`tools/draw_avatar.ps1`、`tools/soak_test.ps1`
@@ -54,6 +59,11 @@
 
 ### 变更
 
+- `config.default.yaml` 的默认模型改成包里真正自带的那份
+  （`models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf`）。以前指向 `models/qwen2.5-7b-q4_k_m.gguf`，
+  新装的机器必然报"LLM 模型文件缺失"，开箱不可用。
+- 打包时若没有角色图，自动用 `tools/draw_avatar.ps1` 生成一张占位立绘（自己画的，无第三方版权），
+  新用户装完不会只看到一块纯色背景。
 - 分发目录不再带运行期个人状态：`Assets/appearance.json`（窗口尺寸/缩放）、`Knowledge/.pending`（提醒状态）。
 - 仓库里最后几处写死的本机绝对路径（`E:\DEEPSEEK`）清掉了：
   `tools/Fetcher`、`tools/probes/ExportProbe`、`tools/probes/OomProbe`、`tools/draw_avatar.ps1`、`tools/soak_test.ps1`

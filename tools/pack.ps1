@@ -164,6 +164,20 @@ foreach ($p in @('Assets\appearance.json', 'Knowledge\.pending')) {
         Write-Host "    - $p 未打包（运行期个人状态）"
     }
 }
+# 开箱体验：包里没有角色图时，用 tools\draw_avatar.ps1 生成一张占位立绘。
+# 那是我们自己画的（无第三方版权），免得新用户装完只看到一块纯色背景。
+$defDir = Join-Path $stage 'Assets\Default'
+$imgCount = 0
+if (Test-Path $defDir) {
+    $imgCount = @(Get-ChildItem $defDir -File -Include '*.png', '*.jpg' -ErrorAction SilentlyContinue).Count
+}
+if ($imgCount -eq 0 -and (Test-Path 'tools\draw_avatar.ps1')) {
+    New-Item -ItemType Directory -Path $defDir -Force | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File 'tools\draw_avatar.ps1' -OutDir $defDir | Out-Null
+    if (Test-Path (Join-Path $defDir 'default.png')) {
+        Write-Host '    + 占位立绘（tools\draw_avatar.ps1 生成，用户可换成自己的图）'
+    }
+}
 if (Test-Path 'game_list.txt') { Copy-Item 'game_list.txt' $stage -Force }
 if (Test-Path 'README.md') { Copy-Item 'README.md' $stage -Force }
 
