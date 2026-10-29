@@ -428,7 +428,7 @@ start_all.bat
 | `context` | `max_recent_rounds` / `summary_token_limit` / `anchor_limit` | 上下文与摘要 |
 | `idle` | `idle_minutes` / `cpu_low_percent` / `cpu_high_percent` | 空闲调度门槛 |
 | `ui` | `click_through` / `scale` / `pet_image_path` / `fallback_display_name` | 表现层 |
-| `ui` | `transparent_hover_switch` / `transparent_hover_delay_ms` / `transparent_auto_revert_seconds` | 透明态悬停切换 |
+| `ui` | `transparent_hover_switch` / `transparent_hover_delay_ms` / `transparent_auto_revert_seconds` / `fullscreen_quiet_mode` | 透明态悬停切换、全屏时自动让路 |
 
 > `ui.click_through` 的语义是"**启动时**是否处于透明穿透态"，默认 `false`（覆盖）。
 > 运行中随时可用右键切换，该值只决定初始状态。
@@ -558,6 +558,8 @@ TTS 初始化完成：配置引擎=gpt_sovits，实际引擎=gpt_sovits，降级
 - **左键** → 只负责拖动（位移超过 4px 才算拖动），不再触发功能栏。
 - **Ctrl + 滚轮** → 调整角色大小（±5%，见下）。
 - **透明态下把鼠标移到角色身上** → 悬停 250ms 后自动切回覆盖；鼠标离开 3 秒后自动退回透明。
+- **前台有全屏程序时**（游戏、全屏视频）→ 自动切成透明并暂停悬停切换，退出全屏后恢复成全屏前的模式。
+  全屏期间点右上角按钮仍然有效，且以你的选择为准。由 `ui.fullscreen_quiet_mode` 控制（默认开）。
 
 > 透明态收不到任何鼠标消息（`WS_EX_TRANSPARENT` 连 `WM_MOUSEMOVE` 都不给），
 > 所以悬停检测是"每 100ms 轮询光标 + **整窗**命中判定"。

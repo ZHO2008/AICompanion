@@ -137,6 +137,23 @@ public partial class MainWindow : Window
     private DateTime _lastHoverDiag = DateTime.MinValue;
     private string _hoverDiag = "(尚未采样)";
 
+    // ---- 全屏程序检测（全屏时自动让路，别抢游戏的鼠标）----
+
+    /// <summary>前台全屏检测器。判定逻辑见 <see cref="FullscreenWatcher"/>。</summary>
+    private readonly FullscreenWatcher _fullscreen = new();
+
+    /// <summary>当前是否检测到前台全屏程序。</summary>
+    private bool _fullscreenActive;
+
+    /// <summary>
+    /// 当前「透明」态是不是因为全屏被自动切过来的。
+    /// 只有这种才在退出全屏时自动切回「覆盖」；用户自己选的模式不动。
+    /// </summary>
+    private bool _fullscreenForcedTransparent;
+
+    /// <summary>上一次采样全屏状态的时间（复用 100ms 的悬停定时器，约 500ms 采一次就够）。</summary>
+    private DateTime _lastFullscreenPoll = DateTime.MinValue;
+
     public MainWindow(AppHost host, BubbleNotifier bubbles)
     {
         _host = host;
@@ -1459,7 +1476,19 @@ public partial class MainWindow : Window
     }
 
     /// <summary>切换「透明（穿透）」与「覆盖（可交互）」。</summary>
-    public void ToggleClickThrough() => SetClickThrough(!_clickThrough, fromHover: false);
+    public void ToggleClickThrough()
+    {
+        /*
+         * 全屏期间用户还是点了按钮：以他的选择为准。
+         * 清掉"自动切的"标记，退出全屏时就不会再把它改回去。
+         */
+        if (_fullscreenActive)
+        {
+            _fullscreenForcedTransparent = false;
+        }
+
+        SetClickThrough(!_clickThrough, fromHover: false);
+    }
 
     /// <summary>
     /// 设置交互模式。
@@ -1468,7 +1497,8 @@ public partial class MainWindow : Window
     /// 是否由悬停自动触发。只有悬停触发的切换才会在鼠标离开后自动退回透明；
     /// 用户手动切换的模式不会被自动改掉。
     /// </param>
-    private void SetClickThrough(bool clickThrough, bool fromHover)
+    /// <param name="source">日志里的来源标记；为空时按 <paramref name="fromHover"/> 推断。</param>
+    private void SetClickThrough(bool clickThrough, bool fromHover, string? source = null)
     {
         if (_clickThrough == clickThrough)
         {
@@ -1514,7 +1544,7 @@ public partial class MainWindow : Window
          * 切换事实仍然写日志，排障不受影响。
          */
         _host.Logger.Info(
-            $"交互模式切换为{(_clickThrough ? "透明（鼠标穿透）" : "覆盖（可交互）")}，来源={(fromHover ? "悬停" : "手动")}");
+            $"交互模式切换为{(_clickThrough ? "透明（鼠标穿透）" : "覆盖（可交互）")}，来源={(source ?? (fromHover ? "悬停" : "手动"))}");
 
         // 切换后报一次窗口的屏幕矩形：既是排障线索，也方便自动化验证瞄准
         if (_clickThrough)
@@ -1566,8 +1596,20 @@ public partial class MainWindow : Window
         // 待机表情回退与悬停切换开关无关，所以放在 TransparentHoverSwitch 判断之前。
         CheckIdleExpression();
 
+        // 全屏检测也放在开关之前：它决定"要不要给全屏程序让路"，与悬停开关无关。
+        PollFullscreen();
+
         var ui = _host.Config.Ui;
         if (!ui.TransparentHoverSwitch)
+        {
+            return;
+        }
+
+        /*
+         * 全屏期间完全不碰模式：游戏里光标本来就会满屏乱飞，
+         * 这时候按矩形判定去切"覆盖"，等于让角色窗口抢走本该给游戏的点击。
+         */
+        if (_fullscreenActive)
         {
             return;
         }
@@ -1663,6 +1705,92 @@ public partial class MainWindow : Window
             _awaySince = null;
             SetClickThrough(true, fromHover: true);
         }
+    }
+
+    /// <summary>
+    /// 每 500ms 采一次「前台是不是全屏程序」，状态变了才处理。
+    ///
+    /// 复用悬停定时器（100ms），不额外开线程：读窗口矩形本身很便宜，
+    /// 而 500ms 的延迟对"打开游戏 / 切出游戏"这种慢动作完全够。
+    /// </summary>
+    private void PollFullscreen()
+    {
+        if (!_host.Config.Ui.FullscreenQuietMode)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastFullscreenPoll).TotalMilliseconds < 500)
+        {
+            return;
+        }
+
+        _lastFullscreenPoll = now;
+
+        if (!_fullscreen.Poll())
+        {
+            return;
+        }
+
+        _fullscreenActive = _fullscreen.IsActive;
+
+        if (_fullscreenActive)
+        {
+            EnterFullscreenQuiet(_fullscreen.Title);
+        }
+        else
+        {
+            ExitFullscreenQuiet();
+        }
+    }
+
+    /// <summary>
+    /// 检测到全屏程序：切成「透明」（鼠标穿透）并暂停悬停自动切换。
+    ///
+    /// 为什么这么处理：角色窗口是 Topmost，覆盖态下它会吃掉落在自己矩形里的点击。
+    /// 全屏玩游戏时那块矩形压在画面上，用户点怪、点技能都会被它截走 —— 表现就是
+    /// "鼠标点不动"或"模式自己在跳"。切透明后所有点击都穿过去，谁也不挡谁。
+    /// </summary>
+    private void EnterFullscreenQuiet(string title)
+    {
+        _hoverSince = null;
+        _awaySince = null;
+        _hoverArmed = false;
+
+        var name = string.IsNullOrWhiteSpace(title) ? "(无标题窗口)" : title;
+
+        if (_clickThrough)
+        {
+            // 用户本来就选了透明，退出全屏时也不该替他改成覆盖
+            _fullscreenForcedTransparent = false;
+            _host.Logger.Info($"检测到全屏程序：{name}。当前已是透明态，悬停自动切换暂停。");
+            return;
+        }
+
+        _fullscreenForcedTransparent = true;
+        SetClickThrough(true, fromHover: false, source: "全屏自动");
+        _host.Logger.Info($"检测到全屏程序：{name}。已切为透明并暂停悬停自动切换，退出全屏后恢复。");
+    }
+
+    /// <summary>全屏结束：恢复到进入全屏前的模式。</summary>
+    private void ExitFullscreenQuiet()
+    {
+        _hoverSince = null;
+        _awaySince = null;
+        _hoverArmed = false;
+
+        if (_fullscreenForcedTransparent && _clickThrough)
+        {
+            SetClickThrough(false, fromHover: false, source: "全屏自动");
+            _host.Logger.Info("全屏结束：已恢复为覆盖（可交互）。");
+        }
+        else
+        {
+            _host.Logger.Info("全屏结束：悬停自动切换恢复。");
+        }
+
+        _fullscreenForcedTransparent = false;
     }
 
     /// <summary>

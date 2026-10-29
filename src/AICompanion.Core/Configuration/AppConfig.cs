@@ -490,6 +490,17 @@ public sealed class UiConfig
     /// </summary>
     public int TransparentAutoRevertSeconds { get; set; } = 3;
 
+    /// <summary>
+    /// 检测到前台有全屏程序（游戏、全屏视频）时，是否自动切成「透明」并暂停悬停自动切换。
+    ///
+    /// 为什么需要它：角色窗口是 Topmost，覆盖态下会吃掉落在自身矩形里的点击。
+    /// 用户全屏玩游戏时那块矩形正压在画面上，光标扫过就把模式切成覆盖，
+    /// 于是点怪、点技能被角色窗口截走；光标离开几秒又退回透明，看着像"模式自己在跳"。
+    /// 打开该开关后：进入全屏 → 切透明 + 暂停悬停；退出全屏 → 恢复原模式。
+    /// 全屏期间手动点右上角按钮仍然有效，且以用户的选择为准。
+    /// </summary>
+    public bool FullscreenQuietMode { get; set; } = true;
+
     public int BubbleDurationSeconds { get; set; } = 5;
 
     /// <summary>
