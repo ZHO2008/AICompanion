@@ -79,10 +79,18 @@ public sealed class TtsConfig
 
     public PiperConfig Piper { get; set; } = new();
 
-    /// <summary>GPT-SoVITS（api_v2.py 服务）对接配置。</summary>
+    /// <summary>
+    /// GPT-SoVITS（api_v2.py 服务）对接配置。
+    ///
+    /// Alias 不能省：YamlDotNet 的 <c>UnderscoredNamingConvention</c> 会把 <c>GptSoVits</c>
+    /// 推成 <c>gpt_so_vits</c>，而配置里写的是 <c>gpt_sovits</c>；不显式给别名的话，
+    /// 这一节会被静默忽略（<c>IgnoreUnmatchedProperties</c>），运行时只看到默认值。
+    /// </summary>
+    [YamlMember(Alias = "gpt_sovits")]
     public GptSoVitsConfig GptSoVits { get; set; } = new();
 
-    /// <summary>CosyVoice（官方 FastAPI server.py）对接配置。</summary>
+    /// <summary>CosyVoice（官方 FastAPI server.py）对接配置。别名理由同上（<c>cosy_voice</c> ≠ <c>cosyvoice</c>）。</summary>
+    [YamlMember(Alias = "cosyvoice")]
     public CosyVoiceConfig CosyVoice { get; set; } = new();
 
     /// <summary>Chatterbox 软重启阈值：连续运行超过该小时数才考虑重启（手册 §3.4）。</summary>

@@ -54,3 +54,10 @@ Assets/Default/character.png
 Knowledge/.pending/
 # 运行期写入的外观偏好（各人不同，不入库）
 Assets/appearance.json
+
+# ---- 本机个人配置（不入库）----
+# config.yaml 含本机路径、音色、端口等个人设置；模板见
+# src/AICompanion.Core/Configuration/config.default.yaml，首次启动会自动生成。
+config.yaml
+config.yaml.bak-*
+_verify-*.yaml

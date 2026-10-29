@@ -5,6 +5,26 @@
 
 ---
 
+## 未发布
+
+### 修复
+
+- **`tts.gpt_sovits` / `tts.cosyvoice` 整节配置被静默忽略**
+  `AppConfig.Tts` 的属性名是 `GptSoVits` / `CosyVoice`，YamlDotNet 的 `UnderscoredNamingConvention`
+  会把它们推成 `gpt_so_vits` / `cosy_voice`，与配置里写的 `gpt_sovits` / `cosyvoice` 对不上；
+  反序列化器又开了 `IgnoreUnmatchedProperties`，于是整节被丢掉，运行时只看到默认值。
+  表现：`config.yaml` 里明明填了权重和参考音频，引擎却报"需要参考音频"、`top_p` 落回 1.0。
+  现在给这两个属性加了显式 `[YamlMember(Alias = "gpt_sovits")]` / `[YamlMember(Alias = "cosyvoice")]`。
+
+### 变更
+
+- `config.yaml` 不再入库：它含本机路径、音色、端口等个人设置，容易被误提交；
+  模板仍是 `src/AICompanion.Core/Configuration/config.default.yaml`，缺文件时程序首次启动会自动生成。
+- 研究脚本里写死的本机路径（`E:\cosyvoice-src\…`）改为读环境变量 `COSYVOICE_WORK`。
+- README 增加"用自己训练的音色（GPT-SoVITS v2Pro）"一节：权重放置、参考音频与文本、
+  必填参数、日志确认点，以及实测耗时（52 字 13.36 s、合成 5.4 s；13 字 2.8 s、合成 2.8 s）。
+- 明确写入：`gpt_sovits` / `cosyvoice` 是显式别名，写成 `gpt_so_vits` 会被静默忽略。
+
 ## 0.9.1 — 2026-10-23
 
 这一版是**真机运行验证**（VERIFICATION §31）之后的重打：修掉一个每次退出都必崩、

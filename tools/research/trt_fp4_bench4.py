@@ -1,4 +1,5 @@
 """TRT NVFP4 正确布局：权重 [N,K] 沿最后一维（K）打包 + DequantizeLinear(block=16) + Transpose + MatMul。"""
+import os
 import time
 
 import numpy as np
@@ -116,7 +117,8 @@ if __name__ == "__main__":
 
     results = {}
     for tag, fp4 in (("fp16", False), ("nvfp4", True)):
-        op, pp = "E:\\cosyvoice-src\\n_%s.onnx" % tag, "E:\\cosyvoice-src\\n_%s.plan" % tag
+        work = os.environ.get("COSYVOICE_WORK", "cosyvoice-src")
+        op, pp = os.path.join(work, "n_%s.onnx" % tag), os.path.join(work, "n_%s.plan" % tag)
         print("\n-- %s --" % tag)
         build(op, W, fp4)
         if engine(op, pp, K, logger) is None:

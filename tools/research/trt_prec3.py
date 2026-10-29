@@ -1,4 +1,5 @@
 """三方对比：同一个 TRT 图结构下 fp16 / fp8(E4M3) / nvfp4 的 GEMM 时延与误差。"""
+import os
 import time
 
 import numpy as np
@@ -57,7 +58,8 @@ if __name__ == "__main__":
 
     res = {}
     for prec in ("fp16", "fp8", "nvfp4"):
-        op, pp = "E:\\cosyvoice-src\\p_%s.onnx" % prec, "E:\\cosyvoice-src\\p_%s.plan" % prec
+        work = os.environ.get("COSYVOICE_WORK", "cosyvoice-src")
+        op, pp = os.path.join(work, "p_%s.onnx" % prec), os.path.join(work, "p_%s.plan" % prec)
         print("\n-- %s --" % prec)
         try:
             build_prec(op, W, prec)

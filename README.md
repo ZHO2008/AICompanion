@@ -458,6 +458,45 @@ CosyVoice 用 `mode` 选择推理方式：`sft`（内置说话人 `spk_id`）、
 `cross_lingual`、`instruct`、`instruct2`。**它的服务返回裸 PCM**（16 bit 单声道、无 WAV 头），
 所以 `sample_rate` 必须填对：CosyVoice2/3 是 `24000`，CosyVoice1 是 `22050`。
 
+#### 用自己训练的音色（实测：GPT-SoVITS v2Pro）
+
+1. `*.pth` 放进整合包的 `SoVITS_weights_v2Pro\`，`*.ckpt` 放进 `GPT_weights_v2Pro\`
+   （同轮权重必须配对，混搭会咬字不清）；
+2. `config.yaml` 写**绝对路径**，参考音频与它的文本必须逐字一致：
+
+```yaml
+tts:
+  engine: "gpt_sovits"
+  gpt_sovits:
+    gpt_weights_path: "E:/GPT-SoVITS/GPT-SoVITS-v2pro/GPT_weights_v2Pro/你的模型.ckpt"
+    sovits_weights_path: "E:/GPT-SoVITS/GPT-SoVITS-v2pro/SoVITS_weights_v2Pro/你的模型.pth"
+    ref_audio_path: "E:/你的参考音频/ref.wav"
+    prompt_text: "参考音频里说的那句话。"
+    top_k: 15        # 训练时用的采样参数，别乱改
+    top_p: 0.8
+    temperature: 0.8
+    text_split_method: "cut5"   # 长句必须切
+    timeout_seconds: 180        # 首次调用要加载权重并建 CUDA 图
+```
+
+3. 先起服务，再起程序。日志里应出现这三行才算真的生效：
+
+```
+已切换到 GPT 权重：…
+已切换到 SoVITS 权重：…
+TTS 初始化完成：配置引擎=gpt_sovits，实际引擎=gpt_sovits，降级=False。
+```
+
+实测数据（RTX 5060 Laptop 8GB，v2Pro，输出 32 kHz）：52 字 → 13.36 s 音频、合成 5.4 s；
+13 字 → 2.8 s 音频、合成 2.8 s。首次调用含加载权重约 13 s，之后稳定。
+注意 GPT-SoVITS 常驻会占约 4 GB 显存，llama-server 会被挤到 CPU 模式，二者要按显存取舍。
+
+> **键名必须写 `gpt_sovits` / `cosyvoice`。** 这两个节是显式 `[YamlMember(Alias=…)]` 绑定的：
+> YamlDotNet 的 `UnderscoredNamingConvention` 会把 `GptSoVits` 推成 `gpt_so_vits`，
+> 写成那样**不会报错**，但整节会被静默忽略（表现为权重、参考音频全是空的）。
+
+> **版权**：训练权重及其音源归各自权利人，本仓库不附带任何训练好的音色权重。
+> 请自行取得合法来源的模型，或只用零样本模式（`ref_audio_path` + `prompt_text`）。
 两个引擎都允许在角色音色里逐角色覆盖：`VoiceId` → 说话人，`ReferenceAudioPath` → 参考音频，
 `PromptText` / `InstructText` → 对应文本。
 
