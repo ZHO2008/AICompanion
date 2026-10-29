@@ -2,7 +2,7 @@
 ;  AICompanion.iss - Inno Setup 6 安装脚本
 ;
 ;  一般不用手写参数，直接跑 tools\pack.ps1 即可（它会带上全部 define）：
-;    /DMyVersion=0.9.1
+;    /DMyVersion=0.9.3
 ;    /DStageDir=<分发目录>
 ;    /DSelfContained=true|false     true 时不检查系统 .NET（运行时已内置）
 ;    /DIncludeModels=true|false      true 时把 models\ 一起装进去
@@ -16,11 +16,11 @@
 ; ============================================================================
 
 #ifndef MyVersion
-  #define MyVersion "0.9.1"
+  #define MyVersion "0.9.3"
 #endif
 
 #ifndef StageDir
-  #define StageDir "..\dist\AICompanion-0.9.1-win-x64"
+  #define StageDir "..\dist\AICompanion-0.9.3-win-x64"
 #endif
 
 #ifndef SelfContained
