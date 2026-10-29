@@ -18,6 +18,11 @@
 
 ### 变更
 
+- 分发目录不再带运行期个人状态：`Assets/appearance.json`（窗口尺寸/缩放）、`Knowledge/.pending`（提醒状态）。
+- 仓库里最后几处写死的本机绝对路径（`E:\DEEPSEEK`）清掉了：
+  `tools/Fetcher`、`tools/probes/ExportProbe`、`tools/probes/OomProbe`、`tools/draw_avatar.ps1`、`tools/soak_test.ps1`
+  现在统一按「环境变量 `AICOMPANION_ROOT` → 当前工作目录 → 脚本自身位置」解析，换台机器 clone 下来就能直接跑。
+- README 里的目录树与日志示例改用相对写法，不再出现开发机盘符。
 - `tools/pack.ps1` 改为**总是**用 `config.default.yaml` 生成分发目录里的 `config.yaml`：
   以前直接复制开发机的根目录 `config.yaml`，会把本机绝对路径（模型、参考音频、端口）打进公开安装包。
 
@@ -49,6 +54,11 @@
 
 ### 变更
 
+- 分发目录不再带运行期个人状态：`Assets/appearance.json`（窗口尺寸/缩放）、`Knowledge/.pending`（提醒状态）。
+- 仓库里最后几处写死的本机绝对路径（`E:\DEEPSEEK`）清掉了：
+  `tools/Fetcher`、`tools/probes/ExportProbe`、`tools/probes/OomProbe`、`tools/draw_avatar.ps1`、`tools/soak_test.ps1`
+  现在统一按「环境变量 `AICOMPANION_ROOT` → 当前工作目录 → 脚本自身位置」解析，换台机器 clone 下来就能直接跑。
+- README 里的目录树与日志示例改用相对写法，不再出现开发机盘符。
 - `tools/pack.ps1` 改为**总是**用 `config.default.yaml` 生成分发目录里的 `config.yaml`：
   以前直接复制开发机的根目录 `config.yaml`，会把本机绝对路径（模型、参考音频、端口）打进公开安装包。
 

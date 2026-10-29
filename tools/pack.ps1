@@ -154,6 +154,16 @@ if (-not $IncludeLicensedAssets) {
     Write-Host '    - 第三方立绘（Assets\source、character.png）未打包'
 }
 
+# 运行期产生的个人状态不能随包分发：
+#   Assets\appearance.json —— 窗口尺寸/缩放/透明度等本机偏好
+#   Knowledge\.pending    —— 知识库候选与提醒状态
+foreach ($p in @('Assets\appearance.json', 'Knowledge\.pending')) {
+    $target = Join-Path $stage $p
+    if (Test-Path $target) {
+        Remove-Item $target -Recurse -Force
+        Write-Host "    - $p 未打包（运行期个人状态）"
+    }
+}
 if (Test-Path 'game_list.txt') { Copy-Item 'game_list.txt' $stage -Force }
 if (Test-Path 'README.md') { Copy-Item 'README.md' $stage -Force }
 

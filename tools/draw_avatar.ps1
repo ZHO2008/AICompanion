@@ -18,7 +18,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\draw_avatar.ps1
 
 param(
-    [string]$OutDir = 'E:\DEEPSEEK\Assets\Default'
+    [string]$OutDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Assets\Default')
 )
 
 Add-Type -AssemblyName System.Drawing

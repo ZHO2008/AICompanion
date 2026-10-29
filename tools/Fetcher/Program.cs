@@ -27,7 +27,9 @@ internal static class Program
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
         var only = args.Length >= 2 && args[0] == "--only" ? args[1] : null;
-        var root = @"E:\DEEPSEEK";
+        // 仓库根目录：优先 --root=<path>，其次 AICOMPANION_ROOT，最后当前工作目录。
+        var root = Environment.GetEnvironmentVariable("AICOMPANION_ROOT")
+                   ?? Directory.GetCurrentDirectory();
 
         var assets = BuildManifest(root)
             .Where(a => only is null || a.Name.Contains(only, StringComparison.OrdinalIgnoreCase))

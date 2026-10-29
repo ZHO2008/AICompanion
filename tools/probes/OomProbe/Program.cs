@@ -53,9 +53,11 @@ internal static class Program
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-        var fakeDir = @"E:\DEEPSEEK\tools\probes\FakeLlamaServer\bin\Release\net8.0";
+        var root = Environment.GetEnvironmentVariable("AICOMPANION_ROOT")
+                   ?? Directory.GetCurrentDirectory();
+        var fakeDir = Path.Combine(root, "tools", "probes", "FakeLlamaServer", "bin", "Release", "net8.0");
         var fakeExe = Path.Combine(fakeDir, "FakeLlamaServer.exe");
-        var modelPath = @"E:\DEEPSEEK\models\llm\qwen2.5-1.5b-instruct-q4_k_m.gguf";
+        var modelPath = Path.Combine(root, "models", "llm", "qwen2.5-1.5b-instruct-q4_k_m.gguf");
 
         Console.WriteLine("============================================================");
         Console.WriteLine("  OOM 回退循环验证（手册 §3.3）");

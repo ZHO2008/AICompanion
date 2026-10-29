@@ -5,7 +5,6 @@ using System.Text;
 
 /// <summary>
 /// ai_asr.dll 的功能性验证程序。
-///
 /// 只做一件事：用与主程序**完全相同**的 P/Invoke 契约（NativeLibrary + 函数指针）
 /// 真实加载 whisper 模型并跑一次识别，证明桥接层的 ABI 是对的。
 /// 这是对"不在 C# 里手工猜 whisper_full_params 布局"这一决策的直接验证。
@@ -29,9 +28,10 @@ internal static class Probe
 
     private static int Main(string[] args)
     {
-        var dll = args.Length > 0 ? args[0] : @"E:\DEEPSEEK\bin\ai_asr.dll";
-        var model = args.Length > 1 ? args[1] : @"E:\DEEPSEEK\models\asr\ggml-base.bin";
-
+        var root = Environment.GetEnvironmentVariable("AICOMPANION_ROOT")
+                   ?? Directory.GetCurrentDirectory();
+        var dll = args.Length > 0 ? args[0] : Path.Combine(root, "bin", "ai_asr.dll");
+        var model = args.Length > 1 ? args[1] : Path.Combine(root, "models", "asr", "ggml-base.bin");
         Console.WriteLine("=== ai_asr.dll functional verification ===");
         Console.WriteLine($"dll   : {dll}");
         Console.WriteLine($"model : {model}");

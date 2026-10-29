@@ -117,7 +117,7 @@ start_all.bat
 ## 三、目录结构
 
 ```
-E:\DEEPSEEK
+<安装目录>
 ├── AICompanion.sln
 ├── config.yaml                     # 首次运行自动生成
 ├── start_all.bat                   # 启动脚本 (GBK 编码)
@@ -236,7 +236,7 @@ E:\DEEPSEEK
 每次启动都会把命中的文件与取舍理由写进日志，例如：
 
 ```
-角色形象：使用 Assets\Default 中的图片 E:\DEEPSEEK\Assets\Default\我的角色图.png（目录中唯一的图片）
+角色形象：使用 Assets\Default 中的图片 Assets\Default\我的角色图.png（目录中唯一的图片）
 ```
 
 `Assets\Expressions` 下放 `<动画名>.png`（如 `wave.png`）作为表情差分；

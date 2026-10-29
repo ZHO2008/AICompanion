@@ -3,7 +3,7 @@
 # 结果写到 logs\soak\soak.csv，结束时追加 SUMMARY 段。
 
 $ErrorActionPreference = 'Continue'
-$root = 'E:\DEEPSEEK'
+$root = Split-Path -Parent $PSScriptRoot   # tools\.. = 仓库根
 $outDir = Join-Path $root 'logs\soak'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $csv = Join-Path $outDir 'soak.csv'
