@@ -44,9 +44,9 @@
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
   </PropertyGroup>
   <PropertyGroup>
-    <Version>0.9.1</Version>
-    <AssemblyVersion>0.9.1.0</AssemblyVersion>
-    <FileVersion>0.9.1.0</FileVersion>
+    <Version>0.9.2</Version>
+    <AssemblyVersion>0.9.2.0</AssemblyVersion>
+    <FileVersion>0.9.2.0</FileVersion>
     <Product>AI 桌面伴侣</Product>
     <AssemblyTitle>AI 桌面伴侣</AssemblyTitle>
     <Description>本地运行的 AI 桌面伴侣：Live2D 形象、语音对话、知识库与游戏感知</Description>
