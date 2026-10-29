@@ -52,7 +52,7 @@
 
 > 验证细节与**尚未验证项**的完整清单见 [VERIFICATION.md](./VERIFICATION.md)。
 > 截至第四轮（2026-10-23），VERIFICATION 记录到 §32：启动 8.4 秒、退出 0.23 秒、真实推理 0.7 秒/16 token；
-> 0.9.1 打包与异目录验证见 §32。各版本改了什么见 [CHANGELOG.md](./CHANGELOG.md)。
+> 0.9.1 打包与异目录验证见 §32，0.9.2 修了什么见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
@@ -61,7 +61,7 @@
 ### 2.0 只想先跑起来（不编译）
 
 到 [Releases](https://github.com/ZHO2008/AICompanion/releases/latest) 下
-`AICompanion-<版本>-full-setup.exe`（0.9.1 是 1621.4 MB），双击安装 —— 自带 .NET 8 运行时、
+`AICompanion-<版本>-full-setup.exe`（0.9.2 是 1621.8 MB），双击安装 —— 自带 .NET 8 运行时、
 LLM/ASR 模型与 CUDA 运行库，装完即可对话，不需要管理员权限，装到
 `%LOCALAPPDATA%\Programs\AICompanion`。校验值在同页的 `SHA256SUMS.txt`。
 
@@ -653,10 +653,10 @@ WPF 按新 DPI 重新布局，不会被 Windows 位图拉伸（变模糊）也�
 powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 ```
 
-> **当前版本 0.9.1**（2026-10-23 重打）：修掉了第四轮发现的"退出必崩 + llama-server 变孤儿"，
-> 版本号从 `AICompanion.App.csproj` 的 `<Version>` 读，目录名/安装包名/`VERSION.txt` 全跟着走。
-> 旧包 0.9.0 备份在 `artifacts\dist-backup-0.9.0\`（不进版本库）。
-> 出包后用 `tools\verify_dist.ps1` 异目录验证一遍，见 VERIFICATION §32。
+> **当前版本 0.9.2**（2026-10-29）：修掉了 `tts.gpt_sovits` / `tts.cosyvoice` 两段配置不生效的问题
+> （键名对不上，整段被跳过，程序一直用默认值），打包也改成一律用模板生成 `config.yaml`。
+> 版本号从 `AICompanion.App.csproj` 的 `<Version>` 读，目录名、安装包名、`VERSION.txt` 都跟着走。
+> 旧包 0.9.0 备份在 `artifacts\dist-backup-0.9.0\`（不进版本库）；出包后可用 `tools\verify_dist.ps1` 异目录验证。
 
 默认是**「带所有环境、但不带需要授权的素材」**的包：
 
@@ -680,9 +680,9 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1
 产物：
 
 ```
-dist\AICompanion-0.9.1-win-x64\              可直接运行的分发目录（默认含模型与 CUDA 运行库，约 1.90 GB）
-dist\AICompanion-0.9.1-win-x64.zip           加 -Zip 才生成
-dist\AICompanion-0.9.1-full-setup.exe        安装包（约 1.62 GB；-NoInstaller 则不生成）
+dist\AICompanion-0.9.2-win-x64\              可直接运行的分发目录（默认含模型与 CUDA 运行库，约 1.90 GB）
+dist\AICompanion-0.9.2-win-x64.zip           加 -Zip 才生成
+dist\AICompanion-0.9.2-full-setup.exe        安装包（约 1.62 GB；-NoInstaller 则不生成）
 ```
 
 只出不含模型的轻量包（约 249 MB）：
@@ -766,7 +766,7 @@ powershell -ExecutionPolicy Bypass -File tools\pack.ps1 -IncludeLicensedAssets
 ### 10.6 分发包里有什么
 
 ```
-AICompanion.exe              主程序（WinExe，带图标与版本信息 0.9.1）
+AICompanion.exe              主程序（WinExe，带图标与版本信息 0.9.2）
 AICompanion.dll / Core.dll   托管程序集
 GameMonitor.exe              游戏检测子进程（必须与主程序同目录）
 <运行时文件>                  self-contained 的 .NET 8 + WPF 程序集

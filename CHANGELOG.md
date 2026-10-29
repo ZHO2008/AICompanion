@@ -7,37 +7,28 @@
 
 ## 0.9.2 — 2026-10-29
 
-### 修复
+修了一个从 0.8 起就存在、一直没被发现的毛病：`tts.gpt_sovits` 和 `tts.cosyvoice` 这两段配置从来没被读过。
 
-- **`tts.gpt_sovits` / `tts.cosyvoice` 整节配置被静默忽略**
-  `AppConfig.Tts` 的属性名是 `GptSoVits` / `CosyVoice`，YamlDotNet 的 `UnderscoredNamingConvention`
-  会把它们推成 `gpt_so_vits` / `cosy_voice`，与配置里写的 `gpt_sovits` / `cosyvoice` 对不上；
-  反序列化器又开了 `IgnoreUnmatchedProperties`，于是整节被丢掉，运行时只看到默认值。
-  表现：`config.yaml` 里明明填了权重和参考音频，引擎却报"需要参考音频"、`top_p` 落回 1.0。
-  现在给这两个属性加了显式 `[YamlMember(Alias = "gpt_sovits")]` / `[YamlMember(Alias = "cosyvoice")]`。
+代码里的属性叫 `GptSoVits` / `CosyVoice`，反序列化库按驼峰规则推出来的键名是 `gpt_so_vits` / `cosy_voice`，
+跟配置里写的对不上；解析器又设了"不认识的键就跳过"，于是整段被丢掉，程序一直拿默认值在跑。
+表现是：配置里填了权重和参考音频，引擎还是报"需要参考音频"，`top_p` 也落回 1.0，切权重的接口压根没被调用。
+修法是给这两个属性加显式别名，键名不再靠猜。
 
-### 变更
+**0.9.1 及更早的版本都有这个问题。** 只用 piper 或系统语音的人感觉不到；要接 GPT-SoVITS / CosyVoice 的，必须升级。
 
-- `config.default.yaml` 的默认模型改成包里真正自带的那份
-  （`models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf`）。以前指向 `models/qwen2.5-7b-q4_k_m.gguf`，
-  新装的机器必然报"LLM 模型文件缺失"，开箱不可用。
-- 打包时若没有角色图，自动用 `tools/draw_avatar.ps1` 生成一张占位立绘（自己画的，无第三方版权），
-  新用户装完不会只看到一块纯色背景。
-- 分发目录不再带运行期个人状态：`Assets/appearance.json`（窗口尺寸/缩放）、`Knowledge/.pending`（提醒状态）。
-- 仓库里最后几处写死的本机绝对路径（`E:\DEEPSEEK`）清掉了：
-  `tools/Fetcher`、`tools/probes/ExportProbe`、`tools/probes/OomProbe`、`tools/draw_avatar.ps1`、`tools/soak_test.ps1`
-  现在统一按「环境变量 `AICOMPANION_ROOT` → 当前工作目录 → 脚本自身位置」解析，换台机器 clone 下来就能直接跑。
-- README 里的目录树与日志示例改用相对写法，不再出现开发机盘符。
-- `tools/pack.ps1` 改为**总是**用 `config.default.yaml` 生成分发目录里的 `config.yaml`：
-  以前直接复制开发机的根目录 `config.yaml`，会把本机绝对路径（模型、参考音频、端口）打进公开安装包。
+其它改动：
 
+- `config.default.yaml` 的默认模型改成包里真正带的那份（`models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf`）。
+  原来写的是 `models/qwen2.5-7b-q4_k_m.gguf`，照模板装出来的机器会提示"LLM 模型文件缺失"。
+- 打包时如果没有角色图，就用 `tools/draw_avatar.ps1` 生成一张占位立绘，免得新用户只看到一块纯色背景。
+- 打包一律用 `config.default.yaml` 生成 `config.yaml`，不再复制开发机根目录那份（以前会把本机路径打进公开包）。
+- 包里不再带 `Assets/appearance.json`、`Knowledge/.pending` 这类运行期状态。
+- `config.yaml` 不再入库，模板仍在 `Core/Configuration/config.default.yaml`，缺文件时首次启动会自动生成。
+- 工具脚本里写死的 `E:\DEEPSEEK` 换成了「`AICOMPANION_ROOT` → 当前目录 → 脚本位置」；
+  `E:\cosyvoice-src\…` 改成读环境变量 `COSYVOICE_WORK`。
+- README 补了"用自己训练的音色"一节：权重放哪、参考音频和文本怎么对、必填参数、看哪几行日志。
+  顺带记了实测数：52 字出 13.36 秒音频、合成 5.4 秒；13 字热起来 2.8 秒。
 
-- `config.yaml` 不再入库：它含本机路径、音色、端口等个人设置，容易被误提交；
-  模板仍是 `src/AICompanion.Core/Configuration/config.default.yaml`，缺文件时程序首次启动会自动生成。
-- 研究脚本里写死的本机路径（`E:\cosyvoice-src\…`）改为读环境变量 `COSYVOICE_WORK`。
-- README 增加"用自己训练的音色（GPT-SoVITS v2Pro）"一节：权重放置、参考音频与文本、
-  必填参数、日志确认点，以及实测耗时（52 字 13.36 s、合成 5.4 s；13 字 2.8 s、合成 2.8 s）。
-- 明确写入：`gpt_sovits` / `cosyvoice` 是显式别名，写成 `gpt_so_vits` 会被静默忽略。
 
 ## 0.9.1 — 2026-10-23
 
