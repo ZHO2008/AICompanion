@@ -121,10 +121,17 @@ if ($LASTEXITCODE -ne 0) { throw 'GameMonitor 发布失败。' }
 # ---------------------------------------------------------------- 3. 运行期资源
 Step '拷贝配置与资源'
 
-Copy-Item 'config.yaml' $stage -Force
-
+# 分发包里的 config.yaml 必须是**模板**，绝不能是开发机上的个人配置：
+# 后者含本机绝对路径（模型/参考音频/服务端口等），打进去等于把个人环境随包公开。
+# 模板本身与程序内嵌的那份同源（Core\Configuration\config.default.yaml）。
 $defaultCfg = 'src\AICompanion.Core\Configuration\config.default.yaml'
-if (Test-Path $defaultCfg) { Copy-Item $defaultCfg (Join-Path $stage 'config.default.yaml') -Force }
+if (Test-Path $defaultCfg) {
+    Copy-Item $defaultCfg (Join-Path $stage 'config.yaml') -Force
+    Copy-Item $defaultCfg (Join-Path $stage 'config.default.yaml') -Force
+} else {
+    Write-Host '    ! 找不到 config.default.yaml，退而复制根目录的 config.yaml（可能含本机路径，注意排查）。'
+    Copy-Item 'config.yaml' $stage -Force
+}
 
 # 授权素材：Live2D 的 Cubism Core 与模型需要用户自己接受 Live2D 的授权条款，
 # 默认不随包分发（-IncludeLicensedAssets 只给"本机自用"留个后门）。

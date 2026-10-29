@@ -18,6 +18,10 @@
 
 ### 变更
 
+- `tools/pack.ps1` 改为**总是**用 `config.default.yaml` 生成分发目录里的 `config.yaml`：
+  以前直接复制开发机的根目录 `config.yaml`，会把本机绝对路径（模型、参考音频、端口）打进公开安装包。
+
+
 - `config.yaml` 不再入库：它含本机路径、音色、端口等个人设置，容易被误提交；
   模板仍是 `src/AICompanion.Core/Configuration/config.default.yaml`，缺文件时程序首次启动会自动生成。
 - 研究脚本里写死的本机路径（`E:\cosyvoice-src\…`）改为读环境变量 `COSYVOICE_WORK`。
@@ -44,6 +48,10 @@
   `installer/*.ps1` 共 8 个脚本用 PS 5.1 语法解析器验证，错误 0。
 
 ### 变更
+
+- `tools/pack.ps1` 改为**总是**用 `config.default.yaml` 生成分发目录里的 `config.yaml`：
+  以前直接复制开发机的根目录 `config.yaml`，会把本机绝对路径（模型、参考音频、端口）打进公开安装包。
+
 
 - README 与实测对齐：目录树补 `tools/cosyvoice-patches`、`tools/research`、`probes/TtsBackendsProbe`；
   §九 验证记录改成按章节查的索引；§六 补 Piper 语音模型路径（`models/piper/zh_CN`），
