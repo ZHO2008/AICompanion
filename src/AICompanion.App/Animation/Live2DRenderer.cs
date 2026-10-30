@@ -59,6 +59,9 @@ public sealed class Live2DRenderer : IDisposable
     private double _appliedTranslation;
 
     private bool _rendering;
+    private bool _fbProbeDone;
+    private int _probeWidth;
+    private int _probeHeight;
     private bool _disposed;
     private int _mouthIndex = -1;
     private double _mouth;
@@ -580,6 +583,8 @@ public sealed class Live2DRenderer : IDisposable
             }
 
             GL.Viewport(0, 0, width, height);
+            _probeWidth = width;
+            _probeHeight = height;
 
             // 诊断：把"实际显示到屏幕上的像素尺寸"和"我们设的视口"放一起看
             int screenW = 0, screenH = 0;
@@ -655,6 +660,13 @@ public sealed class Live2DRenderer : IDisposable
             _lapp.Run((float)elapsed.TotalSeconds);
             _drawnOnce = true;
 
+            // 一次性验证"GL 到底有没有画出模型"：把一帧渲染到自己的 FBO 再读回像素。
+            if (!_fbProbeDone)
+            {
+                _fbProbeDone = true;
+                RunFramebufferProbe();
+            }
+
             /*
              * 自动居中要**迭代**，不能测一次就定。
              *
@@ -674,6 +686,83 @@ public sealed class Live2DRenderer : IDisposable
         catch (Exception ex)
         {
             _logger.Warn($"渲染异常：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 把一帧渲染到自建 FBO 并读回像素，用来**客观验证**模型有没有被画出来。
+    /// 读默认帧缓冲在这个宿主里拿不到内容（共享纹理合成），但自建 FBO 一定能读。
+    /// </summary>
+    private void RunFramebufferProbe()
+    {
+        var width = _probeWidth > 0 ? _probeWidth : 256;
+        var height = _probeHeight > 0 ? _probeHeight : 256;
+
+        int fbo = 0;
+        int tex = 0;
+
+        try
+        {
+            fbo = GL.GenFramebuffer();
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+
+            tex = GL.GenTexture();
+            GL.BindTexture(TextureTarget.Texture2D, tex);
+            GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, width, height, 0,
+                OpenTK.Graphics.OpenGL4.PixelFormat.Rgba, PixelType.UnsignedByte, IntPtr.Zero);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            GL.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, tex, 0);
+
+            var status = GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (status != FramebufferErrorCode.FramebufferComplete)
+            {
+                _logger.Warn($"FBO 不完整（{status}），无法验证渲染。");
+                return;
+            }
+
+            GL.Viewport(0, 0, width, height);
+            _probeWidth = width;
+            _probeHeight = height;
+            GL.ClearColor(new Color4(0f, 0f, 0f, 0f));
+            GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+            _lapp.Run(0f);
+
+            var pixels = new byte[width * height * 4];
+            GL.ReadPixels(0, 0, width, height, OpenTK.Graphics.OpenGL4.PixelFormat.Rgba, PixelType.UnsignedByte, pixels);
+
+            var visible = 0;
+            for (var i = 3; i < pixels.Length; i += 4)
+            {
+                if (pixels[i] > 8)
+                {
+                    visible++;
+                }
+            }
+
+            var ratio = 100.0 * visible / (width * height);
+            _logger.Info($"[探针] FBO {width}×{height} 里不透明像素 {visible} 个（{ratio:F2}%）");
+
+            if (visible == 0)
+            {
+                _logger.Warn("[探针] FBO 里一个不透明像素都没有 → GL 这一层确实没画出内容（问题在渲染，不在合成）。");
+            }
+            else
+            {
+                _logger.Info("[探针] GL 确实画出了内容 → 问题在合成（D3DImage 没被 WPF 合成进窗口）。");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"渲染探针失败：{ex.Message}");
+        }
+        finally
+        {
+            GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            GL.Viewport(0, 0, _probeWidth > 0 ? _probeWidth : 256, _probeHeight > 0 ? _probeHeight : 256);
+            if (tex != 0) { GL.DeleteTexture(tex); }
+            if (fbo != 0) { GL.DeleteFramebuffer(fbo); }
+            ApplyViewport();
         }
     }
 
