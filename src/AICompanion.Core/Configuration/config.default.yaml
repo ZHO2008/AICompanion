@@ -7,6 +7,9 @@
 # ============================================================================
 
 llm:
+  # 关掉它就是"纯桌面宠物"：不加载 GGUF、不拉起 llama-server、不占显存，
+  # 角色显示 / 语音输出 / 语音输入照样能用（它们各有自己的开关）。
+  enabled: true
   # 默认用安装包里自带的那份（models/llm/，开箱即用）。想换 7B：把 gguf 放进 models/ 后改这里即可。
   model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
   host: "127.0.0.1"
@@ -21,6 +24,8 @@ llm:
   startup_timeout_seconds: 180
 
 tts:
+  # 关掉后只弹文字气泡、不出声，也不会去探活或拉起 GPT-SoVITS 之类的服务。
+  enabled: true
   # 可选："chatterbox"（外部 GPU 服务）/"gpt_sovits"（api_v2.py）/"cosyvoice"（官方 FastAPI）/"piper"（本地 CPU）
   engine: "piper"
   default_voice: "zh_CN-default" # 全局默认音色，角色缺失配置时使用
@@ -77,6 +82,8 @@ tts:
     espeak_data_path: "third_party/piper/espeak-ng-data"
 
 asr:
+  # 关掉后不载识别模型、不打开麦克风，也不占用全局按住说话热键。
+  enabled: true
   # 手册模板此处写作 "models/asr/..."，那是占位符；这里给出可用默认值。
   model_path: "models/asr/ggml-base.bin"
   # ASR 引擎动态库：third_party/ai_asr 构建出的桥接层（内部静态链接 whisper.cpp）。

@@ -259,7 +259,12 @@ public sealed class AppHost : IAsyncDisposable
         var startResult = await Llama.StartAsync(cancellationToken).ConfigureAwait(false);
         LlmReady = startResult.Success;
 
-        if (!LlmReady)
+        if (startResult.Outcome == LlamaStartOutcome.Disabled)
+        {
+            // 用户主动关掉对话：既不算启动问题，也不弹红色告警 —— 这是他要的。
+            Logger.Info("对话功能已关闭（llm.enabled=false），跳过 LLM 健康检查告警。");
+        }
+        else if (!LlmReady)
         {
             var fatal = startResult.Outcome == LlamaStartOutcome.ModelFileMissing;
             _startupProblems.Add(startResult.Message);
@@ -279,7 +284,14 @@ public sealed class AppHost : IAsyncDisposable
         await Tts.InitializeAsync(cancellationToken).ConfigureAwait(false);
 
         // ---------- 6. ASR ----------
-        var recognizer = SpeechRecognizerFactory.Create(Config, Logger);
+        /*
+         * 关掉语音输入时**不能**再走工厂：WhisperCppRecognizer 在构造时就
+         * 把 140MB 的模型读进内存并初始化引擎（日志里那行"whisper 模型已加载"就是它）。
+         * 用户既然关了语音输入，就不该还占这些资源和初始化时间。
+         */
+        var recognizer = Config.Asr.Enabled
+            ? SpeechRecognizerFactory.Create(Config, Logger)
+            : new UnavailableSpeechRecognizer("语音输入已关闭（asr.enabled=false）。");
         var capture = AudioCaptureFactory.Create(Config.Asr.Capture, Logger);
         Asr = new ASRManager(Config, Logger, _bubbles, recognizer, capture);
         await Asr.InitializeAsync(cancellationToken).ConfigureAwait(false);
@@ -290,7 +302,12 @@ public sealed class AppHost : IAsyncDisposable
          *     不会进入常开监听，因此不采环境音、不误收旁人对话、也不会和 TTS 回声打架。
          *   - 常开监听（auto_start）：老的 VAD 分段模式，靠静音切句。
          */
-        if (Config.Asr.PushToTalk)
+        if (!Config.Asr.Enabled)
+        {
+            // 语音输入被关掉：连热键监听都不装，避免占用全局快捷键却什么也不做。
+            Logger.Info("语音输入已关闭（asr.enabled=false），跳过热键监听与常开监听。");
+        }
+        else if (Config.Asr.PushToTalk)
         {
             try
             {
@@ -395,9 +412,20 @@ public sealed class AppHost : IAsyncDisposable
             },
             _backgroundCts.Token);
 
+        /*
+         * 汇总行要如实反映"关掉的"：
+         * 之前即使 tts.enabled=false 也照样打印 TTS=gpt_sovits，看起来像引擎起来了却没声音，
+         * 排查时会被误导。关掉的一律写"已关闭"。
+         */
+        var llmLabel = Config.Llm.Enabled ? $"LLM 就绪={LlmReady}" : "LLM=已关闭";
+        var ttsLabel = Config.Tts.Enabled ? $"TTS={Tts.CurrentEngineName}（降级={Tts.IsDegraded}）" : "TTS=已关闭";
+        var asrLabel = Config.Asr.Enabled ? $"ASR={Asr.State}" : "ASR=已关闭";
+        var modeLabel = Config.Llm.Enabled
+            ? RuntimeMode.Describe()
+            : "未计算（对话已关闭，不占显存）";
+
         Logger.Info(
-            $"启动完成：运行模式={RuntimeMode.Describe()}，LLM 就绪={LlmReady}，" +
-            $"TTS={Tts.CurrentEngineName}（降级={Tts.IsDegraded}），ASR={Asr.State}，" +
+            $"启动完成：运行模式={modeLabel}，{llmLabel}，{ttsLabel}，{asrLabel}，" +
             $"知识库 {Knowledge.Count} 条，启动问题 {_startupProblems.Count} 项。");
 
         IsStarted = true;

@@ -429,12 +429,46 @@ start_all.bat
 | `idle` | `idle_minutes` / `cpu_low_percent` / `cpu_high_percent` / `maintenance_cooldown_minutes` | 空闲调度门槛、维护两轮之间的冷却 |
 | `ui` | `click_through` / `scale` / `pet_image_path` / `fallback_display_name` | 表现层 |
 | `ui` | `transparent_hover_switch` / `transparent_hover_delay_ms` / `transparent_auto_revert_seconds` / `fullscreen_quiet_mode` | 透明态悬停切换、全屏时自动让路 |
+| `llm` / `tts` / `asr` | `enabled` | **按功能单独关闭**（见下） |
 
 > `ui.click_through` 的语义是"**启动时**是否处于透明穿透态"，默认 `false`（覆盖）。
 > 运行中随时可用右键切换，该值只决定初始状态。
 >
 > `ui.scale` 为 `0` 表示按屏幕自动适配（默认）；设为 `0.5`–`2.5` 则是固定倍率。
 > 用户在界面上调过的值存在 `Assets/appearance.json`，优先级高于本文件。
+
+> `llm.enabled` / `tts.enabled` / `asr.enabled`：三项各自独立，默认全 `true`。
+> 关掉之后对应链路**完全不初始化** —— 不载模型、不占显存、不拉外部服务、不打开麦克风，
+> 启动日志里那一行会直接写"已关闭"，不会显示成"起来了但没声音"。
+>
+> ```yaml
+> # 只想挂着桌宠：三个都关，不再拉 llama-server / TTS 服务 / 识别模型
+> llm: { enabled: false }
+> tts: { enabled: false }
+> asr: { enabled: false }
+> ```
+>
+> 只关 `tts` 就是"只弹字、不出声"；只关 `asr` 就是"只能打字、不能说话"；
+> 关掉 `llm` 后发消息会直接提示"对话功能已关闭"，而不是报一个假的连接错误。
+
+### Live2D 模型兼容性（实测）
+
+| 模型 | model3 版本 | 动作 | 结果 |
+| --- | --- | --- | --- |
+| Hiyori（官方示例） | 3 | 10 个（Idle / TapBody） | ✅ |
+| 免费模型冰糖 | 3 | 0 个（文件里没有 Motions） | ✅ 能显示；无动作，只有物理摆动 |
+| 免费模型艾莲 | 3 | 2 个（在**无名默认组**里） | ✅ 修正后可用 |
+
+- Cubism 3 的 `.moc3` 不用转换，现行 SDK 直接加载；贴图 3~4 张、
+  单个 4K 贴图 10 MB 量级都没问题。
+- **动作放在无名组 `""` 里**是规范允许的写法，很多免费模型这么做。以前这种模型会被判成
+  "没有动作"（日志写 `动作组 []`），角色站着不动且没有任何报错；现在会把默认组归一成 `Idle`
+  并按默认组播放。
+- 路径含中文和空格正常：实测把模型放在 `E:\测试 目录\模型 艾莲\` 也能加载（贴图、物理、表情都读到了）。
+- `model3.json` 里声明的 `.moc3` 或贴图缺失时**不会崩**：创建 GL 之前先校验文件，
+  缺就跳过 Live2D 降级到静态立绘。（之前这种坏模型会让进程在 GC 线程上崩掉，见 CHANGELOG。）
+- 没有 `AvatarProfile.json` 时会用内置默认动作映射并给出 Warning，不影响显示；
+  想让动作/口型对得上，按模型自己的 `Motions` 写一份 `AvatarProfile.json` 放在模型旁边即可。
 
 ### 语音合成：GPT-SoVITS / CosyVoice
 

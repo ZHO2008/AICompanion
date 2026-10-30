@@ -121,7 +121,15 @@ public sealed class HealthMonitor : IAsyncDisposable
 
             foreach (var probe in _probes.Values.ToList())
             {
-                if (probe.Key == ChatterboxKey && !chatterboxEnabled)
+                // 用户在配置里关掉的服务不探活：日志里刷"LLM 服务 探活失败"会把人吓一跳，
+                // 而实际上是他自己关的。
+                if (probe.Key == LlamaKey && !_config.Llm.Enabled)
+                {
+                    UpdateProbe(probe, success: null, error: null);
+                    continue;
+                }
+
+                if (probe.Key == ChatterboxKey && (!chatterboxEnabled || !_config.Tts.Enabled))
                 {
                     UpdateProbe(probe, success: null, error: null);
                     continue;

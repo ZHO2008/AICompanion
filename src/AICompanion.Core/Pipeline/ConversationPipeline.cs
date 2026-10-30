@@ -132,6 +132,17 @@ public sealed class ConversationPipeline
     /// </summary>
     public async Task<PipelineResult> ProcessUserTextAsync(string text, CancellationToken cancellationToken = default)
     {
+        /*
+         * 对话被关掉：直接给一句人话，别让用户以为程序坏了。
+         * 放在最前面，连 _lastUserMessage 都不动 —— 关了对话就没有"上一轮"可言。
+         */
+        if (!_config.Llm.Enabled)
+        {
+            const string off = "对话功能已关闭（llm.enabled=false）。";
+            _bubble.Show("llm-disabled-chat", off + "改 config.yaml 把 llm.enabled 设为 true 再试。", BubbleLevel.Info);
+            return new PipelineResult(false, text, string.Empty, null, false, false, off);
+        }
+
         if (string.IsNullOrWhiteSpace(text))
         {
             return new PipelineResult(false, text, string.Empty, null, false, false, "输入为空。");

@@ -81,6 +81,40 @@ public sealed class Live2DRenderer : IDisposable
         _mouthIndex = _model.Model.GetParameterIndex(mouthParameter);
 
         /*
+         * 从运行时动作名（形如 "Idle_6"）反推真实存在的组。
+         *
+         * 不直接读 model3.json 是因为这里拿到的是 SDK 已经加载好的结果 ——
+         * 组名经过 SDK 处理，可能和文件里写的不完全一样，以运行时为准最可靠。
+         * 无名组（默认组）的条目形如 "_0"，剥掉下标后得到空串，这里保留为 ""。
+         */
+        foreach (var motionName in _model.Motions)
+        {
+            var group = motionName;
+            var underscore = motionName.LastIndexOf('_');
+
+            if (underscore == 0)
+            {
+                group = string.Empty;            // "_0" → 默认组
+            }
+            else if (underscore > 0 && int.TryParse(motionName[(underscore + 1)..], out _))
+            {
+                group = motionName[..underscore];
+            }
+
+            if (group.Length > 0 && group.All(char.IsDigit))
+            {
+                group = string.Empty;            // "0"、"1" 这种纯数字也当默认组
+            }
+
+            _motionGroups.Add(group);
+        }
+
+        if (_motionGroups.Count > 0)
+        {
+            _logger.Info($"模型动作组：{(string.Join(", ", _motionGroups.Select(g => g.Length == 0 ? "(默认)" : g)))}");
+        }
+
+        /*
          * 居中分两步：
          *   1) 自动居中：渲染稳定后读一次像素，量出模型实际包围盒，把中心挪到 50%；
          *   2) 用户微调：滑块值作为额外偏移，叠在自动居中之上。
@@ -116,6 +150,81 @@ public sealed class Live2DRenderer : IDisposable
     public string MouthParameter => _mouthParameter;
 
     /// <summary>
+    /// 失败路径的 GL 控件隔离区。
+    ///
+    /// 失败时不能释放（会在驱动里崩），但也不能让它们被 GC 回收 ——
+    /// OpenTK 的 DxGlContext 终结器会抛 Win32Exception 把进程干掉。
+    /// 所以在这儿攥着引用，让它们活到进程退出。一次失败的代价是一个上下文的内存，
+    /// 而"坏模型导致程序起不来"是用户完全无法接受的。
+    /// </summary>
+    private static readonly List<object> FailedContexts = new();
+
+    /// <summary>
+    /// 检查 model3.json 里声明的 moc3 与贴图是否都存在。
+    /// 返回第一个缺失项的描述（相对路径），全都存在则返回 null。
+    /// </summary>
+    private static string? FindMissingModelFiles(string modelPath)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(modelPath);
+            if (directory is null)
+            {
+                return "模型所在目录";
+            }
+
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(modelPath));
+            if (!document.RootElement.TryGetProperty("FileReferences", out var refs))
+            {
+                return "FileReferences 段";
+            }
+
+            var candidates = new List<string>();
+
+            if (refs.TryGetProperty("Moc", out var moc) && moc.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                candidates.Add(moc.GetString() ?? string.Empty);
+            }
+            else
+            {
+                return "Moc 声明";
+            }
+
+            if (refs.TryGetProperty("Textures", out var textures) && textures.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var item in textures.EnumerateArray())
+                {
+                    if (item.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        candidates.Add(item.GetString() ?? string.Empty);
+                    }
+                }
+            }
+
+            foreach (var candidate in candidates)
+            {
+                if (string.IsNullOrWhiteSpace(candidate))
+                {
+                    continue;
+                }
+
+                var full = Path.Combine(directory, candidate.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(full))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+        catch (Exception)
+        {
+            // 解析不出来就交给后面的加载流程去报错（那里有更完整的日志）。
+            return null;
+        }
+    }
+
+    /// <summary>
     /// 尝试创建渲染器。**不抛异常**：失败返回 null，调用方继续走静态图。
     /// </summary>
     public static Live2DRenderer? TryCreate(string modelPath, double horizontalOffset, IAppLogger logger)
@@ -147,6 +256,24 @@ public sealed class Live2DRenderer : IDisposable
             if (directory is null || !fileName.EndsWith(".model3.json", StringComparison.OrdinalIgnoreCase))
             {
                 logger.Warn($"模型路径不合法：{modelPath}");
+                return null;
+            }
+
+            /*
+             * 建 GL 之前先做一次纯文件校验。
+             *
+             * 起因是一次实测：model3.json 里的 moc3 不存在时，LoadModel 返回 null，
+             * 失败路径又刻意不释放 GL 上下文（见 finally 注释），结果这个上下文的
+             * 终结器在 GC 线程上抛 Win32Exception(13)「数据无效」，没有任何 catch 能接住，
+             * **整个进程被带走** —— 表现就是"换了个坏模型，程序启动到一半自己没了"。
+             *
+             * 缺文件的模型本来就不可能加载成功，在创建任何原生资源之前就挡掉，
+             * 这个问题就从源头消失了。
+             */
+            var missing = FindMissingModelFiles(modelPath);
+            if (missing is not null)
+            {
+                logger.Warn($"Live2D 模型文件不完整，跳过加载并保持静态图：缺少 {missing}（{modelPath}）");
                 return null;
             }
 
@@ -251,7 +378,27 @@ public sealed class Live2DRenderer : IDisposable
              */
             if (!handedOver)
             {
-                logger.Warn("Live2D 创建失败，原生上下文交由进程退出回收（不在 UI 线程释放，避免驱动崩溃）。");
+                /*
+                 * 收进隔离区（见 FailedContexts）：不释放，也不让 GC 回收。
+                 * 之前只"不释放"，控件变成不可达对象后终结器仍会跑，
+                 * 并在 GC 线程上抛 Win32Exception 把整个进程带走 —— 日志里那行
+                 * "后台线程致命异常：Win32Exception：数据无效 at DxGlContext.Finalize"
+                 * 就是这么来的。
+                 */
+                lock (FailedContexts)
+                {
+                    if (control is not null)
+                    {
+                        FailedContexts.Add(control);
+                    }
+
+                    if (lapp is not null)
+                    {
+                        FailedContexts.Add(lapp);
+                    }
+                }
+
+                logger.Warn("Live2D 创建失败，原生上下文已隔离（不释放、不回收），继续使用静态图。");
             }
         }
     }
@@ -303,6 +450,12 @@ public sealed class Live2DRenderer : IDisposable
         ApplyViewport();
     }
 
+    /// <summary>
+    /// 模型里真实存在的动作组名（去掉 "_0"/"_1" 下标后的基名）。
+    /// 用于判断"请求的组到底存不存在"，不存在时再考虑回落到默认组 ""。
+    /// </summary>
+    private readonly HashSet<string> _motionGroups = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>播放动作。传组的基名（如 "Idle"）或完整名（如 "Idle_3"）都可以。</summary>
     public void PlayMotion(string motionName)
     {
@@ -319,8 +472,22 @@ public sealed class Live2DRenderer : IDisposable
                 return;
             }
 
+            /*
+             * 组名对不上时的回落：
+             *
+             * 模型的 actions 可能全在**默认组** "" 里（很多免费模型如此），
+             * 这时按 "Idle" 去 StartRandomMotion 找不到任何东西，而且不抛异常 ——
+             * 表现就是"角色永远不动"，日志里也没有任何错误，非常难查。
+             * 所以先看模型里到底有哪些组，没有就把 "" 当作它们的组。
+             */
+            var group = motionName;
+            if (!_motionGroups.Contains(group) && _motionGroups.Contains(string.Empty))
+            {
+                group = string.Empty;
+            }
+
             // 传的是组基名（"Idle"）→ 在该组里随机挑一个
-            _model.StartRandomMotion(motionName, MotionPriority.PriorityNormal, null);
+            _model.StartRandomMotion(group, MotionPriority.PriorityNormal, null);
         }
         catch (Exception ex)
         {

@@ -79,7 +79,13 @@ public sealed class Live2dModelInfo
             {
                 foreach (var group in motions.EnumerateObject())
                 {
-                    groups.Add(group.Name);
+                    /*
+                     * 有些模型（尤其 vtuber 免费模型）把动作放在**无名组** "" 里，
+                     * 这是 Live2D 规范允许的"默认组"。以前直接把这个空串塞进集合，
+                     * 结果日志里显示"动作组 []"，而且按 "Idle" 查永远查不到，
+                     * 角色就一直站着不动。这里归一成 Idle，日志也读得懂。
+                     */
+                    groups.Add(string.IsNullOrWhiteSpace(group.Name) ? "Idle" : group.Name);
                 }
             }
 

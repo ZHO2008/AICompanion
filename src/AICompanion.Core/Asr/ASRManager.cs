@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using AICompanion.Core.Abstractions;
 using AICompanion.Core.Configuration;
@@ -106,6 +106,15 @@ public sealed class ASRManager : IDisposable
     /// <summary>初始化（手册 §3.5 初始化）。</summary>
     public Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        // 0. 用户主动关掉：不载模型、不开麦克风，状态置 Disabled（不是故障）。
+        if (!_config.Asr.Enabled)
+        {
+            _logger.Info("语音输入已关闭（asr.enabled=false）：不加载识别模型，也不打开麦克风。");
+            _bubble.Show("asr-disabled", "语音输入已关闭（asr.enabled=false），打字仍然可用。", BubbleLevel.Info);
+            SetState(AsrState.Disabled);
+            return Task.CompletedTask;
+        }
+
         // 1. 模型文件存在性校验 —— 缺失属"可降级缺失"，置 Faulted 但不阻断启动。
         var modelPath = AppPaths.Resolve(_config.Asr.ModelPath);
         if (!File.Exists(modelPath))

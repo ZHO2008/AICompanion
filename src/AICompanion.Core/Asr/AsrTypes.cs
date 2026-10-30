@@ -14,6 +14,9 @@ public enum AsrState
 
     /// <summary>故障：模型缺失、设备异常或连续识别失败。</summary>
     Faulted = 3,
+
+    /// <summary>用户关掉了语音输入（asr.enabled=false）。这是配置，不是故障。</summary>
+    Disabled = 4,
 }
 
 /// <summary>故障原因，用于设置面板显示与用户指引。</summary>

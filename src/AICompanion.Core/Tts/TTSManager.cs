@@ -100,6 +100,20 @@ public sealed class TTSManager : IDisposable
     /// <summary>启动逻辑（手册 §3.4 启动逻辑）。</summary>
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        /*
+         * 语音被关掉：连"探活"都不做。
+         *
+         * 注意这里**不能**只把 _engine 置空 —— GPT-SoVITS 那种外部引擎的探活
+         * 会真的发 HTTP 请求，某些配置下还会 Process.Start 把服务拉起来。
+         * 用户既然关了语音，就不该有任何进程被顺手拉起。
+         */
+        if (!_config.Tts.Enabled)
+        {
+            _logger.Info("语音合成已关闭（tts.enabled=false）：只显示文字气泡，不探活也不拉起 TTS 服务。");
+            _bubble.Show("tts-disabled", "语音输出已关闭（tts.enabled=false），只显示文字。", BubbleLevel.Info);
+            return;
+        }
+
         _logger.Info($"按配置创建 TTS 引擎：{_config.Tts.Engine}");
 
         // 先取本地快照：探活要 await 网络，绝不能持着 _engineLock 等外部服务。
@@ -232,6 +246,12 @@ public sealed class TTSManager : IDisposable
         VoiceConfig? characterVoice = null,
         CancellationToken cancellationToken = default)
     {
+        if (!_config.Tts.Enabled)
+        {
+            // 关掉语音时上层不该再走到这里；万一走了，立刻返回而不是等引擎超时。
+            return TtsSynthesisResult.Fail("语音输出已关闭（tts.enabled=false）。");
+        }
+
         var voice = ResolveVoice(characterVoice);
 
         if (string.IsNullOrWhiteSpace(text))

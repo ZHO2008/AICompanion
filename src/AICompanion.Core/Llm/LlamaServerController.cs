@@ -15,6 +15,9 @@ public enum LlamaStartOutcome
     OutOfMemory = 4,
     Cancelled = 5,
     Failed = 6,
+
+    /// <summary>用户在配置里关掉了对话（llm.enabled=false），属正常状态，不是故障。</summary>
+    Disabled = 7,
 }
 
 public sealed record LlamaStartResult(LlamaStartOutcome Outcome, int Ngl, string Message, GpuPlan? Plan)
@@ -124,6 +127,19 @@ public sealed class LlamaServerController : IAsyncDisposable
     /// </summary>
     public async Task<LlamaStartResult> StartAsync(CancellationToken cancellationToken = default)
     {
+        /*
+         * 对话被关掉是**正常配置**，不是故障：
+         * 不碰模型文件、不查显存、不拉进程，直接返回 Disabled。
+         * 上层据此跳过"LLM 未就绪"的告警，避免把用户的主动选择当成错误来吓唬人。
+         */
+        if (!_config.Llm.Enabled)
+        {
+            var off = "对话已关闭（llm.enabled=false）：不加载模型，也不拉起 llama-server。";
+            _logger.Info(off);
+            _bubble.Show("llm-disabled", "对话功能已关闭（llm.enabled=false）。角色照常显示，语音与文字输入不受影响。", BubbleLevel.Info);
+            return new LlamaStartResult(LlamaStartOutcome.Disabled, 0, off, null);
+        }
+
         /*
          * 先算 -ngl 再校验模型文件。
          *

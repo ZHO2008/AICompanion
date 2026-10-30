@@ -48,6 +48,15 @@ public sealed class AppConfig
 
 public sealed class LlmConfig
 {
+    /// <summary>
+    /// 是否启用本地大模型对话。
+    ///
+    /// 关掉之后：不加载 GGUF、不拉起 llama-server、不占显存，
+    /// 角色仍然正常显示、说话（TTS 另算）、听写（ASR 另算），
+    /// 只是"对话"这一条链路不上线。给弱机器或只想挂着桌宠的场景用。
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
     public string ModelPath { get; set; } = "models/qwen2.5-7b-q4_k_m.gguf";
 
     public string Host { get; set; } = "127.0.0.1";
@@ -71,6 +80,12 @@ public sealed class LlmConfig
 
 public sealed class TtsConfig
 {
+    /// <summary>
+    /// 是否启用语音合成。关掉之后只弹文字气泡，不再出声，
+    /// 也不会去探活/拉起 GPT-SoVITS 之类的服务。
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
     public string Engine { get; set; } = "piper";
 
     public string DefaultVoice { get; set; } = AppConfig.HardcodedDefaultVoice;
@@ -234,6 +249,12 @@ public sealed class CosyVoiceConfig
 
 public sealed class AsrConfig
 {
+    /// <summary>
+    /// 是否启用语音输入。关掉之后不载入识别模型、不打开麦克风，
+    /// 也就不会有人在你没说话的时候收到环境音。
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
     /// <summary>
     /// 采集源：microphone（麦克风，默认）或 loopback（系统音频回环）。
     /// loopback 用于识别电脑正在播放的声音，也方便端到端验证。
