@@ -17,6 +17,17 @@
 退全屏 → 恢复成全屏前的模式；全屏期间手动点右上角按钮仍然有效，且以用户的选择为准。
 开关是 `ui.fullscreen_quiet_mode`，默认 `true`。
 
+另外两处顺手修的：
+
+- **空闲维护会自己刷成死循环。** 维护任务本身要把 llama-server 拉满，CPU 一过 70% 就被取消；
+  取消后条件又立刻成立，于是"开始 → 取消 → 开始"每秒一轮，实测连续跑了六分钟、日志刷了上千行、
+  CPU 长期 70~80%。现在每轮结束（完成 / 取消 / 失败）都进冷却，
+  由 `idle.maintenance_cooldown_minutes` 控制（默认 10 分钟）。
+- **程序退出前没有任何线索。** 日志里只有"正在关闭 → 已退出"，分不清是自己崩了还是有人点了托盘退出。
+  现在托盘「退出」与主窗口关闭都会写一行日志；另外补了三个未处理异常的兜底
+  （`DispatcherUnhandledException` / `AppDomain.UnhandledException` / `TaskScheduler.UnobservedTaskException`），
+  记录到日志并弹气泡，界面线程的异常不再直接把进程带走。
+
 ## 0.9.2 — 2026-10-29
 
 修了一个从 0.8 起就存在、一直没被发现的毛病：`tts.gpt_sovits` 和 `tts.cosyvoice` 这两段配置从来没被读过。

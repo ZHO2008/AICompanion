@@ -37,6 +37,68 @@ public partial class App : Application
 
             var bootstrapLogger = new Core.Logging.FileLogger(sharedSink, "Bootstrap");
 
+            /*
+             * 未处理异常兜底。
+             *
+             * 之前没有任何处理器：UI 线程上的异常会直接把进程带走，日志里一行都没有，
+             * 事后只能看到"启动完成"之后突然没了，完全无法定位（用户报过"怎么自己退了"）。
+             * 这里统一记录 + 用气泡提示，并且不让 UI 线程的异常杀死进程 ——
+             * 桌宠这类常驻程序，宁可带伤继续跑，也不要无声消失。
+             */
+            DispatcherUnhandledException += (_, args) =>
+            {
+                try
+                {
+                    bootstrapLogger.Error(
+                        $"界面线程未处理异常：{args.Exception.GetType().Name}：{args.Exception.Message}",
+                        args.Exception);
+                    _bubbles?.Show(
+                        "ui-crash",
+                        $"内部错误：{args.Exception.Message}（已记录，程序继续运行）",
+                        BubbleLevel.Error);
+                }
+                catch
+                {
+                    // 记录失败也不能再抛。
+                }
+
+                args.Handled = true;
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            {
+                try
+                {
+                    if (args.ExceptionObject is Exception ex)
+                    {
+                        bootstrapLogger.Error($"后台线程致命异常：{ex.GetType().Name}：{ex.Message}", ex);
+                    }
+                    else
+                    {
+                        bootstrapLogger.Error($"后台线程致命异常：{args.ExceptionObject}");
+                    }
+                }
+                catch
+                {
+                    // 忽略。
+                }
+            };
+
+            TaskScheduler.UnobservedTaskException += (_, args) =>
+            {
+                try
+                {
+                    bootstrapLogger.Warn($"未观察的任务异常：{args.Exception.InnerException?.Message ?? args.Exception.Message}");
+                }
+                catch
+                {
+                    // 忽略。
+                }
+
+                // 标记已观察，避免 .NET 在 GC 时把整个进程带走。
+                args.SetObserved();
+            };
+
             _bubbles = new BubbleNotifier(Dispatcher, bootstrapLogger);
             _host = new AppHost(Dispatcher, _bubbles, sharedSink);
             _mainWindow = new MainWindow(_host, _bubbles);

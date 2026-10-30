@@ -431,6 +431,15 @@ public sealed class IdleConfig
     /// <summary>执行期间 CPU 超过该值即请求取消（百分比）。</summary>
     public double CpuHighPercent { get; set; } = 70.0;
 
+    /// <summary>
+    /// 一轮维护结束（完成 / 被取消 / 失败）后，隔多少分钟才允许下一轮。
+    ///
+    /// 为什么必须有：维护任务本身要把 llama-server 拉满，而 CPU 一高又会被取消。
+    /// 没有冷却时会形成死循环 —— 启动 → CPU 70%+ → 取消 → CPU 落下 → 立刻再启动，
+    /// 实测每秒一轮，CPU 长时间 70~80%，日志被 "开始执行 / 已取消" 刷满。
+    /// </summary>
+    public double MaintenanceCooldownMinutes { get; set; } = 10.0;
+
     /// <summary>ConversationRefiner 要求的显存使用率上限（百分比）。</summary>
     public double RefineGpuMemoryPercent { get; set; } = 60.0;
 }

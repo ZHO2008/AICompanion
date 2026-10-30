@@ -178,6 +178,22 @@ public sealed class TrayIcon : IDisposable
 
     private void ExitApplication()
     {
+        /*
+         * 必须留一行日志。
+         *
+         * 退出走的是 Application.Shutdown()（ShutdownMode=OnExplicitShutdown），
+         * 全程序只有这里会调它 —— 但以前这里不写日志，于是"程序自己没了"和
+         * "有人点了托盘退出"在日志里长得一模一样，只能靠猜。
+         */
+        try
+        {
+            _host.Logger.Info("收到退出请求：托盘菜单「退出」。");
+        }
+        catch
+        {
+            // 忽略。
+        }
+
         try
         {
             _notifyIcon.Visible = false;

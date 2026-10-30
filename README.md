@@ -426,7 +426,7 @@ start_all.bat
 | `monitor` | `port` / `cooldown_minutes` / 采样与阈值 | GameMonitor 通信与检测参数 |
 | `gpu` | `reserved_mb` / `kv_cache_reserved_mb` / `per_layer_mb` / `safety_factor` | ngl 计算参数 |
 | `context` | `max_recent_rounds` / `summary_token_limit` / `anchor_limit` | 上下文与摘要 |
-| `idle` | `idle_minutes` / `cpu_low_percent` / `cpu_high_percent` | 空闲调度门槛 |
+| `idle` | `idle_minutes` / `cpu_low_percent` / `cpu_high_percent` / `maintenance_cooldown_minutes` | 空闲调度门槛、维护两轮之间的冷却 |
 | `ui` | `click_through` / `scale` / `pet_image_path` / `fallback_display_name` | 表现层 |
 | `ui` | `transparent_hover_switch` / `transparent_hover_delay_ms` / `transparent_auto_revert_seconds` / `fullscreen_quiet_mode` | 透明态悬停切换、全屏时自动让路 |
 

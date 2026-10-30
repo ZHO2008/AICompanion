@@ -56,6 +56,9 @@ public sealed class IdleTaskScheduler : IDisposable
     private volatile bool _taskRunning;
     private bool _disposed;
 
+    /// <summary>冷却截止时间：在此之前不允许再启动一轮维护（见 IdleConfig.MaintenanceCooldownMinutes）。</summary>
+    private DateTime _cooldownUntilUtc = DateTime.MinValue;
+
     public IdleTaskScheduler(
         AppConfig config,
         IAppLogger logger,
@@ -183,6 +186,11 @@ public sealed class IdleTaskScheduler : IDisposable
 
     private bool ShouldStartMaintenance()
     {
+        if (DateTime.UtcNow < _cooldownUntilUtc)
+        {
+            return false;
+        }
+
         if (UserIdle < TimeSpan.FromMinutes(_config.Idle.IdleMinutes))
         {
             return false;
@@ -299,6 +307,24 @@ public sealed class IdleTaskScheduler : IDisposable
             }
 
             cts.Dispose();
+
+            /*
+             * 无论这一轮是完成、取消还是失败，都进冷却。
+             *
+             * 取消这一支尤其重要：维护任务把 llama-server 跑满 → CPU 超阈值 → 取消 →
+             * CPU 立刻回落 → 条件又成立 → 马上再来一轮。实测就是这样每秒一轮刷了六分钟，
+             * CPU 长期 70%~80%，日志里全是"开始执行 / 已取消"。
+             */
+            var cooldown = TimeSpan.FromMinutes(Math.Max(0, _config.Idle.MaintenanceCooldownMinutes));
+            if (cooldown > TimeSpan.Zero)
+            {
+                _cooldownUntilUtc = DateTime.UtcNow + cooldown;
+            }
+
+            if (outcome != MaintenanceOutcome.Completed)
+            {
+                _logger.Info($"下一轮维护将在 {_config.Idle.MaintenanceCooldownMinutes:N0} 分钟后才允许启动。");
+            }
 
             if (outcome == MaintenanceOutcome.Completed)
             {

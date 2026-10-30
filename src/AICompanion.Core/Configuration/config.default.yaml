@@ -154,6 +154,10 @@ idle:
   cpu_low_percent: 50.0
   cpu_high_percent: 70.0
   refine_gpu_memory_percent: 60.0
+  # 一轮维护结束后隔多少分钟才允许下一轮。
+  # 维护本身会把 llama-server 拉满，CPU 一高又会被取消；没有冷却会变成
+  # "启动 → CPU 超 70% → 取消 → 立刻再启动" 的死循环（实测每秒一轮）。
+  maintenance_cooldown_minutes: 10.0
 
 ui:
   fallback_display_name: "AI 伴侣"

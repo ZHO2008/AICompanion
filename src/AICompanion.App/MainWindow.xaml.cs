@@ -845,6 +845,8 @@ public partial class MainWindow : Window
     /// <summary>窗口关闭时释放渲染资源。GL 上下文与模型不释放会留下线程/显存。</summary>
     protected override void OnClosed(EventArgs e)
     {
+        _host.Logger.Info("主窗口已关闭，停止渲染与托盘外的所有子窗口。");
+
         // 先退订外部事件：后台服务在窗口关闭后仍会继续触发，
         // 不退订就是往已释放的控件/渲染器上回调。
         foreach (var unsubscribe in _unsubscribe)
