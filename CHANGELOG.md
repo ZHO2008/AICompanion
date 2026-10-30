@@ -1,3 +1,28 @@
+## 未发布 — Live2D 不显示的真正原因：跨显卡互操作
+
+把今天改动过的渲染代码整份退回 `ef55f84` 复现，**照样不显示**（角色区 0.31%），
+证明不是这轮代码改坏的。真实原因是**适配器不一致**：
+
+- GL 上下文落在 **AMD Radeon 780M**，而 WPF/DWM 的 D3D 合成走 **NVIDIA RTX 5060**。
+- `GLWpfControl` 靠共享纹理把画面交给 WPF，**跨适配器时共享失败但不报错** ——
+  表现就是"渲染器已就绪、帧数在涨、探针能读到 15.6% 不透明像素，窗口里却什么都没有"。
+
+验证：给 `AICompanion.exe` 设 Windows 显卡偏好「高性能（NVIDIA）」后，GL 上下文变成
+`Vendor=NVIDIA / RTX 5060`，**角色区立刻从 0.31% 变成 13.8%**，模型正常显示。
+
+注册表位置（GpuPreference=2 表示高性能/独显）：
+
+```
+HKCU\Software\Microsoft\DirectX\UserGpuPreferences
+  AICompanion.exe = GpuPreference=2;
+```
+
+这也解释了"以前好好的"：切到集显模式、或驱动/显卡拓扑变化后，程序被分配的适配器变了，
+GL 与合成器不再同一块卡。**代码没变，分配变了。**
+
+顺带留下的诊断：`Live2DRenderer` 首帧后把一帧渲染进自建 FBO 并 `ReadPixels`，
+日志会打印"[探针] FBO …里不透明像素 X 个（Y%）"，用于区分"没画"与"没合成"。
+
 # 更新记录
 
 版本号来自 `src/AICompanion.App/AICompanion.App.csproj` 的 `<Version>`，
