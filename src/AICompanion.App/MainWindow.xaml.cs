@@ -1362,7 +1362,7 @@ public partial class MainWindow : Window
         // 启动时那次（persist=false）不重建：渲染器随后会在布局完成后正常创建。
         if (persist)
         {
-            ScheduleLive2dRebuild($"倍率调整为 {clamped:P0}");
+            // 重建逻辑暂时停用（会破坏渲染器创建）
         }
         _cornerButton?.ApplyScale(clamped);
         _cornerButton?.ShowAt(this);
@@ -2239,7 +2239,7 @@ public partial class MainWindow : Window
              * 表现是"切到透明态，角色整块消失"（实测：覆盖态 10.3%，透明态 0.7%，
              * 重建渲染器后立刻恢复到 17.9%）。尺寸变化统一由 ScheduleLive2dRebuild 处理。
              */
-            ScheduleLive2dRebuild(clickThrough ? "切到透明态" : "切回覆盖态");
+            // 重建逻辑暂时停用（会破坏渲染器创建），见 CHANGELOG
 
 
             // 记录实际布局尺寸：用于确认"切换模式不会改变角色大小"。
