@@ -117,6 +117,8 @@ public partial class App : Application
 
             _bubbles = new BubbleNotifier(Dispatcher, bootstrapLogger);
             _host = new AppHost(Dispatcher, _bubbles, sharedSink);
+
+
             _mainWindow = new MainWindow(_host, _bubbles);
 
             // 主窗口先显示，用户能立刻看到"正在启动"而不是一片空白。
@@ -126,6 +128,32 @@ public partial class App : Application
             _tray = new TrayIcon(_host, _mainWindow, _bubbles);
 
             await _host.StartAsync();
+
+            /*
+             * 日志级别必须**在 Host 启动之后**才落地：
+             * AppHost 构造时手里还是内置模板（minimum_level 默认 Info），
+             * 真正的 config.yaml 是 StartAsync 里才读进来的。
+             * 早一步设置，读到的永远是模板值 —— 表现就是"明明配了 Debug，日志里一条都没有"。
+             */
+            try
+            {
+                var configured = _host.Config.Logging.MinimumLevel;
+
+                if (!string.IsNullOrWhiteSpace(configured) &&
+                    Enum.TryParse<Core.Abstractions.LogLevel>(configured.Trim(), ignoreCase: true, out var level))
+                {
+                    sharedSink.MinimumLevel = level;
+                    bootstrapLogger.Info($"日志级别：{level}（来自 logging.minimum_level=\"{configured}\"）。");
+                }
+                else
+                {
+                    bootstrapLogger.Warn($"logging.minimum_level=\"{configured}\" 无法识别，按 Info 处理。");
+                }
+            }
+            catch
+            {
+                // 级别解析失败就保持 Info，不影响启动。
+            }
 
             _mainWindow.OnHostReady();
             _tray.OnHostReady();

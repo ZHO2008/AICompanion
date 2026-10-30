@@ -111,24 +111,40 @@ public partial class TaskBarWindow : Window
              * 此时 WPF 还没走完布局，ActualHeight 仍是**旧值**，
              * 于是功能栏会按旧高度定位 —— 表现就是缩放后功能栏错位到很远的地方。
              */
-            var ownerWidth = owner.Width > 0 ? owner.Width : owner.ActualWidth;
-            var ownerHeight = owner.Height > 0 ? owner.Height : owner.ActualHeight;
+            /*
+             * 全部按**物理像素**算，并且用"角色当前所在的那块屏"的工作区。
+             * 以前用 SystemParameters.WorkArea（只有主屏），双屏时功能栏会被拽回主屏，
+             * 与角色分处两块屏，按钮自然点不到。
+             */
+            var ownerRect = MonitorGeometry.GetPhysicalRect(owner);
+            var selfRect = MonitorGeometry.GetPhysicalRect(this);
 
-            var left = owner.Left + (ownerWidth - width) / 2;
-            var below = owner.Top + ownerHeight + 6;
-            var above = owner.Top - height - 6;
+            var selfWidth = selfRect.Width > 0 ? selfRect.Width : width;
+            var selfHeight = selfRect.Height > 0 ? selfRect.Height : height;
 
-            var work = SystemParameters.WorkArea;
+            var scale = System.Windows.Media.VisualTreeHelper.GetDpi(owner).DpiScaleX;
+            var gap = 6 * scale;
+
+            var left = ownerRect.Left + (ownerRect.Width - selfWidth) / 2;
+            var below = ownerRect.Bottom + gap;
+            var above = ownerRect.Top - selfHeight - gap;
+
+            var work = MonitorGeometry.WorkAreaFor(ownerRect);
             var top = below;
 
-            // 下方超出屏幕就翻到上方
-            if (below + height > work.Bottom)
+            // 下方放不下就翻到上方
+            if (below + selfHeight > work.Bottom)
             {
-                top = above >= work.Top ? above : Math.Max(work.Top, work.Bottom - height);
+                top = above >= work.Top ? above : Math.Max(work.Top, work.Bottom - selfHeight);
             }
 
-            Left = Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - width));
-            Top = Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - height));
+            var desired = new Rect(
+                Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - selfWidth)),
+                Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - selfHeight)),
+                selfWidth,
+                selfHeight);
+
+            MonitorGeometry.MoveToPhysical(this, desired);
         }
         catch
         {

@@ -63,6 +63,9 @@ public partial class MainWindow : Window
     private bool _dragActive;
     private bool _isDragging;
     private Point _dragStartWindowPos;
+
+    /// <summary>拖动起点的窗口物理矩形（跨不同缩放率的屏幕时用物理像素才不出错）。</summary>
+    private Rect _dragStartWindowPhysical;
     private int _dragStartCursorX;
     private int _dragStartCursorY;
 
@@ -405,7 +408,17 @@ public partial class MainWindow : Window
         _clickThrough = _host.Config.Ui.ClickThrough;
         ApplyUserAppearanceSettings();
 
-        _taskBar = new TaskBarWindow { Topmost = _host.Config.Ui.AlwaysOnTop };
+        /*
+         * Owner 一定要设：WPF 的"被拥有窗口"永远画在拥有者之上。
+         *
+         * 这两个都是独立的 Topmost 窗口，与角色窗口在同一个 Z 序带里。
+         * 一旦角色自己被 Activate()（点一下就会），它会跑到最上面，
+         * 把右上角按钮压住 —— 按钮在角色右上角是**与角色重叠**的，
+         * 于是点"覆/透"实际点到的是角色窗口，按钮像坏了一样按不动
+         * （实测 WindowFromPoint 在按钮矩形内命中的是「AI 伴侣」）。
+         * 双屏时更明显：窗口刚被 SetWindowPos 挪过，Z 序没跟着调整。
+         */
+        _taskBar = new TaskBarWindow { Topmost = _host.Config.Ui.AlwaysOnTop, Owner = this };
         _taskBar.SettingsRequested += (_, _) => OpenSettings();
         _taskBar.AppearanceRequested += (_, _) => ChangeAppearance();
         _taskBar.ResetAppearanceRequested += (_, _) => ResetAppearance();
@@ -414,7 +427,7 @@ public partial class MainWindow : Window
         _taskBar.LargerRequested += (_, _) => AdjustScale(+0.05);
 
         // 右上角模式切换按钮：独立窗口，因此透明态下依然可点
-        _cornerButton = new CornerButton { Topmost = _host.Config.Ui.AlwaysOnTop };
+        _cornerButton = new CornerButton { Topmost = _host.Config.Ui.AlwaysOnTop, Owner = this };
         _cornerButton.ToggleRequested += (_, _) => ToggleClickThrough();
         _cornerButton.ApplyScale(_scale);
         _cornerButton.SetMode(_clickThrough);
@@ -1162,6 +1175,7 @@ public partial class MainWindow : Window
         _dragStartCursorX = cursor.X;
         _dragStartCursorY = cursor.Y;
         _dragStartWindowPos = new Point(Left, Top);
+        _dragStartWindowPhysical = MonitorGeometry.GetPhysicalRect(this);
         _dragActive = true;
         _isDragging = false;
 
@@ -1182,13 +1196,14 @@ public partial class MainWindow : Window
         try
         {
             var dpi = VisualTreeHelper.GetDpi(this);
-            var work = SystemParameters.WorkArea;
+            var areas = MonitorGeometry.WorkAreasPhysical();
+            var work = MonitorGeometry.WorkAreaFor(MonitorGeometry.GetPhysicalRect(this));
 
             _host.Logger.Info(
                 $"显示环境：DPI {dpi.DpiScaleX * 100:F0}%（{dpi.DpiScaleX:F2}×），" +
                 $"主屏 {SystemParameters.PrimaryScreenWidth:F0}×{SystemParameters.PrimaryScreenHeight:F0} DIP" +
                 $"（物理约 {SystemParameters.PrimaryScreenWidth * dpi.DpiScaleX:F0}×{SystemParameters.PrimaryScreenHeight * dpi.DpiScaleY:F0} px），" +
-                $"工作区 {work.Width:F0}×{work.Height:F0} DIP，虚拟屏 {SystemParameters.VirtualScreenWidth:F0}×{SystemParameters.VirtualScreenHeight:F0} DIP");
+                $"当前屏工作区 {work.Width:F0}×{work.Height:F0} px（共 {areas.Count} 块屏），虚拟屏 {SystemParameters.VirtualScreenWidth:F0}×{SystemParameters.VirtualScreenHeight:F0} DIP");
         }
         catch (Exception ex)
         {
@@ -1259,9 +1274,17 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyScale(double scale, bool persist, bool showBubble)
     {
-        var work = SystemParameters.WorkArea;
+        /*
+         * 放大上限按**角色当前所在那块屏**算：两块屏尺寸不同（这里副屏只有 1080 高），
+         * 用主屏算出来的上限在副屏上会超出屏幕。
+         * 工作区是物理像素，窗口是 DIP，故除以本屏缩放换算回 DIP 再比。
+         */
+        var area = MonitorGeometry.WorkAreaFor(MonitorGeometry.GetPhysicalRect(this));
+        var dpiScale = Math.Max(0.1, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        var workWidthDip = area.Width / dpiScale;
+        var workHeightDip = area.Height / dpiScale;
 
-        var maxByScreen = Math.Min(work.Width * 0.95 / BaseWidth, work.Height * 0.95 / BaseHeight);
+        var maxByScreen = Math.Min(workWidthDip * 0.95 / BaseWidth, workHeightDip * 0.95 / BaseHeight);
         var effectiveMax = Math.Max(MinScale, Math.Min(MaxScale, maxByScreen));
 
         var requested = Math.Round(scale, 2);
@@ -1287,9 +1310,9 @@ public partial class MainWindow : Window
         Left = bottomCenterX - Width / 2.0;
         Top = bottomCenterY - Height;
 
-        // 缩放后可能跑出屏幕，拉回工作区
-        Left = Math.Clamp(Left, work.Left, Math.Max(work.Left, work.Right - Width));
-        Top = Math.Clamp(Top, work.Top, Math.Max(work.Top, work.Bottom - Height));
+        // 缩放后可能跑出屏幕，拉回"角色所在那块屏"的工作区
+        var scaledRect = MonitorGeometry.GetPhysicalRect(this);
+        MonitorGeometry.MoveToPhysical(this, MonitorGeometry.ClampInside(scaledRect));
 
         /*
          * 功能栏：重新贴到角色正下方。
@@ -1365,13 +1388,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        // 物理像素 → DIP。每次重新取，跨不同缩放率的显示器时也能跟上。
-        var dpi = VisualTreeHelper.GetDpi(this);
-        var dpiX = dpi.DpiScaleX <= 0 ? 1 : dpi.DpiScaleX;
-        var dpiY = dpi.DpiScaleY <= 0 ? 1 : dpi.DpiScaleY;
-
-        var dx = (cursor.X - _dragStartCursorX) / dpiX;
-        var dy = (cursor.Y - _dragStartCursorY) / dpiY;
+        /*
+         * 位移一律用**物理像素**，不再换算成 DIP。
+         *
+         * 旧代码是 dx = (cursor.X - start) / dpiScale，dpiScale 取的是"窗口当前所在屏"的缩放。
+         * 单屏时没问题；从 150% 的主屏拖向 100% 的副屏时，整个位移被按 1.5 除了一次，
+         * 窗口跨越屏幕边界那一刻 WPF 又做了一次 DIP 重映射 —— 两个误差叠在一起，
+         * 实测把角色拖向副屏，最后停在了离鼠标很远的地方（鼠标在 x=3400，窗口落在 x=1390）。
+         *
+         * 物理像素只有一套坐标系，跨任何缩放组合都不需要换算。
+         */
+        var dx = cursor.X - _dragStartCursorX;
+        var dy = cursor.Y - _dragStartCursorY;
 
         // 小于阈值视为手抖，不算拖动 —— 否则轻点一下也会把窗口挪走
         if (!_isDragging && Math.Abs(dx) + Math.Abs(dy) < 4)
@@ -1380,13 +1408,12 @@ public partial class MainWindow : Window
         }
 
         _isDragging = true;
-        Left = _dragStartWindowPos.X + dx;
-        Top = _dragStartWindowPos.Y + dy;
 
-        // 软钳制：拖动过程中就保证至少 30% 可见。
-        // 不这么做的话，拖到屏幕边缘时窗口会先跑到外面、松手再被拉回来 —— 松手瞬间会"跳"一下。
-        // 这里可以安全地每帧钳制，是因为位移用的是绝对屏幕坐标（不会形成反馈回路）。
-        ClampKeepVisible();
+        var start = _dragStartWindowPhysical;
+        var target = new Rect(start.Left + dx, start.Top + dy, start.Width, start.Height);
+
+        // 软钳制：拖动过程中就保证至少 30% 落在某块屏里，避免拖出去找不回来。
+        MonitorGeometry.MoveToPhysical(this, MonitorGeometry.ClampKeepVisible(target));
 
         // 拖动期间只挪位置：不 Show、不 Activate。
         // 每帧 Activate 会高频抢焦点导致闪烁。
@@ -1450,22 +1477,28 @@ public partial class MainWindow : Window
     /// </summary>
     private void ClampKeepVisible()
     {
-        var work = SystemParameters.WorkArea;
+        /*
+         * 多屏：不能再按 SystemParameters.WorkArea（只有主屏）夹取。
+         *
+         * 主屏 2560 宽、150% 缩放时工作区右边界是 1707 DIP，旧代码把 Left 锁在 ≈2400
+         * 物理像素以内，而副屏从 2560 才开始 —— 角色根本拖不过去。
+         * 现在按"窗口当前所在显示器"的工作区做物理像素夹取。
+         */
+        var rect = MonitorGeometry.GetPhysicalRect(this);
+        var clamped = MonitorGeometry.ClampKeepVisible(rect);
 
-        var keepX = Math.Min(Width * 0.3, Width);
-        var keepY = Math.Min(Height * 0.3, Height);
-
-        Left = Math.Clamp(Left, work.Left - Width + keepX, work.Right - keepX);
-        Top = Math.Clamp(Top, work.Top - Height + keepY, work.Bottom - keepY);
+        if (Math.Abs(clamped.Left - rect.Left) > 0.5 || Math.Abs(clamped.Top - rect.Top) > 0.5)
+        {
+            MonitorGeometry.MoveToPhysical(this, clamped);
+        }
     }
 
     /// <summary>把窗口拉回工作区，避免拖到屏幕外后找不回来。</summary>
     private void ClampIntoWorkArea()
     {
-        var work = SystemParameters.WorkArea;
-
-        Left = Math.Clamp(Left, work.Left, Math.Max(work.Left, work.Right - Width));
-        Top = Math.Clamp(Top, work.Top, Math.Max(work.Top, work.Bottom - Height));
+        // 同上：按当前所在显示器的物理工作区夹取，整个窗口必须在那一块屏里。
+        var rect = MonitorGeometry.GetPhysicalRect(this);
+        MonitorGeometry.MoveToPhysical(this, MonitorGeometry.ClampInside(rect));
     }
 
     /// <summary>
@@ -1841,36 +1874,25 @@ public partial class MainWindow : Window
             return false;
         }
 
-        // PointFromScreen 负责物理像素 → 窗口 DIP 的换算（含 DPI 缩放）
-        Point windowPoint;
-        try
-        {
-            windowPoint = PointFromScreen(new Point(screen.X, screen.Y));
-        }
-        catch (Exception ex)
-        {
-            if (collectDiag)
-            {
-                _hoverDiag = $"PointFromScreen 失败：{ex.Message}";
-            }
+        /*
+         * 命中判定直接用**屏幕物理矩形**，不再走 PointFromScreen。
+         *
+         * PointFromScreen 依赖 WPF 内部记着的窗口原点；窗口被挪到另一块缩放率不同的
+         * 显示器后，这个原点不一定同步，换算出来的相对坐标就是错的。
+         * 实测：角色已经在副屏、鼠标就停在角色身上，透明态却一直判"窗口外"，
+         * 悬停自动切回覆盖失效（只剩右上角按钮能点）。
+         *
+         * 物理矩形不需要任何换算，两块屏缩放率差多少都不影响。
+         */
+        var rect = MonitorGeometry.GetPhysicalRect(this);
 
-            return false;
-        }
-
-        var width = ActualWidth;
-        var height = ActualHeight;
-        if (width <= 0 || height <= 0)
-        {
-            return false;
-        }
-
-        var over = windowPoint.X >= 0 && windowPoint.Y >= 0 &&
-                   windowPoint.X < width && windowPoint.Y < height;
+        var over = screen.X >= rect.Left && screen.Y >= rect.Top &&
+                   screen.X < rect.Right && screen.Y < rect.Bottom;
 
         if (collectDiag)
         {
-            _hoverDiag = $"cursor={screen.X},{screen.Y} window={windowPoint.X:F0},{windowPoint.Y:F0} " +
-                         $"size={width:F0}x{height:F0} → {(over ? "窗口内" : "窗口外")}";
+            _hoverDiag = $"cursor={screen.X},{screen.Y} window={rect.Left:F0},{rect.Top:F0} " +
+                         $"size={rect.Width:F0}x{rect.Height:F0} → {(over ? "窗口内" : "窗口外")}";
         }
 
         return over;

@@ -54,6 +54,33 @@ public partial class CornerButton : Window
         ModeText.FontSize = Math.Max(MinFontSize, BaseFontSize * s);
     }
 
+    /// <summary>
+    /// 贴到角色的右上角。
+    ///
+    /// 全程用**屏幕物理像素**：以前用 <c>SystemParameters.WorkArea</c>（只有主屏）夹取，
+    /// 双屏时按钮会被拽回主屏边缘，跟角色彻底脱节 —— 角色在副屏、按钮在主屏，点都点不到。
+    /// 现在按角色实际所在的显示器定位，贴边时也在那一块屏内夹取。
+    /// </summary>
+    private void PositionAt(Window pet)
+    {
+        var petRect = MonitorGeometry.GetPhysicalRect(pet);
+        var selfRect = MonitorGeometry.GetPhysicalRect(this);
+
+        var selfWidth = selfRect.Width > 0 ? selfRect.Width : Width;
+        var selfHeight = selfRect.Height > 0 ? selfRect.Height : Height;
+
+        // OffsetOut 是 DIP，按角色所在屏的缩放换算成物理像素
+        var scale = System.Windows.Media.VisualTreeHelper.GetDpi(pet).DpiScaleX;
+        var offset = OffsetOut * scale;
+
+        var desired = new Rect(
+            petRect.Right - selfWidth + offset,
+            petRect.Top + offset,
+            selfWidth,
+            selfHeight);
+
+        MonitorGeometry.MoveToPhysical(this, MonitorGeometry.ClampInside(desired));
+    }
     /// <summary>把按钮贴到角色窗口的右上角。</summary>
     public void ShowAt(Window pet)
     {
@@ -65,20 +92,7 @@ public partial class CornerButton : Window
                 Show();
             }
 
-            // 用显式 Width/Height：刚改过尺寸时 ActualWidth 还是旧值
-            var selfWidth = Width > 0 ? Width : ActualWidth;
-            var selfHeight = Height > 0 ? Height : ActualHeight;
-
-            // 角色窗口同样优先用显式 Width：缩放后 ActualWidth 会滞后一帧
-            var petWidth = pet.Width > 0 ? pet.Width : pet.ActualWidth;
-
-            var left = pet.Left + petWidth - selfWidth + OffsetOut;
-            var top = pet.Top + OffsetOut;
-
-            // 屏幕边界保护：角色贴边时按钮也要留在屏幕内
-            var work = SystemParameters.WorkArea;
-            Left = Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - selfWidth));
-            Top = Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - selfHeight));
+            PositionAt(pet);
         }
         catch
         {
@@ -91,16 +105,7 @@ public partial class CornerButton : Window
     {
         try
         {
-            var selfWidth = Width > 0 ? Width : ActualWidth;
-            var selfHeight = Height > 0 ? Height : ActualHeight;
-            var petWidth = pet.Width > 0 ? pet.Width : pet.ActualWidth;
-
-            var left = pet.Left + petWidth - selfWidth + OffsetOut;
-            var top = pet.Top + OffsetOut;
-
-            var work = SystemParameters.WorkArea;
-            Left = Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - selfWidth));
-            Top = Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - selfHeight));
+            PositionAt(pet);
         }
         catch
         {

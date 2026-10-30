@@ -21,7 +21,7 @@ public sealed class LogSink
 
     private readonly string _directory;
     private readonly string _filePrefix;
-    private readonly LogLevel _minimum;
+    private volatile LogLevel _minimum;
     private readonly int _maxLogDays;
     private readonly object _sync = new();
     private readonly LinkedList<string> _recent = new();
@@ -62,7 +62,16 @@ public sealed class LogSink
     /// <summary>日志目录。注意不要命名为 Directory，否则会遮蔽 System.IO.Directory。</summary>
     public string DirectoryPath => _directory;
 
-    public LogLevel MinimumLevel => _minimum;
+    /// <summary>
+    /// 有效日志级别。sink 在读到 config.yaml 之前先按 Info 建起来，
+    /// 之后由 App 按 logging.minimum_level 改写 —— 否则这个配置项永远不会生效，
+    /// 代码里的 Debug 诊断（悬停命中、全屏相位等）一条都看不到。
+    /// </summary>
+    public LogLevel MinimumLevel
+    {
+        get => _minimum;
+        set => _minimum = value;
+    }
 
     public void Write(LogLevel level, string category, string message, Exception? exception)
     {
