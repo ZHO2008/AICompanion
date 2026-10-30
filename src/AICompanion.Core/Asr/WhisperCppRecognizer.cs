@@ -92,8 +92,16 @@ public sealed class WhisperCppRecognizer : ISpeechRecognizer
             // 线程数：0 表示交给 shim 自动决定（shim 默认 4）。
             var threads = _config.Asr.Threads > 0 ? _config.Asr.Threads : 0;
 
+            /*
+             * whisper 的原生层用 fopen()/ifstream 开模型文件，按系统 ANSI 代码页解释路径。
+             * 安装目录带中文时 UTF-8 字节会被当成 GBK 拼错，结果 -2「无法打开模型文件」——
+             * 路径里没有中文时一切正常，所以这种问题只有换台中文路径的机器才会暴露。
+             * 这里换成 ASCII 别名路径交给原生层，配置与文件本身都不动。
+             */
+            var initPath = AsciiModelPath.Ensure(_modelPath, _logger);
+
             var errorBuffer = new byte[512];
-            var rc = _init(_modelPath, threads, useGpu: 0, errorBuffer, errorBuffer.Length);
+            var rc = _init(initPath, threads, useGpu: 0, errorBuffer, errorBuffer.Length);
 
             if (rc != 0)
             {

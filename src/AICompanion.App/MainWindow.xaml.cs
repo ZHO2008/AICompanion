@@ -478,6 +478,18 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>确保角色可见（第二个实例双击图标唤醒时用）。</summary>
+    public void ShowPet()
+    {
+        if (!IsVisible)
+        {
+            Show();
+        }
+
+        Activate();
+        _cornerButton?.ShowAt(this);
+    }
+
     // ------------------------------------------------------------------ 气泡
 
     private void RefreshBubbles()

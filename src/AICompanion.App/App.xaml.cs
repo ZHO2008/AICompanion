@@ -23,6 +23,22 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        /*
+         * 单实例与子进程兜底都要在"任何重活"之前做：
+         * 第二个实例如果先拉起 llama-server 再退出，就等于白占一次显存。
+         */
+        SingleInstance.Acquire();
+
+        if (!SingleInstance.IsFirst)
+        {
+            // 把已在运行的那个实例唤出来，然后安静退出。
+            SingleInstance.SignalExisting();
+            Shutdown(0);
+            return;
+        }
+
+        ChildProcessJob.TryAttach(message => System.Diagnostics.Debug.WriteLine($"[AICompanion] {message}"));
+
         try
         {
             /*
@@ -114,6 +130,27 @@ public partial class App : Application
             _mainWindow.OnHostReady();
             _tray.OnHostReady();
 
+            // 用户再次双击图标时，把窗口显示出来（并置前），而不是让第二份程序跑起来。
+            var window = _mainWindow;
+            SingleInstance.StartListener(() => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    if (!window.IsVisible)
+                    {
+                        window.ShowPet();
+                    }
+
+                    window.Activate();
+                    window.Topmost = true;
+                    window.Topmost = _host.Config.Ui.AlwaysOnTop;
+                }
+                catch
+                {
+                    // 唤醒失败不影响已有窗口。
+                }
+            })));
+
             // 手册 §3.8 休眠唤醒处理：表现层订阅系统事件后转发给 HealthMonitor。
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
         }
@@ -188,6 +225,15 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        try
+        {
+            SingleInstance.Release();
+        }
+        catch
+        {
+            // 忽略。
+        }
+
         try
         {
             SystemEvents.PowerModeChanged -= OnPowerModeChanged;

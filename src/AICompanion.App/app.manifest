@@ -16,6 +16,18 @@
     <windowsSettings>
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+
+      <!--
+        长路径支持。
+
+        没有这一条时，安装位置一旦超过 260 个字符（深层目录、用户名很长的机器、
+        或者被塞进一串嵌套文件夹里），进程创建就失败 —— 双击没反应，
+        日志里一个字都不会有。实测放在 300 字符的路径下直接起不来。
+
+        注意这只是"允许"：还要求系统的 LongPathsEnabled=1（Win10 1607 起可开）。
+        两条都满足时，.NET 的文件 API 才按长路径处理。
+      -->
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>
 

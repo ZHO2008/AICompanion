@@ -57,7 +57,7 @@ public static class ConfigLoader
 
         try
         {
-            var text = File.ReadAllText(path, Encoding.UTF8);
+            var text = ReadConfigText(path, logger, warnings);
             var deserializer = new DeserializerBuilder()
                 .WithNamingConvention(UnderscoredNamingConvention.Instance)
                 .IgnoreUnmatchedProperties()
@@ -126,6 +126,54 @@ public static class ConfigLoader
         return null;
     }
 
+    /// <summary>
+    /// 按"UTF-8 优先、GBK 兜底"读取配置文本。
+    ///
+    /// 为什么需要：中文 Windows 上很常见的操作是用记事本"另存为 ANSI"，
+    /// 得到的是 GBK 编码的 config.yaml。按 UTF-8 硬读不会抛异常，只会把中文
+    /// 全部变成 U+FFFD —— 用户看到"我明明填了角色名，界面上是一串问号"，
+    /// 而日志里没有任何线索。这里先严格按 UTF-8 解，失败再按 GBK 解并告警。
+    /// </summary>
+    private static string ReadConfigText(string path, IAppLogger logger, List<string> warnings)
+    {
+        var bytes = File.ReadAllBytes(path);
+
+        // 带 BOM 的一定是 UTF-8，剥掉 BOM 后按 UTF-8 解。
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        {
+            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        }
+
+        try
+        {
+            var strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+            return strict.GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            // 不是合法 UTF-8：继续按 GBK 试。
+        }
+
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            var text = Encoding.GetEncoding(936).GetString(bytes);
+
+            var message = $"{Path.GetFileName(path)} 不是 UTF-8 编码，已按 GBK 读取；建议另存为 UTF-8，免得以后中文变成乱码。";
+            warnings.Add(message);
+            logger.Warn(message);
+
+            return text;
+        }
+        catch (Exception ex)
+        {
+            var message = $"{Path.GetFileName(path)} 既不是 UTF-8 也读不出 GBK（{ex.Message}），中文可能显示为乱码。";
+            warnings.Add(message);
+            logger.Warn(message);
+
+            return Encoding.UTF8.GetString(bytes);
+        }
+    }
     /// <summary>把嵌入资源里的模板写到目标路径（手册要求"从嵌入资源中生成"）。</summary>
     public static bool TryWriteDefaultTemplate(string path, IAppLogger logger)
     {
