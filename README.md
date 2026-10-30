@@ -411,6 +411,26 @@ start_all.bat
      同一时间只跑一个 TTS 服务**（没跑的那个由 App 自动降级到 Piper），另外关掉 NVIDIA App
      的浮层还能多让出约 1 GB 显存。
 
+7. **NPU（AMD XDNA）跑不了本项目的任何模型**
+   本机 NPU 是存在且驱动正常的（`PCI\VEN_1022&DEV_1502`，驱动 `32.0.203.329`；
+   CPU 为 `Family 25 Model 117` = **Hawk Point**，也就是 Ryzen 200/8000 那一代，16 TOPS 的 XDNA1）。
+   但 AMD 官方的兼容矩阵里，PHX/HPT 只支持 **CNN INT8**；
+   `NLP BF16` 和 `LLM (OGA)` 两栏只有 STX/KRK（Ryzen AI 300）才是 ✅。
+   LLM 的三条 NPU 路线（OGA NPU-only、OGA 混合、FastFlowLM）都要求 Ryzen AI 300，
+   AMD 维护的 whisper.cpp NPU 分支也只针对 Ryzen AI 300 且仅限 Windows。
+   所以：**LLM / TTS / ASR 一个都上不了这块 NPU**，能上 NPU 的只有图像类 INT8 CNN，与本项目无关。
+   要提速只能走 iGPU 或独显。
+   依据：[Ryzen AI 1.8 发布说明（含兼容矩阵）](https://ryzenai.docs.amd.com/en/latest/relnotes.html)、
+   [LLM 部署概览](https://ryzenai.docs.amd.com/en/latest/llm/overview.html)、
+   [whisper.cpp NPU 支持](https://ryzenai.docs.amd.com/en/main/whisper_cpp.html)、
+   [FastFlowLM（支持芯片列表）](https://fastflowlm.com/)。
+
+8. **没有 Vulkan 后端，纯核显时推理退回 CPU**
+   `bin\` 里只有 `ggml-cuda.dll` 与 `ggml-cpu.dll`。有 NVIDIA 卡时走 CUDA 没问题；
+   屏蔽独显、只剩 Radeon 780M 时，llama.cpp 会退回 CPU，12 CU 的 RDNA3 完全没参与。
+   要让 iGPU 真正出力，需要另外编一个带 Vulkan 的 llama.cpp（`-DGGML_VULKAN=ON`），
+   把生成的 `ggml-vulkan.dll` 放进 `bin\`。尚未实现。
+
 
 ---
 

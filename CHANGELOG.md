@@ -5,6 +5,16 @@
 
 ---
 
+## 未发布 — NPU 调研结论（文档）
+
+查过 AMD 官方文档后确认本机 NPU 用不上，记录在 README「六、已知差距」第 7、8 条：
+
+- 本机 CPU 是 Hawk Point（Family 25 Model 117，XDNA1 NPU，PCI 1022:1502）。
+  AMD 兼容矩阵里 PHX/HPT 只支持 CNN INT8，`NLP BF16` 与 `LLM (OGA)` 仅 STX/KRK（Ryzen AI 300）。
+  所以 LLM / TTS / ASR 都上不了 NPU；whisper.cpp 的 NPU 分支同样只支持 Ryzen AI 300。
+- 另一个差距：`bin\` 里没有 Vulkan 后端，屏蔽独显后 llama.cpp 只能退回 CPU，
+  Radeon 780M 的 12 CU 完全没参与。要利用 iGPU 需另编 `-DGGML_VULKAN=ON` 的版本。
+
 ## 未发布 — 功能开关与 Live2D 兼容性
 
 - **LLM / TTS / ASR 可以单独关掉。** 新增 `llm.enabled` / `tts.enabled` / `asr.enabled`（默认 `true`）。
