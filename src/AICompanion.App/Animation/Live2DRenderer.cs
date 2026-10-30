@@ -805,6 +805,27 @@ public sealed class Live2DRenderer : IDisposable
         try
         {
             var vendor = GL.GetString(StringName.Vendor) ?? "(未知)";
+
+            /*
+             * 混合显卡机器上的坑：GL 上下文与 WPF/DWM 的合成器不在同一块显卡时，
+             * GLWpfControl 的共享纹理跨适配器共享会**静默失败** ——
+             * 渲染器已就绪、帧数在涨、FBO 探针也能读到像素，但窗口里什么都没有。
+             *
+             * 实测（本机）：GL 落在 AMD 780M、合并在 NVIDIA 5060 → 角色区 0.31%；
+             * 给 exe 设「高性能（NVIDIA）」后 GL 变成 NVIDIA → 角色区 13.8%，正常显示。
+             *
+             * 这里只在"确实有 NVIDIA 卡、但 GL 却落在别的厂商"时提示一句，
+             * 不去改用户的注册表（那是系统级偏好，应由用户决定）。
+             */
+            if (!vendor.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(Path.Combine(Environment.SystemDirectory, "nvidia-smi.exe")))
+            {
+                _logger.Warn(
+                    $"Live2D 的 OpenGL 上下文在 {vendor} 上，但本机装有 NVIDIA 显卡 —— " +
+                    "若模型不显示，通常是 GL 与 Windows 合成器不在同一块显卡导致的（跨适配器共享纹理失败）。" +
+                    "解决办法：设置 → 系统 → 屏幕 → 显示卡 → 图形设置，为本程序选择「高性能」，然后重启程序；" +
+                    "或把程序固定在集成显卡上运行，使两者一致。");
+            }
             var renderer = GL.GetString(StringName.Renderer) ?? "(未知)";
             var version = GL.GetString(StringName.Version) ?? "(未知)";
 
