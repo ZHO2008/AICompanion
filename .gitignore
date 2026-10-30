@@ -61,3 +61,6 @@ Assets/appearance.json
 config.yaml
 config.yaml.bak-*
 _verify-*.yaml
+# Vulkan 后端构建目录（产物 ~50MB，不入库）
+build-vulkan/
+

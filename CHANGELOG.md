@@ -1,3 +1,17 @@
+## 未发布 — Vulkan 后端可用
+
+编译出带 Vulkan 后端的 llama.cpp（`build-vulkan/`，不入库）。同一模型实测：
+
+| 后端 / 设备 | tok/s |
+| --- | --- |
+| Vulkan / RTX 5060 | 81.9 |
+| CUDA / RTX 5060 | 41.4 |
+| Vulkan / AMD 780M | 25.9 |
+| CPU（8 核） | 19.0 |
+
+- 纯核显（780M + Vulkan）比纯 CPU 快约 36%，集显模式下终于吃到核显。
+- 这份 llama.cpp 的 Vulkan 后端在 5060 上比现有 CUDA 后端快约一倍，值得重编 CUDA 后端再比。
+- 构建脚本：`tools/build-vulkan.cmd`（依赖 VS 2026、Vulkan SDK、便携 CMake+Ninja）。
 ## 未发布 — Live2D 不显示的真正原因：跨显卡互操作
 
 把今天改动过的渲染代码整份退回 `ef55f84` 复现，**照样不显示**（角色区 0.31%），
