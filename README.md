@@ -451,6 +451,10 @@ start_all.bat
 | `ui` | `transparent_hover_switch` / `transparent_hover_delay_ms` / `transparent_auto_revert_seconds` / `fullscreen_quiet_mode` | 透明态悬停切换、全屏时自动让路 |
 | `llm` / `tts` / `asr` | `enabled` | **按功能单独关闭**（见下） |
 
+> 这三项也可以在**设置面板 →「AI 功能」页**里勾选，改完下次启动生效；面板存的是一份覆盖，
+> 写在 `Assets\appearance.json`（`llmEnabled` / `ttsEnabled` / `asrEnabled`），**不会回写 config.yaml**（准则 9）。
+> 点「全部跟随 config.yaml」即清除覆盖。
+
 > `ui.click_through` 的语义是"**启动时**是否处于透明穿透态"，默认 `false`（覆盖）。
 > 运行中随时可用右键切换，该值只决定初始状态。
 >
@@ -683,6 +687,27 @@ WPF 按新 DPI 重新布局，不会被 Windows 位图拉伸（变模糊）也�
 ---
 
 ## 九、验证记录
+
+### 集显模式（屏蔽独显）实测
+
+环境：把 RTX 5060 关掉（设备从系统消失、**只剩一块屏**），本机为 `Ryzen 7 H 260` + `Radeon 780M`，
+`nvidia-smi` 返回 `退出码 4`。
+
+| 项 | 结果 |
+| --- | --- |
+| GPU 探测 | `nvidia-smi 退出码 4` → 气泡"未检测到 NVIDIA GPU，已切换为 CPU 模式" → `ngl=0`，不崩 |
+| llama-server | 以 `-ngl 0` 拉起，**2.6 秒**就绪（GPU 模式约 20 秒，少了解析 CUDA 与显存装载） |
+| CPU 推理速度 | 1.5B Q4_K_M：实测 **19 tok/s**（首句含预热，8 核 16 线程） |
+| 内存占用 | llama-server 工作集 1.9 GB，主程序 677 MB / 私有 1.28 GB |
+| TTS | GPT-SoVITS（CUDA）连不上 → 降级 Piper；Piper 也没装 → **再降 SAPI**（修复见 CHANGELOG） |
+| ASR | whisper 加载正常，日志 `CPU 模式`，识别链路可用 |
+| Live2D | `OpenGL Vendor=ATI / Radeon 780M / 4.6`，贴图 mipmap 正常，渲染无报错 |
+| 显示器 | 日志 `共 1 块屏`，多屏代码在单屏下正常退化 |
+| 启动问题 | 0 项 |
+
+结论：**没有独立显卡时程序完全可用**，代价是 LLM 慢（19 tok/s vs 独显的 GPU 模式）与 TTS 音质下降（SAPI）。
+另有一个副作用值得记一笔：**独显被关的瞬间，正在跑的 llama-server 会以 exit code 1 退出**，
+程序按设计不自动重启，只弹"LLM 服务已离线，请手动重启程序" —— 也就是说切换显卡模式后必须重启程序。
 
 全部证据、复现命令与"尚未验证"清单都在 [VERIFICATION.md](./VERIFICATION.md)（现 31 章）。按章节查：
 

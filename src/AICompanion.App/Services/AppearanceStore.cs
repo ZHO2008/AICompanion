@@ -54,6 +54,16 @@ public static class AppearanceStore
         /// </summary>
         public string? TtsEngine { get; set; }
 
+        /// <summary>
+        /// 用户关掉了对话 / 语音 / 语音输入；null 表示跟随 config.yaml 的 *.enabled。
+        /// 与 TtsEngine 同理：存这里而不是回写 config.yaml（准则 9）。
+        /// </summary>
+        public bool? LlmEnabled { get; set; }
+
+        public bool? TtsEnabled { get; set; }
+
+        public bool? AsrEnabled { get; set; }
+
     }
 
     private static Model LoadModel()
@@ -199,6 +209,31 @@ public static class AppearanceStore
     {
         var model = LoadModel();
         model.TtsEngine = string.IsNullOrWhiteSpace(engine) ? null : engine.Trim().ToLowerInvariant();
+        return SaveModel(model);
+    }
+
+    /// <summary>
+    /// 三项 AI 功能开关的覆盖值。null 表示跟随 config.yaml 的 <c>*.enabled</c>。
+    ///
+    /// 为什么设置面板要单独存一份：config.yaml 是用户的文件，程序绝不回写（准则 9），
+    /// 而"我现在不想用语音"这种临时开关又必须能记住，所以沿用外观偏好的做法存这里。
+    /// </summary>
+    public sealed record AiToggleOverride(bool? Llm, bool? Tts, bool? Asr);
+
+    /// <summary>读取 AI 功能开关覆盖；三项都为 null 表示没设过。</summary>
+    public static AiToggleOverride LoadAiToggles()
+    {
+        var model = LoadModel();
+        return new AiToggleOverride(model.LlmEnabled, model.TtsEnabled, model.AsrEnabled);
+    }
+
+    /// <summary>保存 AI 功能开关覆盖；传 null 表示清除该项（跟随 config.yaml）。</summary>
+    public static bool SaveAiToggles(bool? llm, bool? tts, bool? asr)
+    {
+        var model = LoadModel();
+        model.LlmEnabled = llm;
+        model.TtsEnabled = tts;
+        model.AsrEnabled = asr;
         return SaveModel(model);
     }
 }

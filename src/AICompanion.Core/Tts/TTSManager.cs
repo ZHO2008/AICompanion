@@ -144,6 +144,21 @@ public sealed class TTSManager : IDisposable
                 await InstallEngineAsync(fallback).ConfigureAwait(false);
                 IsDegraded = true;
                 EngineFellBack?.Invoke(this, fallback.Name);
+
+                /*
+                 * 降级到 Piper **不等于**能出声。
+                 *
+                 * 实测（集显模式、GPT-SoVITS 服务没起）：这里装上了 Piper，日志写着
+                 * "实际引擎=piper，降级=True"，可是本机根本没有 piper.exe 与语音模型，
+                 * 于是第一句话就合成失败 —— 既不报错也不出声，看起来像"哑了"。
+                 *
+                 * 所以装完必须再验一次可用性，不可用就继续闭到 SAPI（它不依赖任何外部资源）。
+                 */
+                if (!fallback.IsAvailable)
+                {
+                    _logger.Warn("Piper 同样不可用（缺 piper.exe 或语音模型），继续降级为 Windows 内置语音（SAPI）。");
+                    await TryDegradeToSapiAsync().ConfigureAwait(false);
+                }
             }
             else
             {
@@ -168,32 +183,44 @@ public sealed class TTSManager : IDisposable
                  * 任何 Windows 机器都能立刻出声。仍然保留日志与气泡，不做静默替换（准则 10）。
                  */
                 _logger.Warn("Piper 不可用，降级为 Windows 内置语音（SAPI）。");
-                _bubble.Clear("tts-model-missing");
-
-                var sapi = new SapiEngine(_logger);
-                await InstallEngineAsync(sapi).ConfigureAwait(false);
-                IsDegraded = true;
-                EngineFellBack?.Invoke(this, sapi.Name);
-
-                if (sapi.IsAvailable)
-                {
-                    _bubble.Show(
-                        "tts-degraded",
-                        "未找到 Piper 语音模型，已改用 Windows 内置语音。音质较简单，但可以正常说话。",
-                        BubbleLevel.Warning);
-                }
-                else
-                {
-                    _bubble.Show(
-                        "tts-model-missing",
-                        "未找到 Piper 语音模型，且系统没有可用的语音引擎，语音合成不可用。请按 config.yaml 的 tts.piper.model_path 放置模型。",
-                        BubbleLevel.Warning);
-                }
+                await TryDegradeToSapiAsync().ConfigureAwait(false);
             }
         }
 
         UpdateStatusLine();
         _logger.Info($"TTS 初始化完成：配置引擎={_config.Tts.Engine}，实际引擎={_engine.Name}，降级={IsDegraded}。");
+    }
+
+    /// <summary>
+    /// 最后一级兜底：换成 Windows 内置语音（SAPI）。
+    ///
+    /// 抽成方法是因为有**两条**路要走它：直接配 Piper 但 Piper 缺失，
+    /// 以及外部引擎（GPT-SoVITS 等）挂了、降级到 Piper 却发现 Piper 也缺失。
+    /// 后者以前是个断头路：日志写着"实际引擎=piper"却一句话都说不出来。
+    /// </summary>
+    private async Task TryDegradeToSapiAsync()
+    {
+        _bubble.Clear("tts-model-missing");
+
+        var sapi = new SapiEngine(_logger);
+        await InstallEngineAsync(sapi).ConfigureAwait(false);
+        IsDegraded = true;
+        EngineFellBack?.Invoke(this, sapi.Name);
+
+        if (sapi.IsAvailable)
+        {
+            _bubble.Show(
+                "tts-degraded",
+                "语音服务与 Piper 都不可用，已改用 Windows 内置语音。音质较简单，但可以正常说话。",
+                BubbleLevel.Warning);
+        }
+        else
+        {
+            _bubble.Show(
+                "tts-model-missing",
+                "语音服务不可用，且系统没有可用的语音引擎，语音合成不可用。请按 config.yaml 的 tts.piper.model_path 放置模型。",
+                BubbleLevel.Warning);
+        }
     }
 
     /// <summary>

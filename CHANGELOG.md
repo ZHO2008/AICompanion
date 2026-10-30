@@ -5,6 +5,23 @@
 
 ---
 
+## 未发布 — 设置面板开关 + 集显模式
+
+- **AI 功能开关搬进设置面板。** 新增「AI 功能」页，三个勾选框（对话 / 语音输出 / 语音输入）
+  直接对应 `llm.enabled` / `tts.enabled` / `asr.enabled`。面板存一份覆盖到 `Assets\appearance.json`
+  （`llmEnabled` / `ttsEnabled` / `asrEnabled`），**不回写 config.yaml**（准则 9），点「全部跟随 config.yaml」清除。
+  覆盖在启动最早期应用，所以关掉的功能压根不会被创建 —— 不载模型、不拉服务、不开麦克风。
+  改动在下次启动生效（组件生命周期绑在启动阶段），界面上写明了这一点。
+- **TTS 双降级断头。** 外部引擎（GPT-SoVITS）不可用时降级到 Piper，但原代码装完 Piper 就结束了，
+  不再验一次 Piper 到底能不能用。实测（屏蔽独显后 GPT-SoVITS 的 CUDA 没了）：日志写"实际引擎=piper"，
+  可本机根本没装 `piper.exe` 与语音模型，于是**一句话都说不出来，也不报错**。
+  现在装完会复查 `IsAvailable`，不可用就继续降到 Windows 内置语音（SAPI），并如实提示"语音服务与 Piper 都不可用"。
+- **屏蔽独显时 llama-server 会以 exit code 1 退出**（显卡消失导致 CUDA 上下文失效），程序按设计不自动重启，
+  只提示"LLM 服务已离线"。切换显卡模式后需要重启程序，已记入 README。
+
+集显模式实测（RTX 5060 关闭、仅 Radeon 780M、单屏）：`ngl=0`、llama-server 2.6 秒就绪、
+1.5B Q4 实测 19 tok/s、whisper 正常、Live2D 在 780M 上渲染正常、启动问题 0 项。
+
 ## 未发布 — NPU 调研结论（文档）
 
 查过 AMD 官方文档后确认本机 NPU 用不上，记录在 README「六、已知差距」第 7、8 条：

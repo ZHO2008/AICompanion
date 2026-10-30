@@ -132,6 +132,35 @@
             </StackPanel>
         </TabItem>
 
+        <!-- ============ AI 功能开关 ============ -->
+        <TabItem Header="AI 功能">
+            <StackPanel Margin="10">
+                <TextBlock Style="{StaticResource SectionTitle}" Text="按功能单独关闭" />
+                <TextBlock TextWrapping="Wrap" Foreground="#FFB9C3D6"
+                           Text="关掉的功能不会初始化：不加载模型、不占显存、不拉起外部服务、不打开麦克风。适合只想挂着桌宠、或机器较弱的场景。" />
+                <CheckBox x:Name="LlmEnabledCheck" Margin="0,12,0,0" Content="对话（本地大模型）" />
+                <TextBlock Margin="22,2,0,0" TextWrapping="Wrap" Foreground="#FF8C97AC"
+                           Text="关闭后不加载 GGUF、不启动 llama-server；角色显示与说话不受影响。" />
+                <CheckBox x:Name="TtsEnabledCheck" Margin="0,10,0,0" Content="语音输出（TTS）" />
+                <TextBlock Margin="22,2,0,0" TextWrapping="Wrap" Foreground="#FF8C97AC"
+                           Text="关闭后只显示文字气泡、不出声，也不会去探活或拉起 GPT-SoVITS 之类的服务。" />
+                <CheckBox x:Name="AsrEnabledCheck" Margin="0,10,0,0" Content="语音输入（ASR）" />
+                <TextBlock Margin="22,2,0,0" TextWrapping="Wrap" Foreground="#FF8C97AC"
+                           Text="关闭后不加载识别模型、不打开麦克风，也不占用按住说话的热键。" />
+                <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                    <Button Content="保存" Click="OnSaveAiToggles" />
+                    <Button Content="全部跟随 config.yaml" Margin="8,0,0,0" Click="OnClearAiToggles" />
+                    <TextBlock x:Name="AiToggleHintText"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center"
+                               Foreground="#FFFFC97A"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+                <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Foreground="#FF8C97AC"
+                           Text="保存在 Assets\appearance.json，不会修改 config.yaml。改动在**下次启动**时生效 —— 组件是在启动阶段按开关创建的。" />
+            </StackPanel>
+        </TabItem>
+
         <!-- ============ 游戏检测（手册 §3.9） ============ -->
         <TabItem Header="游戏检测">
             <StackPanel Margin="10">

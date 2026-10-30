@@ -66,6 +66,7 @@ public partial class SettingsWindow : Window
 
         LoadAppearanceTab();
         LoadTtsEngineTab();
+        LoadAiToggleTab();
     }
 
     // ------------------------------------------------------------------ 语音引擎选择
@@ -693,5 +694,62 @@ public partial class SettingsWindow : Window
         {
             _host.Logger.Warn($"打开日志目录失败：{ex.Message}");
         }
+    }
+
+    // ------------------------------------------------------------------ AI 功能开关
+
+    /// <summary>
+    /// 把 appearance.json 里的覆盖值（没有就用 config.yaml 的值）铺到勾选框上。
+    /// </summary>
+    private void LoadAiToggleTab()
+    {
+        var toggle = AppearanceStore.LoadAiToggles();
+
+        LlmEnabledCheck.IsChecked = toggle.Llm ?? _host.Config.Llm.Enabled;
+        TtsEnabledCheck.IsChecked = toggle.Tts ?? _host.Config.Tts.Enabled;
+        AsrEnabledCheck.IsChecked = toggle.Asr ?? _host.Config.Asr.Enabled;
+
+        var fromStore = toggle.Llm is not null || toggle.Tts is not null || toggle.Asr is not null;
+        AiToggleHintText.Text = fromStore
+            ? "当前显示的是 Assets\appearance.json 里的偏好"
+            : "当前跟随 config.yaml";
+    }
+
+    private void OnSaveAiToggles(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var llm = LlmEnabledCheck.IsChecked == true;
+            var tts = TtsEnabledCheck.IsChecked == true;
+            var asr = AsrEnabledCheck.IsChecked == true;
+
+            var ok = AppearanceStore.SaveAiToggles(llm, tts, asr);
+
+            _host.Logger.Info(
+                $"设置面板已保存 AI 功能开关：对话={(llm ? "开" : "关")}，语音输出={(tts ? "开" : "关")}，" +
+                $"语音输入={(asr ? "开" : "关")}（保存{(ok ? "成功" : "失败")}，下次启动生效）。");
+
+            AiToggleHintText.Text = ok ? "已保存，重启程序后生效" : "保存失败，详见日志";
+
+            _bubbles.Show(
+                "ai-toggles-saved",
+                ok ? "AI 功能开关已保存，重启程序后生效。" : "AI 功能开关保存失败，详见日志。",
+                ok ? BubbleLevel.Info : BubbleLevel.Warning,
+                TimeSpan.FromSeconds(4));
+        }
+        catch (Exception ex)
+        {
+            AiToggleHintText.Text = $"保存失败：{ex.Message}";
+            _host.Logger.Warn($"保存 AI 功能开关失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>清掉覆盖，三项都跟随 config.yaml。</summary>
+    private void OnClearAiToggles(object sender, RoutedEventArgs e)
+    {
+        var ok = AppearanceStore.SaveAiToggles(null, null, null);
+        LoadAiToggleTab();
+        AiToggleHintText.Text = ok ? "已清除偏好，重启程序后按 config.yaml 运行" : "清除失败，详见日志";
+        _host.Logger.Info($"设置面板已清除 AI 功能开关偏好（{(ok ? "成功" : "失败")}）。");
     }
 }

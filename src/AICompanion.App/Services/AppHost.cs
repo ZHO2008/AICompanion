@@ -231,6 +231,7 @@ public sealed class AppHost : IAsyncDisposable
 
         // ---------- 3. 核心组件（构造顺序按依赖关系） ----------
         ApplyTtsEnginePreference();
+        ApplyAiTogglePreference();
 
         NvidiaSmi = new NvidiaSmi(Logger);
         RuntimeMode = new RuntimeModeState();
@@ -460,6 +461,41 @@ public sealed class AppHost : IAsyncDisposable
             $"按界面偏好把 TTS 引擎由 config.yaml 的 \"{Config.Tts.Engine}\" 覆盖为 \"{preferred}\"" +
             "（来源 Assets\\appearance.json，未改动 config.yaml）。");
         Config.Tts.Engine = preferred;
+    }
+
+    /// <summary>
+    /// 应用设置面板里的三项 AI 功能开关（存 Assets\appearance.json，不改 config.yaml）。
+    ///
+    /// 必须赶在任何组件初始化**之前**调用：关掉的功能压根不该被创建，
+    /// 而不是建好了再停 —— 那样模型照样进内存、外部服务照样被拉起。
+    /// </summary>
+    private void ApplyAiTogglePreference()
+    {
+        try
+        {
+            var toggle = AppearanceStore.LoadAiToggles();
+
+            Apply("llm", toggle.Llm, Config.Llm.Enabled, value => Config.Llm.Enabled = value);
+            Apply("tts", toggle.Tts, Config.Tts.Enabled, value => Config.Tts.Enabled = value);
+            Apply("asr", toggle.Asr, Config.Asr.Enabled, value => Config.Asr.Enabled = value);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"读取 AI 功能开关偏好失败（不影响启动，按 config.yaml 运行）：{ex.Message}");
+        }
+
+        void Apply(string name, bool? preferred, bool fromConfig, Action<bool> set)
+        {
+            if (preferred is null || preferred.Value == fromConfig)
+            {
+                return;
+            }
+
+            set(preferred.Value);
+            Logger.Info(
+                $"按界面偏好把 {name}.enabled 由 config.yaml 的 {fromConfig} 覆盖为 {preferred.Value}" +
+                "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+        }
     }
 
     /// <summary>HealthMonitor 在休眠唤醒后用它尝试重启一次失败的服务。</summary>
