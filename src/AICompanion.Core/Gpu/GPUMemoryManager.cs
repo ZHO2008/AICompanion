@@ -27,6 +27,21 @@ public sealed class GPUMemoryManager
     /// <summary>无法从 GGUF 读到层数且配置也没指定时使用的兜底层数（Qwen2.5-7B 的公开数值）。</summary>
     public const int FallbackLayerCount = 28;
 
+    /// <summary>拿不到 GGUF 文件大小时，每层占用的兜底估值（MB，7B 模型的经验值）。</summary>
+    public const int FallbackPerLayerMb = 150;
+
+    /// <summary>KV Cache 估算的经验基准：每层在 4096 上下文下约占用的 MB。</summary>
+    private const double KvMbPerLayerAt4k = 16.0;
+
+    /// <summary>KV Cache 估算的上下文基准长度（与 <see cref="LlmConfig.ContextLength"/> 的默认值一致）。</summary>
+    private const int KvBaselineContext = 4096;
+
+    /// <summary>KV 预留不低于这个值（MB）：llama.cpp 的 KV 分配有按块的取整与对齐开销。</summary>
+    private const int KvMinReserveMb = 128;
+
+    /// <summary>KV 预留不超过总显存的这个比例，避免小卡被一笔 KV 预留直接判成"显存不足"。</summary>
+    private const double KvMaxFractionOfTotal = 0.25;
+
     private readonly AppConfig _config;
     private readonly NvidiaSmi _smi;
     private readonly RuntimeModeState _mode;
@@ -109,7 +124,7 @@ public sealed class GPUMemoryManager
             $"KV 预留 {(gpu.KvCacheReservedMb > 0 ? "配置" : "按层数×上下文估算")} {kvReservedMb} MB，" +
             $"层数 {totalLayers}（{layerSource}））");
 
-        var usableMb = freeMb - reservedMb - kvReservedMb;
+        var usableMb = (long)freeMb - reservedMb - kvReservedMb;
         var conservative = usableMb * safetyFactor;
 
         // ---- 决策 Q12 的边界：算不出正层数就直接走 CPU ----
@@ -167,20 +182,26 @@ public sealed class GPUMemoryManager
         return plan;
     }
 
-    /// <summary>只读查询当前显存使用量，供气泡/设置面板展示（手册 §3.3"运行时气泡"）。</summary>
+    /// <summary>
+    /// 只读查询当前显存使用量，供气泡/设置面板展示（手册 §3.3"运行时气泡"）。
+    ///
+    /// free 与 total 一次查出：以前这里先查 memory.used、再查 memory.used,memory.total 算百分比，
+    /// 每刷新一次设置面板（2 秒一次）就多起一个 nvidia-smi 子进程，纯属白等。
+    /// </summary>
     public async Task<string> DescribeCurrentMemoryAsync(CancellationToken cancellationToken = default)
     {
-        var used = await _smi.QueryUsedMemoryMbAsync(cancellationToken).ConfigureAwait(false);
-        var util = await _smi.QueryMemoryUtilizationPercentAsync(cancellationToken).ConfigureAwait(false);
+        var memory = await _smi.QueryUsedAndTotalMemoryMbAsync(cancellationToken).ConfigureAwait(false);
 
-        if (!used.Success)
+        if (!memory.Used.Success)
         {
             return "显存：不可用";
         }
 
-        return util.Success
-            ? $"显存：已用 {used.Value} MB（{util.Value}%）"
-            : $"显存：已用 {used.Value} MB";
+        var percent = memory.Total.Success && memory.Total.Value > 0
+            ? $"（{(int)Math.Round(memory.Used.Value * 100.0 / memory.Total.Value)}%）"
+            : string.Empty;
+
+        return $"显存：已用 {memory.Used.Value} MB{percent}";
     }
 
     /// <summary>
@@ -195,10 +216,6 @@ public sealed class GPUMemoryManager
     }
 
     /// <summary>
-    /// 按 GGUF 文件大小估算"每层占用（MB）"：文件大小 ÷ 层数 × 1.1（经验系数，含输出头与对齐）。
-    /// 拿不到文件大小时回退 150 MB（7B 的经验值）。
-    /// </summary>
-    /// <summary>
     /// 按"层数 × 上下文长度"估算 KV Cache 预留（MB）。
     ///
     /// KV 大小 ≈ 2 × layers × ctx × n_kv_heads × head_dim × 2 字节，与层数和 ctx 都成线性；
@@ -207,20 +224,26 @@ public sealed class GPUMemoryManager
     /// </summary>
     private int EstimateKvReserveMb(int totalLayers, int totalVramMb)
     {
-        var ctx = _config.Llm.ContextLength > 0 ? _config.Llm.ContextLength : 4096;
+        var ctx = _config.Llm.ContextLength > 0 ? _config.Llm.ContextLength : KvBaselineContext;
         var layers = totalLayers > 0 ? totalLayers : FallbackLayerCount;
 
-        var estimate = (int)Math.Round(layers * 16.0 * ctx / 4096.0);
-        estimate = Math.Max(128, estimate);
+        // 全程用 double 再夹到 int 范围：配置里写个离谱的 context_length 也不该让
+        // (int) 转换溢出成 int.MinValue（那会算出一个假的 128 MB 预留）。
+        var estimate = layers * KvMbPerLayerAt4k * ctx / KvBaselineContext;
+        var clamped = Math.Max(KvMinReserveMb, Math.Min(estimate, int.MaxValue));
 
         if (totalVramMb > 0)
         {
-            estimate = Math.Min(estimate, (int)(totalVramMb * 0.25));
+            clamped = Math.Min(clamped, totalVramMb * KvMaxFractionOfTotal);
         }
 
-        return estimate;
+        return (int)Math.Round(clamped);
     }
 
+    /// <summary>
+    /// 按 GGUF 文件大小估算"每层占用（MB）"：文件大小 ÷ 层数 × 1.1（经验系数，含输出头与对齐）。
+    /// 拿不到文件大小时回退 <see cref="FallbackPerLayerMb"/>（7B 的经验值）。
+    /// </summary>
     private int EstimatePerLayerMb(int totalLayers)
     {
         try
@@ -238,10 +261,10 @@ public sealed class GPUMemoryManager
         }
         catch (Exception ex)
         {
-            _logger.Warn($"按 GGUF 估算每层占用失败，回退 150 MB：{ex.Message}");
+            _logger.Warn($"按 GGUF 估算每层占用失败，回退 {FallbackPerLayerMb} MB：{ex.Message}");
         }
 
-        return 150;
+        return FallbackPerLayerMb;
     }
 
     private int ResolveTotalLayers(out string source)

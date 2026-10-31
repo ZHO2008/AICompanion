@@ -43,11 +43,32 @@ public sealed class NvidiaSmi
     /// 解析按两列 CSV 走（"free, total"；同样兼容 "used, total" 这类两列输出）。
     /// 任一列解析不出来就整体判失败 —— 调用方的语义本来就是"拿不到显存就降级 CPU"。
     /// </summary>
-    public async Task<(NvidiaSmiValue Free, NvidiaSmiValue Total)> QueryFreeAndTotalMemoryMbAsync(
+    public Task<(NvidiaSmiValue Free, NvidiaSmiValue Total)> QueryFreeAndTotalMemoryMbAsync(
         CancellationToken cancellationToken = default)
+        => QueryTwoColumnsAsync("memory.free,memory.total", "空闲/总显存", cancellationToken);
+
+    /// <summary>
+    /// 已用与总显存（MB）**一次**查出。
+    ///
+    /// 为什么需要：设置面板每 2 秒刷新一次显存文字，原来的
+    /// <c>DescribeCurrentMemoryAsync</c> 先查 memory.used、再查 memory.used,memory.total 算百分比，
+    /// 每次刷新多起一个 nvidia-smi 子进程（每个百毫秒级）。一次查两列即可同时得到两者。
+    /// </summary>
+    public Task<(NvidiaSmiValue Used, NvidiaSmiValue Total)> QueryUsedAndTotalMemoryMbAsync(
+        CancellationToken cancellationToken = default)
+        => QueryTwoColumnsAsync("memory.used,memory.total", "已用/总显存", cancellationToken);
+
+    /// <summary>
+    /// 查询形如 <c>a,b</c> 的两列整数结果（MB）。
+    /// 任一列解析不出来就整体判失败 —— 调用方的语义本来就是"拿不到显存就降级"。
+    /// </summary>
+    private async Task<(NvidiaSmiValue First, NvidiaSmiValue Second)> QueryTwoColumnsAsync(
+        string columns,
+        string what,
+        CancellationToken cancellationToken)
     {
         var result = await QueryAsync(
-            "--query-gpu=memory.free,memory.total --format=csv,noheader,nounits",
+            $"--query-gpu={columns} --format=csv,noheader,nounits",
             cancellationToken).ConfigureAwait(false);
 
         if (!result.Success)
@@ -57,14 +78,14 @@ public sealed class NvidiaSmi
 
         var parts = result.Raw.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length >= 2
-            && ProcessRunner.TryParseFirstInteger(parts[0], out var free)
-            && ProcessRunner.TryParseFirstInteger(parts[1], out var total))
+            && ProcessRunner.TryParseFirstInteger(parts[0], out var first)
+            && ProcessRunner.TryParseFirstInteger(parts[1], out var second))
         {
-            return (new NvidiaSmiValue(true, free, result.Raw, null),
-                    new NvidiaSmiValue(true, total, result.Raw, null));
+            return (new NvidiaSmiValue(true, first, result.Raw, null),
+                    new NvidiaSmiValue(true, second, result.Raw, null));
         }
 
-        var reason = $"无法从 \"{result.Raw}\" 解析空闲/总显存。";
+        var reason = $"无法从 \"{result.Raw}\" 解析{what}。";
         return (new NvidiaSmiValue(false, 0, result.Raw, reason),
                 new NvidiaSmiValue(false, 0, result.Raw, reason));
     }

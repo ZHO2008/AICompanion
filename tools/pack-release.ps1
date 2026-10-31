@@ -114,8 +114,19 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 #   System.IO.Compression.dll            → ZipArchive / ZipArchiveMode / CompressionLevel
 #   System.IO.Compression.FileSystem.dll → ZipFile
 # 少加载任何一个，后面都会报 "Unable to find type [System.IO.Compression.ZipArchiveMode]"。
-try { Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop } catch { }
-try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+# 这里不再用 `catch { }` 空吞：加载失败必须当场说清楚，
+# 否则故障会推迟到"打 zip 那一步"才以"找不到类型"的形式爆出来，极难定位。
+try {
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+} catch {
+    throw "无法加载程序集 System.IO.Compression（打 zip 必需）：$($_.Exception.Message)。请用 Windows PowerShell 5.1 或 PowerShell 7 运行本脚本。"
+}
+
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+} catch {
+    throw "无法加载程序集 System.IO.Compression.FileSystem（打 zip 与校验必需）：$($_.Exception.Message)。"
+}
 
 # ---------------------------------------------------------------- 工具函数
 
@@ -135,11 +146,28 @@ function Get-SizeText([long]$bytes) {
     return ('{0:N0} KB' -f ($bytes / 1KB))
 }
 
+# 目录体积。全部走 -LiteralPath：路径里出现 [ ] 时（-OutDir "D:\release[1]"、
+# 用户名里带方括号……）Test-Path / Get-ChildItem 会把方括号当通配符，静默判成"不存在"。
 function Get-DirBytes([string]$path) {
-    if (-not (Test-Path $path)) { return [long]0 }
-    $sum = (Get-ChildItem $path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+    if (-not (Test-Path -LiteralPath $path)) { return [long]0 }
+    $sum = (Get-ChildItem -LiteralPath $path -Recurse -File -ErrorAction SilentlyContinue |
+        Measure-Object Length -Sum).Sum
     if ($null -eq $sum) { return [long]0 }
     return [long]$sum
+}
+
+# 一次遍历同时拿到"文件数 + 总字节"，避免对同一个目录做两遍 -Recurse 扫描。
+function Get-DirStats([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return [PSCustomObject]@{ Count = 0; Bytes = [long]0 } }
+
+    $count = 0
+    $bytes = [long]0
+    foreach ($f in Get-ChildItem -LiteralPath $path -Recurse -File -ErrorAction SilentlyContinue) {
+        $count++
+        $bytes += $f.Length
+    }
+
+    return [PSCustomObject]@{ Count = $count; Bytes = $bytes }
 }
 
 # 读一个**正被别的进程写着**的文件。
@@ -151,7 +179,7 @@ function Get-DirBytes([string]$path) {
 # 这个坑实测踩过：脚本读日志抛异常被吞成空串，于是"日志里什么都没有"，
 # 看起来像启动失败，其实是读不到。
 function Read-SharedFileText([string]$path) {
-    if (-not (Test-Path $path)) { return '' }
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
 
     $stream = $null
     try {
@@ -174,10 +202,10 @@ function Read-SharedFileText([string]$path) {
 # 这里要的键（server_executable_path / default_texture_path / pet_image_path /
 # vad_library_path）全项目各只出现一次，不值得为它引入一个 YAML 解析器。
 function Get-ConfigPathValue([string]$configFile, [string]$key) {
-    if (-not (Test-Path $configFile)) { return $null }
+    if (-not (Test-Path -LiteralPath $configFile)) { return $null }
 
     $pattern = '^\s*' + [regex]::Escape($key) + '\s*:\s*(.+)$'
-    $match = Select-String -Path $configFile -Pattern $pattern -Encoding UTF8 | Select-Object -First 1
+    $match = Select-String -LiteralPath $configFile -Pattern $pattern -Encoding UTF8 | Select-Object -First 1
     if (-not $match) { return $null }
 
     $value = $match.Matches[0].Groups[1].Value.Trim()
@@ -208,7 +236,9 @@ function New-ReleaseZip([string]$SourceDir, [string]$TargetZip) {
     $files = @(Get-ChildItem -LiteralPath $src -Recurse -File | Sort-Object FullName)
     if ($files.Count -eq 0) { throw "要压缩的目录是空的：$src" }
 
-    $fs = [System.IO.File]::Open($TargetZip, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite)
+    # FileMode.Create 而不是 CreateNew：上面已经删过一次（并会报错），
+    # 这里再因为"文件已存在"而失败只会掩盖真正的原因。
+    $fs = [System.IO.File]::Open($TargetZip, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite)
     try {
         $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
         try {
@@ -246,10 +276,15 @@ function Invoke-PackageSmokeTest {
         [Parameter(Mandatory = $true)][string]$WorkDir,
         [string]$ModelPath = '',
         [string]$RepoModelsDir = '',
+        [string]$RepoRoot = '',
         [int]$WaitSeconds = 90
     )
 
-    try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    } catch {
+        throw "冒烟断言需要 System.IO.Compression.FileSystem 才能解压：$($_.Exception.Message)"
+    }
 
     $reasons = New-Object System.Collections.Generic.List[string]
     $notes = New-Object System.Collections.Generic.List[string]
@@ -258,15 +293,40 @@ function Invoke-PackageSmokeTest {
     $proc = $null
     $passed = $false
 
+    # 临时目录兜底：下面会 Remove-Item -Recurse -Force，必须确认它真的是"临时目录"。
+    # 以前 -SmokeWorkDir 传什么就删什么，误传成仓库根目录（或某个盘的根）就是一次不可恢复的删除。
+    try {
+        $workFull = [System.IO.Path]::GetFullPath($WorkDir).TrimEnd('\', '/')
+        if ($workFull -match '^[A-Za-z]:$') {
+            throw "拒绝把磁盘根目录当作冒烟临时目录：$workFull"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RepoRoot)) {
+            $rootFull = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\', '/')
+            if ($workFull.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "拒绝把仓库根目录当作冒烟临时目录（会被整体删除）：$workFull"
+            }
+            if ($rootFull.StartsWith($workFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "拒绝把仓库的上级目录当作冒烟临时目录（会被整体删除）：$workFull"
+            }
+            if ($workFull.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                # 在仓库内部不会删到源码，但会把解压副本塞进 git status，提醒一句。
+                $notes.Add("冒烟临时目录在仓库内部（会出现在 git status 里，跑完自动删除）：$workFull")
+            }
+        }
+    } catch {
+        $reasons.Add("冒烟临时目录不可用：$($_.Exception.Message)")
+        return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = '' }
+    }
+
     try {
         # 1. 解压
-        if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force }
+        if (Test-Path -LiteralPath $WorkDir) { Remove-Item -LiteralPath $WorkDir -Recurse -Force }
         New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
         Write-Host "    解压到 $extract ..."
         [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $extract)
 
         $exe = Join-Path $extract 'AICompanion.exe'
-        if (-not (Test-Path $exe)) {
+        if (-not (Test-Path -LiteralPath $exe)) {
             $reasons.Add('解压后没有 AICompanion.exe，无法冒烟启动。')
             return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = $extract }
         }
@@ -274,8 +334,8 @@ function Invoke-PackageSmokeTest {
         # 2. 模型：包里有就用包里的；没有就从仓库临时拷一个进去（zip 不含模型是设计决定）
         $llmDir = Join-Path $extract 'models\llm'
         $packageModels = @()
-        if (Test-Path $llmDir) {
-            $packageModels = @(Get-ChildItem $llmDir -File -Filter '*.gguf' -ErrorAction SilentlyContinue)
+        if (Test-Path -LiteralPath $llmDir) {
+            $packageModels = @(Get-ChildItem -LiteralPath $llmDir -File -Filter '*.gguf' -ErrorAction SilentlyContinue)
         }
 
         if ($packageModels.Count -gt 0) {
@@ -284,16 +344,16 @@ function Invoke-PackageSmokeTest {
             $sourceModel = $null
 
             if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
-                if (Test-Path $ModelPath) {
+                if (Test-Path -LiteralPath $ModelPath) {
                     $sourceModel = (Resolve-Path -LiteralPath $ModelPath).Path
                 } else {
                     $notes.Add("指定的 -SmokeModelPath 不存在：$ModelPath")
                 }
             }
 
-            if ($null -eq $sourceModel -and -not [string]::IsNullOrWhiteSpace($RepoModelsDir) -and (Test-Path $RepoModelsDir)) {
+            if ($null -eq $sourceModel -and -not [string]::IsNullOrWhiteSpace($RepoModelsDir) -and (Test-Path -LiteralPath $RepoModelsDir)) {
                 # 取体积最小的那个：冒烟只需要"能加载"，不必拿 4 GB 的 7B 模型慢慢跑
-                $candidate = Get-ChildItem $RepoModelsDir -Recurse -File -Filter '*.gguf' -ErrorAction SilentlyContinue |
+                $candidate = Get-ChildItem -LiteralPath $RepoModelsDir -Recurse -File -Filter '*.gguf' -ErrorAction SilentlyContinue |
                     Sort-Object Length | Select-Object -First 1
                 if ($candidate) { $sourceModel = $candidate.FullName }
             }
@@ -306,10 +366,10 @@ function Invoke-PackageSmokeTest {
                 return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = $extract }
             }
 
-            if (-not (Test-Path $llmDir)) { New-Item -ItemType Directory -Path $llmDir -Force | Out-Null }
+            if (-not (Test-Path -LiteralPath $llmDir)) { New-Item -ItemType Directory -Path $llmDir -Force | Out-Null }
             $modelTarget = Join-Path $llmDir (Split-Path $sourceModel -Leaf)
             Write-Host "    临时拷入模型（仅用于本次冒烟，zip 不含模型）：$(Split-Path $sourceModel -Leaf)"
-            Copy-Item $sourceModel $modelTarget -Force
+            Copy-Item -LiteralPath $sourceModel -Destination $modelTarget -Force
             $notes.Add("冒烟时临时拷入模型 $(Split-Path $sourceModel -Leaf)（zip 本体不含模型）。")
 
             # config.yaml 的 llm.model_path 若指到别的文件名，这里顺手对齐（只改解压出来的副本）。
@@ -317,7 +377,7 @@ function Invoke-PackageSmokeTest {
             $cfg = Join-Path $extract 'config.yaml'
             $currentModelPath = Get-ConfigPathValue $cfg 'model_path'
             $expected = 'models/llm/' + (Split-Path $sourceModel -Leaf)
-            if ((Test-Path $cfg) -and $currentModelPath -ne $expected) {
+            if ((Test-Path -LiteralPath $cfg) -and $currentModelPath -ne $expected) {
                 $lines = [System.IO.File]::ReadAllLines($cfg, [System.Text.Encoding]::UTF8)
                 for ($i = 0; $i -lt $lines.Length; $i++) {
                     if ($lines[$i] -match '^\s*model_path\s*:') {
@@ -344,7 +404,7 @@ function Invoke-PackageSmokeTest {
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Milliseconds 700
 
-            $logs = @(Get-ChildItem $logDir -Filter '*.log' -ErrorAction SilentlyContinue |
+            $logs = @(Get-ChildItem -LiteralPath $logDir -Filter '*.log' -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending)
             if ($logs.Count -gt 0) {
                 $logPath = $logs[0].FullName
@@ -354,13 +414,38 @@ function Invoke-PackageSmokeTest {
             }
 
             if ($proc.HasExited) {
-                $notes.Add("进程已退出（退出码 $($proc.ExitCode)），未等到「启动完成」。")
+                # ExitCode 读不到（句柄已失效）时别让整个冒烟挂在属性访问上。
+                $exitCode = -1
+                try { $exitCode = $proc.ExitCode } catch { }
+
+                if ($exitCode -eq 0) {
+                    $notes.Add('进程已退出（退出码 0），未等到「启动完成」—— 见上面关于"单实例互斥"的说明。')
+                } else {
+                    # 非 0 退出=闪退；另外本仓库常有多个构建/测试同时跑，
+                    # 它们惯用的 "Get-Process AICompanion | Stop-Process -Force" 也会把这里起的实例杀掉，
+                    # 表现为退出码 -1 且日志停在"已启动进程"之后。
+                    $notes.Add(
+                        "进程已退出（退出码 $exitCode），未等到「启动完成」。" +
+                        '若不是闪退，请确认没有别的构建/测试在同时跑（它们可能会 Stop-Process AICompanion）。')
+                }
+
                 break
             }
         }
 
         if (-not $finished -and $logPath -eq '') {
-            $reasons.Add("${WaitSeconds}s 内没有生成 logs\app\*.log —— 程序可能根本没起来（自包含运行时缺失 / 依赖 DLL 缺失 / 闪退）。")
+            # 进程很快就以 0 退出且一行日志都没写，最常见的原因是**单实例互斥**：
+            # AICompanion 发现自己不是第一个实例时会 SignalExisting + Shutdown(0)，完全静默。
+            # 这种情况不先关掉在跑的实例，冒烟永远过不了 —— 必须把原因说清楚。
+            $exitHint = ''
+            if ($proc -and $proc.HasExited -and $proc.ExitCode -eq 0) {
+                $exitHint = ' 进程很快以退出码 0 结束且没有写日志 —— 典型原因是**已有另一个 AICompanion 实例在运行**' +
+                    '（单实例互斥会让第二个实例静默退出）。请先结束所有 AICompanion.exe / llama-server.exe 再重跑。'
+            }
+
+            $reasons.Add(
+                "${WaitSeconds}s 内没有生成 logs\app\*.log —— 程序可能根本没起来" +
+                "（自包含运行时缺失 / 依赖 DLL 缺失 / 闪退）。解压目录：$extract$exitHint")
             return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = $extract }
         }
 
@@ -426,7 +511,14 @@ function Invoke-PackageSmokeTest {
         return [PSCustomObject]@{ Passed = $passed; Reasons = $reasons; Notes = $notes; LogPath = $logPath; ExtractDir = $extract }
     }
     catch {
-        $reasons.Add("冒烟过程异常：$($_.Exception.Message)")
+        # 带上出错行号：冒烟失败时最想知道的就是"卡在哪一步"，
+        # 只打一句异常消息（例如"找不到路径"）根本定位不到是解压、拷模型还是起进程。
+        $where = ''
+        if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) {
+            $where = "（pack-release.ps1 第 $($_.InvocationInfo.ScriptLineNumber) 行）"
+        }
+
+        $reasons.Add("冒烟过程异常$where：$($_.Exception.Message)")
         return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = $logPath; ExtractDir = $extract }
     }
     finally {
@@ -451,14 +543,14 @@ function Invoke-PackageSmokeTest {
 
         for ($i = 0; $i -lt 6; $i++) {
             try {
-                if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force -ErrorAction Stop }
+                if (Test-Path -LiteralPath $WorkDir) { Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction Stop }
                 break
             } catch {
                 Start-Sleep -Milliseconds 500
             }
         }
 
-        if (Test-Path $WorkDir) {
+        if (Test-Path -LiteralPath $WorkDir) {
             Write-Host "    ! 临时目录没能删掉（进程还占着文件？）：$WorkDir —— 请手工删除" -ForegroundColor Yellow
         }
     }
@@ -474,7 +566,7 @@ if (-not (Test-Path (Join-Path $root $csproj))) {
 }
 Set-Location $root
 
-$versionMatch = Select-String -Path $csproj -Pattern '<Version>([^<]+)</Version>'
+$versionMatch = Select-String -LiteralPath $csproj -Pattern '<Version>([^<]+)</Version>'
 if (-not $versionMatch -or $versionMatch.Matches.Count -eq 0) {
     throw "无法从 $csproj 读取 <Version>，版本号缺失会导致包名不可复现。"
 }
@@ -519,6 +611,9 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     throw '未找到 dotnet 命令。请安装 .NET 8 SDK（https://dotnet.microsoft.com/download/dotnet/8.0），并确认 dotnet 在 PATH 里。'
 }
 $dotnetVer = (& dotnet --version) 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet --version 退出码 $LASTEXITCODE：dotnet SDK 装坏了，或 PATH 指向了不可用的安装。输出：$dotnetVer"
+}
 Note "dotnet SDK：$dotnetVer"
 
 # 这些是"发布流程之外、必须由仓库根目录提供"的原生库。
@@ -532,18 +627,18 @@ $nativeSources = @(
 )
 foreach ($item in $nativeSources) {
     $full = Join-Path $root $item.Path
-    if (-not (Test-Path $full)) {
+    if (-not (Test-Path -LiteralPath $full)) {
         throw "缺少 $($item.Path)（$($item.Why)）。它不是 dotnet publish 的产物，必须放在仓库里对应位置；从 third_party 构建取得后再打包。"
     }
-    Note "有 $($item.Path)（$(Get-SizeText (Get-Item $full).Length)）"
+    Note "有 $($item.Path)（$(Get-SizeText (Get-Item -LiteralPath $full).Length)）"
 }
 
 $cubismSource = Join-Path $root 'Live2DCubismCore.dll'
 if ($IncludeCubismCore) {
-    if (-not (Test-Path $cubismSource)) {
+    if (-not (Test-Path -LiteralPath $cubismSource)) {
         throw "参数要求打包 Live2DCubismCore.dll，但仓库根目录没有它。请从 Live2D 官网下载官方 Cubism Core（x64）放到 $root 后重试；或去掉 -IncludeCubismCore 打不带它的公开包。"
     }
-    Note "有 Live2DCubismCore.dll（$(Get-SizeText (Get-Item $cubismSource).Length)），将随包（授权归 Live2D）"
+    Note "有 Live2DCubismCore.dll（$(Get-SizeText (Get-Item -LiteralPath $cubismSource).Length)），将随包（授权归 Live2D）"
 } else {
     Warn '按默认策略排除 Live2DCubismCore.dll（Live2D 授权项）：包内只放 Live2DCubismCore.dll.README.txt 说明如何自行放入。'
 }
@@ -552,11 +647,11 @@ if ($IncludeCubismCore) {
 $moduleDirs = @()
 if ($IncludeModules) {
     $modulesRoot = Join-Path $root 'modules'
-    if (-not (Test-Path $modulesRoot)) {
+    if (-not (Test-Path -LiteralPath $modulesRoot)) {
         throw '缺少 modules\ 目录：程序靠它找 LLM 后端（llama-server.exe），没有它分发包无法对话。若确认要出无对话能力的包，请显式加 -IncludeModules:$false。'
     }
-    $moduleDirs = @(Get-ChildItem $modulesRoot -Directory | Where-Object {
-        Test-Path (Join-Path $_.FullName 'module.json')
+    $moduleDirs = @(Get-ChildItem -LiteralPath $modulesRoot -Directory | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_.FullName 'module.json')
     })
     if ($moduleDirs.Count -eq 0) {
         throw 'modules\ 下没有任何含 module.json 的模块目录。请先运行 tools\build-cuda.cmd 或 tools\build-vulkan.cmd 构建后端。'
@@ -568,7 +663,7 @@ if ($IncludeModules) {
     }
     foreach ($d in $llmDirs) {
         $entry = Join-Path $d.FullName 'llama-server.exe'
-        if (-not (Test-Path $entry)) {
+        if (-not (Test-Path -LiteralPath $entry)) {
             throw "模块 modules\$($d.Name) 缺 llama-server.exe（module.json 里声明的入口）。这是一个残缺模块，打出去只会让程序扫到它却起不来。"
         }
     }
@@ -583,15 +678,26 @@ if ($IncludeModules) {
 
 Step '2/8 清理上一次的产物'
 
+# 全部用 -LiteralPath：-OutDir 里出现方括号（D:\release[1]）时，
+# Test-Path / Remove-Item 会把 [1] 当成通配符 —— 要么判成"不存在"而跳过清理，
+# 要么删错东西。清理失败也要给出可执行的原因（通常是程序还占着文件）。
 foreach ($p in @($stage, $work)) {
-    if (Test-Path $p) {
-        Remove-Item $p -Recurse -Force
-        Note "已删除 $p"
+    if (Test-Path -LiteralPath $p) {
+        try {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+            Note "已删除 $p"
+        } catch {
+            throw "无法删除上一次的产物 $p：$($_.Exception.Message)。最常见的原因是上一次打出来的 AICompanion.exe / llama-server.exe 还在运行，请先结束它们再重跑。"
+        }
     }
 }
-if (Test-Path $zipPath) {
-    Remove-Item $zipPath -Force
-    Note "已删除 $zipPath"
+if (Test-Path -LiteralPath $zipPath) {
+    try {
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction Stop
+        Note "已删除 $zipPath"
+    } catch {
+        throw "无法删除旧的发布包 $zipPath：$($_.Exception.Message)。请先关闭正在读取它的程序（解压工具 / 杀毒扫描 / 资源管理器预览）后重跑。"
+    }
 }
 New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
@@ -622,13 +728,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $publishedExe = Join-Path $publishDir 'AICompanion.exe'
-if (-not (Test-Path $publishedExe)) {
+if (-not (Test-Path -LiteralPath $publishedExe)) {
     throw "dotnet publish 没有产出 AICompanion.exe（目录：$publishDir）。"
 }
 Good "publish 完成：$publishDir（$(Get-SizeText (Get-DirBytes $publishDir))）"
 
 # 自包含 vs 框架依赖，用产物本身说话，而不是只信参数
-$hasCoreClr = Test-Path (Join-Path $publishDir 'coreclr.dll')
+$hasCoreClr = Test-Path -LiteralPath (Join-Path $publishDir 'coreclr.dll')
 Note "产物里 $(if ($hasCoreClr) { '有' } else { '没有' }) coreclr.dll → 实际是$(if ($hasCoreClr) { '自包含' } else { '框架依赖' })构建"
 if ($SelfContained -and -not $hasCoreClr) {
     throw '参数要求自包含，但 publish 产物里没有 coreclr.dll。目标机将因缺少运行时直接闪退，这属于致命缺陷，已中止打包。'
@@ -642,20 +748,25 @@ if (-not $SelfContained -and $hasCoreClr) {
 Step '4/8 汇总运行环境（原生库 / 模块 / 配置 / 资源）'
 
 # 4.1 主程序产物
-Copy-Item (Join-Path $publishDir '*') $stage -Recurse -Force
-Note "主程序产物 $(@(Get-ChildItem $publishDir -Recurse -File).Count) 个文件已拷入分发目录"
+# 不用 Copy-Item (Join-Path $publishDir '*'):
+#   路径里带方括号时 '*' 通配会失效/匹配错，而 $publishDir 是拼出来的参数，不能假定没有方括号。
+#   逐个顶层项拷过去，行为完全等价且不依赖通配符。
+Get-ChildItem -LiteralPath $publishDir -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $stage -Recurse -Force
+}
+Note "主程序产物 $(@(Get-ChildItem -LiteralPath $publishDir -Recurse -File).Count) 个文件已拷入分发目录"
 
 # 4.2 原生库 → bin\
 # 程序默认配置里 asr.library_path = bin/ai_asr.dll、vad_library_path = bin/libfvad.dll，
 # 少一层 bin\ 就等于告诉程序"没有 ASR"。这里只拷顶层文件，不递归（bin\cpu-backup 是开发机备用件）。
 $binStage = Join-Path $stage 'bin'
 New-Item -ItemType Directory -Path $binStage -Force | Out-Null
-$binFiles = @(Get-ChildItem (Join-Path $root 'bin') -File -ErrorAction SilentlyContinue)
+$binFiles = @(Get-ChildItem -LiteralPath (Join-Path $root 'bin') -File -ErrorAction SilentlyContinue)
 if ($binFiles.Count -eq 0) {
     throw '仓库根目录 bin\ 下没有任何文件，ai_asr.dll / libfvad.dll 不会被带上。'
 }
 foreach ($f in $binFiles) {
-    Copy-Item $f.FullName -Destination $binStage -Force
+    Copy-Item -LiteralPath $f.FullName -Destination $binStage -Force
 }
 Note "bin\ ← $($binFiles.Count) 个原生库（$(Get-SizeText (Get-DirBytes $binStage))）"
 
@@ -665,19 +776,19 @@ Note "bin\ ← $($binFiles.Count) 个原生库（$(Get-SizeText (Get-DirBytes $b
 $cubismTarget = Join-Path $stage 'Live2DCubismCore.dll'
 $cubismReadme = Join-Path $stage 'Live2DCubismCore.dll.README.txt'
 if ($IncludeCubismCore) {
-    if (-not (Test-Path $cubismTarget)) {
-        Copy-Item $cubismSource $cubismTarget -Force
+    if (-not (Test-Path -LiteralPath $cubismTarget)) {
+        Copy-Item -LiteralPath $cubismSource -Destination $cubismTarget -Force
         Note 'Live2DCubismCore.dll 由脚本补拷（publish 未带）'
     } else {
         Note 'Live2DCubismCore.dll 已由 publish 带入（随包）'
     }
 
-    if (Test-Path $cubismReadme) {
-        Remove-Item $cubismReadme -Force
+    if (Test-Path -LiteralPath $cubismReadme) {
+        Remove-Item -LiteralPath $cubismReadme -Force
     }
 } else {
-    if (Test-Path $cubismTarget) {
-        Remove-Item $cubismTarget -Force
+    if (Test-Path -LiteralPath $cubismTarget) {
+        Remove-Item -LiteralPath $cubismTarget -Force
         Note 'Live2DCubismCore.dll 已从产物里删除（Live2D 授权项，默认不含）'
     }
 
@@ -713,7 +824,7 @@ if ($IncludeModules) {
     New-Item -ItemType Directory -Path $modStage -Force | Out-Null
     foreach ($d in $moduleDirs) {
         $target = Join-Path $modStage $d.Name
-        Copy-Item $d.FullName $target -Recurse -Force
+        Copy-Item -LiteralPath $d.FullName -Destination $target -Recurse -Force
         Note "modules\$($d.Name) ← $(Get-SizeText (Get-DirBytes $target))"
     }
 } else {
@@ -745,20 +856,20 @@ if ($IncludeModules) {
 if (-not $NoVcRuntime) {
     $crtNames = @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
     $crtTargets = @($stage)
-    if ($IncludeModules -and (Test-Path (Join-Path $stage 'modules'))) {
+    if ($IncludeModules -and (Test-Path -LiteralPath (Join-Path $stage 'modules'))) {
         # llama-server.exe 是**独立进程**，它的 DLL 搜索从自己的目录开始，
         # 放在包根目录它找不到，必须也放进各模块目录。
-        $crtTargets += @(Get-ChildItem (Join-Path $stage 'modules') -Directory | Select-Object -ExpandProperty FullName)
+        $crtTargets += @(Get-ChildItem -LiteralPath (Join-Path $stage 'modules') -Directory | Select-Object -ExpandProperty FullName)
     }
     $copiedCrt = @()
     foreach ($name in $crtNames) {
         $src = Join-Path $env:SystemRoot "System32\$name"
-        if (-not (Test-Path $src)) {
+        if (-not (Test-Path -LiteralPath $src)) {
             Warn "本机 System32 里没有 $name，无法随包。目标机若缺 VC++ 2015-2022 x64 运行库，ASR/LLM 会加载失败。"
             continue
         }
         foreach ($dst in $crtTargets) {
-            Copy-Item $src -Destination (Join-Path $dst $name) -Force
+            Copy-Item -LiteralPath $src -Destination (Join-Path $dst $name) -Force
         }
         $copiedCrt += $name
     }
@@ -766,7 +877,7 @@ if (-not $NoVcRuntime) {
         $crtBytes = 0
         foreach ($n in $copiedCrt) {
             $probe = Join-Path $stage $n
-            if (Test-Path $probe) { $crtBytes += (Get-Item $probe).Length * $crtTargets.Count }
+            if (Test-Path -LiteralPath $probe) { $crtBytes += (Get-Item -LiteralPath $probe).Length * $crtTargets.Count }
         }
         Note "MSVC 运行库 ← $($copiedCrt -join ', ')（包根 + $($crtTargets.Count - 1) 个模块目录，共 $(Get-SizeText $crtBytes)）"
     }
@@ -776,18 +887,18 @@ if (-not $NoVcRuntime) {
 # 仓库根目录的 config.yaml 是开发机上的个人配置（含本机绝对路径、端口、音色），
 # 绝不能进包；包里的 config.yaml 一律来自 Core 内嵌的出厂模板。
 $tpl = Join-Path $root 'src\AICompanion.Core\Configuration\config.default.yaml'
-if (-not (Test-Path $tpl)) {
+if (-not (Test-Path -LiteralPath $tpl)) {
     throw "找不到配置模板 $tpl。发布包的 config.yaml 必须由模板生成，不能用仓库根目录的个人配置顶替。"
 }
 $cfgTarget = Join-Path $stage 'config.yaml'
-if (Test-Path $cfgTarget) {
+if (Test-Path -LiteralPath $cfgTarget) {
     # 只有在"目标目录不是新建的"时才会走到这里（正常流程 stage 已被清空）。
     Warn '目标已存在 config.yaml，保留原文件不覆盖（避免冲掉用户已有配置）。'
 } else {
-    Copy-Item $tpl $cfgTarget -Force
+    Copy-Item -LiteralPath $tpl -Destination $cfgTarget -Force
     Note 'config.yaml ← 出厂模板（不是开发机配置）'
 }
-Copy-Item $tpl (Join-Path $stage 'config.default.yaml') -Force
+Copy-Item -LiteralPath $tpl -Destination (Join-Path $stage 'config.default.yaml') -Force
 Note 'config.default.yaml ← 出厂模板（供用户对照/恢复）'
 
 # 4.7 运行期目录的骨架
@@ -795,8 +906,8 @@ Note 'config.default.yaml ← 出厂模板（供用户对照/恢复）'
 # 但**不能**把开发机上的个人状态打进去（窗口位置、日志、待审知识）。
 foreach ($junk in @('logs', 'Assets\appearance.json', 'Knowledge\.pending')) {
     $p = Join-Path $stage $junk
-    if (Test-Path $p) {
-        Remove-Item $p -Recurse -Force
+    if (Test-Path -LiteralPath $p) {
+        Remove-Item -LiteralPath $p -Recurse -Force
         Note "已剔除运行期个人状态：$junk"
     }
 }
@@ -804,7 +915,7 @@ foreach ($junk in @('logs', 'Assets\appearance.json', 'Knowledge\.pending')) {
 $assetsDir = Join-Path $stage 'Assets'
 New-Item -ItemType Directory -Path (Join-Path $assetsDir 'Default') -Force | Out-Null
 $appIco = Join-Path $root 'Assets\app.ico'
-if (Test-Path $appIco) { Copy-Item $appIco (Join-Path $assetsDir 'app.ico') -Force }
+if (Test-Path -LiteralPath $appIco) { Copy-Item -LiteralPath $appIco -Destination (Join-Path $assetsDir 'app.ico') -Force }
 
 # 4.7.1 静态立绘：**必须随包**，否则首启只剩"角色形象缺失"的纯色面板
 #
@@ -820,23 +931,23 @@ $artDefault = Join-Path $artSource 'default.png'
 $artProfile = Join-Path $artSource 'AvatarProfile.json'
 $artExpressions = Join-Path $artSource 'Expressions'
 
-if (-not (Test-Path $artDefault)) {
+if (-not (Test-Path -LiteralPath $artDefault)) {
     throw "缺少出厂立绘 Assets\Default\default.png —— 而 config.yaml 的 live2d.default_texture_path 与 ui.pet_image_path 都指向它，不随包就会首启「角色形象缺失」。请先运行 tools\draw_avatar.ps1 生成（可复现的占位立绘），再重跑本脚本。"
 }
 
-Copy-Item $artDefault (Join-Path $assetsDir 'Default\default.png') -Force
-Note "Assets\Default\default.png ← 出厂占位立绘（$(Get-SizeText (Get-Item $artDefault).Length)）"
+Copy-Item -LiteralPath $artDefault -Destination (Join-Path $assetsDir 'Default\default.png') -Force
+Note "Assets\Default\default.png ← 出厂占位立绘（$(Get-SizeText (Get-Item -LiteralPath $artDefault).Length)）"
 
-if (Test-Path $artProfile) {
-    Copy-Item $artProfile (Join-Path $assetsDir 'Default\AvatarProfile.json') -Force
+if (Test-Path -LiteralPath $artProfile) {
+    Copy-Item -LiteralPath $artProfile -Destination (Join-Path $assetsDir 'Default\AvatarProfile.json') -Force
     Note 'Assets\Default\AvatarProfile.json ← 动作/口型参数映射'
 }
 
-if (Test-Path $artExpressions) {
+if (Test-Path -LiteralPath $artExpressions) {
     $exprTarget = Join-Path $assetsDir 'Default\Expressions'
     New-Item -ItemType Directory -Path $exprTarget -Force | Out-Null
-    $exprFiles = @(Get-ChildItem $artExpressions -File -Filter '*.png')
-    foreach ($f in $exprFiles) { Copy-Item $f.FullName -Destination $exprTarget -Force }
+    $exprFiles = @(Get-ChildItem -LiteralPath $artExpressions -File -Filter '*.png')
+    foreach ($f in $exprFiles) { Copy-Item -LiteralPath $f.FullName -Destination $exprTarget -Force }
     if ($exprFiles.Count -gt 0) {
         Note "Assets\Default\Expressions\ ← $($exprFiles.Count) 张表情图（$(Get-SizeText (Get-DirBytes $exprTarget))）"
     }
@@ -866,21 +977,21 @@ New-Item -ItemType Directory -Path (Join-Path $stage 'Knowledge') -Force | Out-N
     '本包只带空目录，不含任何个人知识条目。'
 ) | Set-Content -Path (Join-Path $stage 'Knowledge\README.txt') -Encoding UTF8
 
-if (Test-Path (Join-Path $root 'README.md')) {
-    Copy-Item (Join-Path $root 'README.md') $stage -Force
+if (Test-Path -LiteralPath (Join-Path $root 'README.md')) {
+    Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage -Force
     Note 'README.md'
 }
 
 # 4.8 模型
 if ($IncludeModel) {
     $modelsRoot = Join-Path $root 'models'
-    if (-not (Test-Path $modelsRoot)) {
+    if (-not (Test-Path -LiteralPath $modelsRoot)) {
         throw '参数要求打包模型，但仓库根目录没有 models\。'
     }
     $modelStage = Join-Path $stage 'models'
     New-Item -ItemType Directory -Path $modelStage -Force | Out-Null
-    foreach ($d in @(Get-ChildItem $modelsRoot -Directory)) {
-        Copy-Item $d.FullName (Join-Path $modelStage $d.Name) -Recurse -Force
+    foreach ($d in @(Get-ChildItem -LiteralPath $modelsRoot -Directory)) {
+        Copy-Item -LiteralPath $d.FullName -Destination (Join-Path $modelStage $d.Name) -Recurse -Force
         Note "models\$($d.Name) ← $(Get-SizeText (Get-DirBytes (Join-Path $modelStage $d.Name)))"
     }
 } else {
@@ -901,23 +1012,24 @@ if ($IncludeModel) {
 
 # 4.9 瘦身：删符号与多余语言资源
 if (-not $NoSlim) {
-    $pdbs = @(Get-ChildItem $stage -Recurse -File -Filter '*.pdb' -ErrorAction SilentlyContinue)
+    $pdbs = @(Get-ChildItem -LiteralPath $stage -Recurse -File -Filter '*.pdb' -ErrorAction SilentlyContinue)
     if ($pdbs.Count -gt 0) {
         $freed = ($pdbs | Measure-Object Length -Sum).Sum
-        $pdbs | Remove-Item -Force
+        # 逐个删：路径用 -LiteralPath，且不依赖管道绑定（空数组时管道会报参数绑定失败）。
+        foreach ($pdb in $pdbs) { Remove-Item -LiteralPath $pdb.FullName -Force }
         Note "删除 $($pdbs.Count) 个 .pdb，省 $(Get-SizeText $freed)"
     }
 
     # WPF 为 14 种语言各带一份卫星程序集，本项目只需要中文
     $keepLangs = @('zh-Hans', 'zh-Hant')
-    $langDirs = @(Get-ChildItem $stage -Directory | Where-Object {
+    $langDirs = @(Get-ChildItem -LiteralPath $stage -Directory | Where-Object {
         $_.Name -match '^[a-z]{2}(-[A-Z]{2})?$' -and ($_.Name -notin $keepLangs)
     })
     if ($langDirs.Count -gt 0) {
         $freed = 0
         foreach ($d in $langDirs) {
-            $freed += (Get-ChildItem $d.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-            Remove-Item $d.FullName -Recurse -Force
+            $freed += (Get-ChildItem -LiteralPath $d.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force
         }
         Note "删除 $($langDirs.Count) 个语言目录，省 $(Get-SizeText $freed)"
     }
@@ -1036,8 +1148,11 @@ $materialsNotes = @(
 $materialsNotes | Set-Content -Path (Join-Path $stage '素材说明.md') -Encoding UTF8
 Note '素材说明.md（哪些素材随包、哪些自备、授权归谁）'
 
-$stageBytes = Get-DirBytes $stage
-$stageCount = @(Get-ChildItem $stage -Recurse -File).Count
+# 一次遍历拿到"文件数 + 总字节"：以前 Get-DirBytes 与 Get-ChildItem -Recurse 各扫一遍 stage，
+# 700 多个文件就是两遍全目录遍历（机械盘上能差出几百毫秒）。
+$stageStats = Get-DirStats $stage
+$stageBytes = $stageStats.Bytes
+$stageCount = $stageStats.Count
 Good "分发目录：$stage（$stageCount 个文件，$(Get-SizeText $stageBytes)）"
 
 # ---------------------------------------------------------------- 5. 打 zip
@@ -1045,18 +1160,22 @@ Good "分发目录：$stage（$stageCount 个文件，$(Get-SizeText $stageBytes
 Step '5/8 生成 zip'
 
 $zippedCount = New-ReleaseZip -SourceDir $stage -TargetZip $zipPath
-if (-not (Test-Path $zipPath)) {
+if (-not (Test-Path -LiteralPath $zipPath)) {
     throw "压缩失败：没有生成 $zipPath。"
 }
-$zipBytes = (Get-Item $zipPath).Length
+$zipBytes = (Get-Item -LiteralPath $zipPath).Length
 Good "已生成 $zipPath（$zippedCount 个条目，$(Get-SizeText $zipBytes)）"
 
 # ---------------------------------------------------------------- 6. 校验（核心）
 
 Step '6/8 校验 zip 内容'
 
-# System.IO.Compression 在 PS 5.1 里要显式加载
-try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+# System.IO.Compression 在 PS 5.1 里要显式加载（前面已加过一次，这里保证独立可用）
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+} catch {
+    throw "校验阶段需要 System.IO.Compression.FileSystem：$($_.Exception.Message)"
+}
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
 try {
@@ -1270,16 +1389,15 @@ if ($SkipSmokeTest) {
     Step '8/8 冒烟断言（解压 → 真启动 → 读日志）'
 
     $smokeRoot = if ([string]::IsNullOrWhiteSpace($SmokeWorkDir)) {
-        # 必须在仓库外：仓库里出现解压副本会污染 git status，也容易被误当成交付物
-        Join-Path 'C:\Temp' "AICompanion-smoke-$version-$flavor"
+        # 必须在仓库外：仓库里出现解压副本会污染 git status，也容易被误当成交付物。
+        # 用系统临时目录而不是硬编码 C:\Temp：后者在部分机器上不存在（或没有写权限），
+        # 而 GetTempPath 一定存在、且跟随用户的 TEMP 设置。
+        Join-Path ([System.IO.Path]::GetTempPath()) "AICompanion-smoke-$version-$flavor"
     } else {
         $SmokeWorkDir
     }
 
-    if (-not (Test-Path 'C:\Temp') -and $smokeRoot.StartsWith('C:\Temp', [System.StringComparison]::OrdinalIgnoreCase)) {
-        New-Item -ItemType Directory -Path 'C:\Temp' -Force | Out-Null
-    }
-
+    # 说明清楚"这个目录会被整体删除"，免得有人以为它是输出目录。
     Note "临时目录：$smokeRoot（结束后删除）"
     Note "等待上限：${SmokeWaitSeconds}s"
 
@@ -1288,6 +1406,7 @@ if ($SkipSmokeTest) {
         -WorkDir $smokeRoot `
         -ModelPath $SmokeModelPath `
         -RepoModelsDir (Join-Path $root 'models\llm') `
+        -RepoRoot $root `
         -WaitSeconds $SmokeWaitSeconds
 
     foreach ($n in $smoke.Notes) { Note $n }
@@ -1308,6 +1427,7 @@ if ($SkipSmokeTest) {
         Write-Host '  * 有「角色形象缺失」        → Assets\Default\default.png 没进包' -ForegroundColor Red
         Write-Host ''
         Write-Host "包未通过冒烟：$zipPath" -ForegroundColor Red
+        Write-Host "体积/文件数：$(Get-SizeText $zipBytes)，$($entries.Count) 个文件；解压目录：$($smoke.ExtractDir)" -ForegroundColor Red
         exit 1
     }
 }

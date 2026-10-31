@@ -41,6 +41,26 @@ public sealed class LlamaServerController : IAsyncDisposable
 {
     private const int StderrHistoryLines = 60;
 
+    /// <summary>
+    /// 气泡 id（同一个 id 会被覆盖而不是叠加）。
+    /// 用常量而不是散落的字面量：多写一个字母就会变成两条气泡，而编译器不会说话。
+    /// </summary>
+    private const string BubbleOffline = "llm-offline";
+    private const string BubbleOom = "llm-oom";
+    private const string BubbleOomRetry = "gpu-oom-retry";
+
+    /// <summary>自动上下文的上限：再大会把 KV Cache 撑爆显存（手册 §3.3）。</summary>
+    private const int AutoContextCap = 8192;
+
+    /// <summary>自动上下文的下限。</summary>
+    private const int MinAutoContext = 2048;
+
+    /// <summary>模型没声明上下文长度时的兜底值（与 <see cref="LlmConfig.ContextLength"/> 的默认值一致）。</summary>
+    private const int FallbackContextLength = 4096;
+
+    /// <summary>MoE 模型的显存余量系数（激活缓冲比同参数量的稠密模型大）。</summary>
+    private const double MoeExtraFactorValue = 1.15;
+
     private readonly AppConfig _config;
     private readonly GPUMemoryManager _gpu;
     private readonly RuntimeModeState _mode;
@@ -56,6 +76,11 @@ public sealed class LlamaServerController : IAsyncDisposable
     /// 两个线程各自的 Stop → Start 会互相覆盖 _process：后写的把前一个**还活着的**
     /// 句柄顶掉，前一个 llama-server 就成了没人管、还占着显存的孤儿进程。
     /// 注意 SemaphoreSlim 不可重入 —— 持锁期间只能调不加锁的 StopProcessCoreAsync。
+    ///
+    /// 覆盖检查（全部 _process 写入点都在锁内）：
+    ///   * <see cref="StartProcessAsync"/>：StopProcessCoreAsync → 写新句柄 → 失败清理；
+    ///   * <see cref="ClearProcessIfCurrent"/>（只被 StartProcessAsync 调用）；
+    ///   * <see cref="StopProcessCoreAsync"/> 的 finally（两个调用方都先持锁）。
     /// </summary>
     private readonly SemaphoreSlim _processLock = new(1, 1);
 
@@ -63,6 +88,21 @@ public sealed class LlamaServerController : IAsyncDisposable
     private readonly CancellationTokenSource _lifetime = new();
 
     private Process? _process;
+
+    /// <summary>
+    /// 上一次由本类自动算出的上下文长度（0 = 还没自动算过）。
+    ///
+    /// 为什么要记：<see cref="ApplyModelContextLength"/> 会把自动值**写回内存配置**，
+    /// 而 OOM 回退重试与 restore 会再次调用它 —— 那时配置里已经是自动值，
+    /// 若不区分"用户写的"与"我写的"，日志会谎称"配置的上下文超过模型上限"，
+    /// 还会把自动逻辑整个跳过。
+    /// </summary>
+    private int _autoContextLength;
+
+    /// <summary>mmproj 的解析结果缓存（键 = 模型路径 + 配置的 mmproj 值），避免每次启动重扫目录。</summary>
+    private string? _mmprojCacheKey;
+    private string? _mmprojCacheValue;
+
     // 在 Process.Exited 事件线程上无锁读取，必须 volatile，否则可能读到旧值而误报"服务已离线"。
     private volatile bool _intentionalStop;
     private volatile bool _oomDetected;
@@ -105,14 +145,7 @@ public sealed class LlamaServerController : IAsyncDisposable
         {
             lock (_sync)
             {
-                try
-                {
-                    return _process is { HasExited: false };
-                }
-                catch
-                {
-                    return false;
-                }
+                return TryGetHasExited(_process, out var hasExited) && !hasExited;
             }
         }
     }
@@ -134,8 +167,26 @@ public sealed class LlamaServerController : IAsyncDisposable
     /// <summary>
     /// 找多模态投影器：优先 llm.mmproj_path；为空时在模型同目录找 mmproj*.gguf（常见命名）。
     /// 找不到返回 null（纯文本模型，正常情况）。
+    ///
+    /// 结果按"模型路径 + 配置值"缓存：每次启动尝试（含 OOM 回退的每一轮）都会走这条路径，
+    /// 每次都枚举整个模型目录纯属浪费 —— 1.1 GB 模型所在目录往往还躺着别的 gguf。
     /// </summary>
     private string? ResolveMmprojPath()
+    {
+        var modelPath = AppPaths.Resolve(_config.Llm.ModelPath);
+        var cacheKey = modelPath + "\n" + _config.Llm.MmprojPath;
+        if (string.Equals(_mmprojCacheKey, cacheKey, StringComparison.Ordinal))
+        {
+            return _mmprojCacheValue;
+        }
+
+        var resolved = ResolveMmprojPathCore(modelPath);
+        _mmprojCacheKey = cacheKey;
+        _mmprojCacheValue = resolved;
+        return resolved;
+    }
+
+    private string? ResolveMmprojPathCore(string modelPath)
     {
         try
         {
@@ -152,7 +203,6 @@ public sealed class LlamaServerController : IAsyncDisposable
                 return null;
             }
 
-            var modelPath = AppPaths.Resolve(_config.Llm.ModelPath);
             var dir = Path.GetDirectoryName(modelPath);
             if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
             {
@@ -171,19 +221,28 @@ public sealed class LlamaServerController : IAsyncDisposable
             return null;
         }
     }
-    /// <summary>按 GGUF 元数据确定本次使用的上下文长度（config 写 0 = 自动）。</summary>
+    /// <summary>
+    /// 按 GGUF 元数据确定本次使用的上下文长度（config 写 0 = 自动）。
+    ///
+    /// 本方法会**写回内存配置**，因此必须可重入且幂等：OOM 回退重试与 restore 都会再调一次。
+    /// 用 <see cref="_autoContextLength"/> 记住"这个值是自动算出来的"，
+    /// 否则第二次会把它当成用户显式配置 —— 日志谎称"配置的上下文超过模型上限"，
+    /// 而且自动逻辑从此不再生效（恢复服务后上下文可能与模型不再匹配）。
+    /// </summary>
     private void ApplyModelContextLength(string modelPath)
     {
-        const int autoCap = 8192;
-
         var configured = _config.Llm.ContextLength;
-        var hasInfo = GgufMetadataReader.TryReadModelInfo(modelPath, out var arch, out var modelCtx, out var experts, out var error);
+        var userConfigured = configured > 0 && configured != _autoContextLength;
+
+        var hasInfo = GgufMetadataReader.TryReadModelInfo(
+            modelPath, out var arch, out var modelCtx, out var experts, out var error);
 
         if (!hasInfo)
         {
-            if (configured <= 0)
+            if (!userConfigured)
             {
-                _config.Llm.ContextLength = 4096;
+                _config.Llm.ContextLength = FallbackContextLength;
+                _autoContextLength = _config.Llm.ContextLength;
             }
 
             _logger.Warn($"读不到模型元数据（{error}），上下文长度按 {_config.Llm.ContextLength} 处理。");
@@ -191,20 +250,22 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
 
         var archLabel = string.IsNullOrWhiteSpace(arch) ? "未知架构" : arch;
-        if (experts > 0)
+
+        if (experts > 0 && _config.Gpu.MoeExtraFactor <= 1.0)
         {
             _logger.Info($"MoE 模型：{archLabel} 有 {experts} 个专家/层 —— 显存预算会额外留 15% 余量（激活缓冲比稠密模型大）。");
-            _config.Gpu.MoeExtraFactor = 1.15;
+            _config.Gpu.MoeExtraFactor = MoeExtraFactorValue;
         }
 
         var modelLabel = modelCtx > 0 ? modelCtx.ToString() : "未声明";
 
-        if (configured > 0)
+        if (userConfigured)
         {
             if (modelCtx > 0 && configured > modelCtx)
             {
                 _logger.Warn($"配置的上下文 {configured} 超过模型训练上限 {modelCtx}，已夹回 {modelCtx}（{archLabel}）。");
                 _config.Llm.ContextLength = modelCtx;
+                _autoContextLength = 0;
             }
             else
             {
@@ -214,11 +275,13 @@ public sealed class LlamaServerController : IAsyncDisposable
             return;
         }
 
-        var chosen = modelCtx > 0 ? Math.Min(modelCtx, autoCap) : 4096;
-        _config.Llm.ContextLength = Math.Max(2048, chosen);
+        var chosen = modelCtx > 0 ? Math.Min(modelCtx, AutoContextCap) : FallbackContextLength;
+        _config.Llm.ContextLength = Math.Max(MinAutoContext, chosen);
+        _autoContextLength = _config.Llm.ContextLength;
+
         _logger.Info(
             $"模型元数据：架构 {archLabel}，训练上下文 {modelLabel}；上下文自动取 {_config.Llm.ContextLength}" +
-            (modelCtx > autoCap ? $"（上限 {autoCap}，再大会把 KV Cache 撑爆显存）" : string.Empty) + "。");
+            (modelCtx > AutoContextCap ? $"（上限 {AutoContextCap}，再大会把 KV Cache 撑爆显存）" : string.Empty) + "。");
     }
 
     /// <summary>
@@ -227,6 +290,16 @@ public sealed class LlamaServerController : IAsyncDisposable
     /// </summary>
     public async Task<LlamaStartResult> StartAsync(CancellationToken cancellationToken = default)
     {
+        /*
+         * 把"控制器生命周期"接到调用方的 token 上：
+         * 退出程序 / Dispose 时，正在跑的启动流程（可能正卡在长达 startup_timeout_seconds
+         * 的 /health 等待里）会立刻取消并按既有取消路径收掉子进程，
+         * 而不是在后台继续等一个再也没人用的模型。原实现只在 OnProcessExited 里读了
+         * _lifetime，等于这个 CTS 基本没用上。
+         */
+        using var linked = CreateLifetimeLinkedTokenSource(cancellationToken);
+        var token = linked.Token;
+
         /*
          * 对话被关掉是**正常配置**，不是故障：
          * 不碰模型文件、不查显存、不拉进程，直接返回 Disabled。
@@ -262,7 +335,7 @@ public sealed class LlamaServerController : IAsyncDisposable
             ApplyModelContextLength(modelPathEarly);
         }
 
-        var plan = await _gpu.CalculateNglAsync(cancellationToken).ConfigureAwait(false);
+        var plan = await _gpu.CalculateNglAsync(token).ConfigureAwait(false);
 
         // ---- 手册 §6：模型文件缺失属"致命缺失"，必须阻断并清晰提示 ----
         var modelPath = AppPaths.Resolve(_config.Llm.ModelPath);
@@ -274,169 +347,180 @@ public sealed class LlamaServerController : IAsyncDisposable
             return new LlamaStartResult(LlamaStartOutcome.ModelFileMissing, 0, message, plan);
         }
 
-
-        var exePath = AppPaths.Resolve(_config.Llm.ServerExecutablePath);
-        if (!File.Exists(exePath))
+        if (!TryResolveExecutablePath(plan, out var exePath, out var exeFailure))
         {
-            /*
-             * 兜底发现（真实缺陷复盘）：出厂模板曾指向 bin/llama-server.exe，
-             * 而发行包里的后端在 modules\llm-vulkan / modules\llm-cuda ——
-             * 首启必然"未找到 llama-server"，对话完全不可用。
-             *
-             * 这里不能只报错：配置里的路径可能是旧模板、被用户改坏、或换了模块目录名。
-             * 只要 modules\ 下存在一个入口真实的 llm 模块，就按 vulkan → cuda → 其他
-             * 的顺序用它，并把"为什么换"写进日志。覆盖只在内存（准则 9：不回写 config.yaml）。
-             */
-            var fallback = LlmServerDiscovery.TryFind(out var discovery);
-            if (fallback is not null)
-            {
-                _logger.Warn(
-                    $"配置里的 llama-server 路径不存在：{exePath}；" +
-                    $"已自动改用 {fallback.RelativePath}（{fallback.RankLabel}）。" +
-                    $"发现过程：{discovery}。本次仅内存生效，config.yaml 未改动。");
-
-                _config.Llm.ServerExecutablePath = fallback.RelativePath;
-                exePath = fallback.AbsolutePath;
-
-                _bubble.Show(
-                    "llm-exe-fallback",
-                    $"配置里的对话后端路径不存在，已自动改用「{fallback.RelativePath}」。",
-                    BubbleLevel.Info);
-            }
-            else
-            {
-                var message = $"未找到 llama-server 可执行文件：{exePath}";
-                _logger.Error(message);
-                _logger.Error($"兜底发现也没找到可用后端：{discovery}");
-                _bubble.Show("llm-exe-missing", "未找到 llama-server，无法启动对话服务。请检查 config.yaml 的 llm.server_executable_path。", BubbleLevel.Error);
-                return new LlamaStartResult(LlamaStartOutcome.ExecutableMissing, 0, message, plan);
-            }
+            return exeFailure!;
         }
 
-        var ngl = plan.Ngl;
+        return await StartWithOomFallbackAsync(exePath, modelPath, plan, token).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// 解析 llama-server 入口；配置里的路径不存在时走 <c>modules\</c> 的兜底发现。
+    ///
+    /// 兜底发现（真实缺陷复盘）：出厂模板曾指向 <c>bin/llama-server.exe</c>，
+    /// 而发行包里的后端在 <c>modules\llm-vulkan</c> / <c>modules\llm-cuda</c> ——
+    /// 首启必然"未找到 llama-server"，对话完全不可用。
+    ///
+    /// 这里不能只报错：配置里的路径可能是旧模板、被用户改坏、或换了模块目录名。
+    /// 只要 modules\ 下存在一个入口真实的 llm 模块，就按 vulkan → cuda → 其他
+    /// 的顺序用它，并把"为什么换"写进日志。覆盖只在内存（准则 9：不回写 config.yaml）。
+    /// </summary>
+    private bool TryResolveExecutablePath(GpuPlan plan, out string exePath, out LlamaStartResult? failure)
+    {
+        exePath = AppPaths.Resolve(_config.Llm.ServerExecutablePath);
+        failure = null;
+
+        if (File.Exists(exePath))
+        {
+            return true;
+        }
+
+        var fallback = LlmServerDiscovery.TryFind(out var discovery);
+        if (fallback is null)
+        {
+            var message = $"未找到 llama-server 可执行文件：{exePath}";
+            _logger.Error(message);
+            _logger.Error($"兜底发现也没找到可用后端：{discovery}");
+            _bubble.Show("llm-exe-missing", "未找到 llama-server，无法启动对话服务。请检查 config.yaml 的 llm.server_executable_path。", BubbleLevel.Error);
+            failure = new LlamaStartResult(LlamaStartOutcome.ExecutableMissing, 0, message, plan);
+            return false;
+        }
+
+        _logger.Warn(
+            $"配置里的 llama-server 路径不存在：{exePath}；" +
+            $"已自动改用 {fallback.RelativePath}（{fallback.RankLabel}）。" +
+            $"发现过程：{discovery}。本次仅内存生效，config.yaml 未改动。");
+
+        _config.Llm.ServerExecutablePath = fallback.RelativePath;
+        exePath = fallback.AbsolutePath;
+
+        _bubble.Show(
+            "llm-exe-fallback",
+            $"配置里的对话后端路径不存在，已自动改用「{fallback.RelativePath}」。",
+            BubbleLevel.Info);
+
+        return true;
+    }
+
+    /// <summary>
+    /// 起进程 → 等 /health → 失败则按 OOM 回退（ngl 逐次降低）重试。
+    ///
+    /// 从 <see cref="StartAsync"/> 拆出来的理由：这一段自带"取消 → 收掉子进程 → 重抛"
+    /// 的独立语义，和"查显存 / 校验模型文件 / 解析入口"混在一个方法里超过 200 行，
+    /// 读的人很容易漏掉 catch 里的清理逻辑。
+    /// </summary>
+    private async Task<LlamaStartResult> StartWithOomFallbackAsync(
+        string exePath,
+        string modelPath,
+        GpuPlan plan,
+        CancellationToken token)
+    {
+        var ngl = plan.Ngl;
         var maxRetries = Math.Max(0, _config.Gpu.MaxOomRetries);
         LlamaStartResult? lastResult = null;
 
         try
         {
-        for (var attempt = 0; attempt <= maxRetries; attempt++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            _oomDetected = false;
-            _oomEvidence = null;
-            _gpuOffloadUnsupported = false;
-            _handlingOom = false;
-            ClearStderrHistory();
-
-            _logger.Info($"启动 llama-server（第 {attempt + 1} 次尝试，ngl={ngl}）...");
-
-            var started = await StartProcessAsync(exePath, modelPath, ngl).ConfigureAwait(false);
-            if (!started.Success)
+            for (var attempt = 0; attempt <= maxRetries; attempt++)
             {
-                return new LlamaStartResult(LlamaStartOutcome.Failed, ngl, started.Message, plan);
-            }
+                token.ThrowIfCancellationRequested();
 
-            Volatile.Write(ref _currentNgl, ngl);
+                _oomDetected = false;
+                _oomEvidence = null;
+                _gpuOffloadUnsupported = false;
+                _handlingOom = false;
+                ClearStderrHistory();
 
-            var healthy = await WaitForHealthyAsync(
-                TimeSpan.FromSeconds(_config.Llm.StartupTimeoutSeconds),
-                cancellationToken).ConfigureAwait(false);
+                _logger.Info($"启动 llama-server（第 {attempt + 1} 次尝试，ngl={ngl}）...");
 
-            if (healthy)
-            {
-                _bubble.Clear("llm-offline");
-
-                // 实际生效的 ngl 可能低于启动前的计划值（OOM 回退会逐次调低）。
-                // 必须把真实值写回全局运行模式，否则 UI 会继续显示启动前算出来的层数，
-                // 而服务其实跑在更少的层上 —— 又是一次"谎报"。
-                if (ngl != plan.Ngl && _mode.Mode == RuntimeMode.Gpu)
+                var started = await StartProcessAsync(exePath, modelPath, ngl).ConfigureAwait(false);
+                if (!started.Success)
                 {
-                    var actualReason = $"OOM 回退后实际 ngl={ngl}（启动前计划 {plan.Ngl}）";
-                    _logger.Warn(actualReason);
-                    _mode.Update(new RuntimeModeSnapshot(
-                        RuntimeMode.Gpu,
-                        ngl,
-                        plan.FreeVramMb,
-                        plan.TotalLayers,
-                        actualReason));
-
-                    // 已经通过"降层"提示告知过用户，这里收掉那条临时气泡。
-                    _bubble.Clear("gpu-oom-retry");
+                    return new LlamaStartResult(LlamaStartOutcome.Failed, ngl, started.Message, plan);
                 }
 
-                // 只读真实能力：如果这个 llama-server 是 CPU-only 构建，它会把 -ngl 忽略掉。
-                // 那种情况下必须把运行模式如实改回 CPU，而不是让 UI 继续显示"GPU 模式（ngl=N）"——
-                // 否则用户会以为模型跑在 GPU 上，与手册 §2 的"运行模式"语义直接冲突。
-                if (_gpuOffloadUnsupported && _mode.Mode == RuntimeMode.Gpu)
+                Volatile.Write(ref _currentNgl, ngl);
+
+                var healthy = await WaitForHealthyAsync(
+                    TimeSpan.FromSeconds(_config.Llm.StartupTimeoutSeconds),
+                    token).ConfigureAwait(false);
+
+                if (healthy)
                 {
-                    var reason = "llama-server 未编译 GPU 支持，-ngl 被忽略，已改用 CPU 推理";
-                    _logger.Warn(reason);
-                    _mode.Update(new RuntimeModeSnapshot(RuntimeMode.Cpu, 0, plan.FreeVramMb, plan.TotalLayers, reason));
+                    _bubble.Clear(BubbleOffline);
+                    ReportEffectiveRuntime(plan, ngl);
+                    _logger.Info($"llama-server 已就绪（ngl={ngl}）。");
+                    return new LlamaStartResult(LlamaStartOutcome.Started, ngl, "已就绪", plan);
+                }
+
+                // 判定失败原因：OOM 还是单纯没起来。
+                if (_oomDetected)
+                {
+                    var evidence = _oomEvidence ?? "CUDA out of memory";
+                    _logger.Error($"检测到显存不足：{evidence}");
+                    await StopProcessAsync(token).ConfigureAwait(false);
+
+                    var nextNgl = _gpu.NextNglAfterOom(ngl);
+
+                    /*
+                     * 降不下去就没必要再重启一次：
+                     *   手册的公式是"ngl 减 4，但最小 1"，所以 ngl=1 时 nextNgl 还是 1，
+                     *   再跑一轮就是**完全相同的命令行参数**，只会白等
+                     *   oom_retry_delay_seconds × 重试次数，还让用户以为"程序在努力恢复"。
+                     *   ngl=0（纯 CPU 推理）时更糟：nextNgl=1 反而是往上调 GPU 层数。
+                     * 这种情形如实报 OOM 比再失败一次有用。
+                     */
+                    var noLowerStep = ngl <= 1 || nextNgl >= ngl;
+                    if (attempt >= maxRetries || noLowerStep)
+                    {
+                        var message = noLowerStep
+                            ? $"显存不足，且已没有可再降低的 GPU 层数（ngl={ngl}，已重试 {attempt} 次）。{evidence}"
+                            : $"显存不足，回退 {maxRetries} 次后仍失败（ngl={ngl}）。{evidence}";
+
+                        _logger.Error(message);
+                        _bubble.Show(BubbleOom, "显存不足，请关闭其他程序后重试。", BubbleLevel.Error);
+                        return new LlamaStartResult(LlamaStartOutcome.OutOfMemory, ngl, message, plan);
+                    }
+
+                    var delay = TimeSpan.FromSeconds(Math.Max(1, _config.Gpu.OomRetryDelaySeconds));
+                    _logger.Warn($"OOM 回退：ngl {ngl} → {nextNgl}，等待 {delay.TotalSeconds:N0} 秒后重启。");
+
+                    // 必须告诉用户：GPU 层数被调低了，直接影响回复速度。
+                    // 否则程序会"静默地变慢"，用户只会觉得莫名其妙。
                     _bubble.Show(
-                        "llm-cpu-fallback",
-                        "当前 llama-server 没有 GPU 支持，已按 CPU 模式运行。如需 GPU 推理请用 CUDA 重新构建（build_native.bat）。",
-                        BubbleLevel.Warning);
+                        BubbleOomRetry,
+                        $"显存不足，已把 GPU 推理层数从 {ngl} 降到 {nextNgl} 后重试（共可重试 {maxRetries} 次）。",
+                        BubbleLevel.Warning,
+                        TimeSpan.FromSeconds(_config.Ui.BubbleDurationSeconds * 3));
+
+                    await Task.Delay(delay, token).ConfigureAwait(false);
+                    ngl = nextNgl;
+                    continue;
                 }
 
-                _logger.Info($"llama-server 已就绪（ngl={ngl}）。");
-                return new LlamaStartResult(LlamaStartOutcome.Started, ngl, "已就绪", plan);
+                // 非 OOM 的启动失败：端口被占用、参数错误、模型损坏等。
+                var dump = string.Join(" | ", RecentStderr.TakeLast(5));
+                lastResult = new LlamaStartResult(
+                    LlamaStartOutcome.HealthTimeout,
+                    ngl,
+                    $"等待 /health 就绪超时（{_config.Llm.StartupTimeoutSeconds} 秒）。最近输出：{dump}",
+                    plan);
+
+                _logger.Error(lastResult.Message);
+                await StopProcessAsync(token).ConfigureAwait(false);
+                break;
             }
 
-            // 判定失败原因：OOM 还是单纯没起来。
-            if (_oomDetected)
-            {
-                var evidence = _oomEvidence ?? "CUDA out of memory";
-                _logger.Error($"检测到显存不足：{evidence}");
-                await StopProcessAsync(cancellationToken).ConfigureAwait(false);
-
-                if (attempt >= maxRetries)
-                {
-                    var message = $"显存不足，回退 {maxRetries} 次后仍失败（ngl={ngl}）。";
-                    _logger.Error(message);
-                    _bubble.Show("llm-oom", "显存不足，请关闭其他程序后重试。", BubbleLevel.Error);
-                    return new LlamaStartResult(LlamaStartOutcome.OutOfMemory, ngl, message, plan);
-                }
-
-                var nextNgl = _gpu.NextNglAfterOom(ngl);
-                var delay = TimeSpan.FromSeconds(Math.Max(1, _config.Gpu.OomRetryDelaySeconds));
-                _logger.Warn($"OOM 回退：ngl {ngl} → {nextNgl}，等待 {delay.TotalSeconds:N0} 秒后重启。");
-
-                // 必须告诉用户：GPU 层数被调低了，直接影响回复速度。
-                // 否则程序会"静默地变慢"，用户只会觉得莫名其妙。
-                _bubble.Show(
-                    "gpu-oom-retry",
-                    $"显存不足，已把 GPU 推理层数从 {ngl} 降到 {nextNgl} 后重试（共可重试 {maxRetries} 次）。",
-                    BubbleLevel.Warning,
-                    TimeSpan.FromSeconds(_config.Ui.BubbleDurationSeconds * 3));
-
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                ngl = nextNgl;
-                continue;
-            }
-
-            // 非 OOM 的启动失败：端口被占用、参数错误、模型损坏等。
-            var dump = string.Join(" | ", RecentStderr.TakeLast(5));
-            lastResult = new LlamaStartResult(
-                LlamaStartOutcome.HealthTimeout,
-                ngl,
-                $"等待 /health 就绪超时（{_config.Llm.StartupTimeoutSeconds} 秒）。最近输出：{dump}",
-                plan);
-
-            _logger.Error(lastResult.Message);
-            await StopProcessAsync(cancellationToken).ConfigureAwait(false);
-            break;
-        }
-
-        var final = lastResult ?? new LlamaStartResult(LlamaStartOutcome.Failed, ngl, "启动失败。", plan);
-        _bubble.Show("llm-offline", "LLM 服务未就绪。可查看日志后手动重启程序。", BubbleLevel.Error);
-        return final;
+            var final = lastResult ?? new LlamaStartResult(LlamaStartOutcome.Failed, ngl, "启动失败。", plan);
+            _bubble.Show(BubbleOffline, "LLM 服务未就绪。可查看日志后手动重启程序。", BubbleLevel.Error);
+            return final;
         }
         catch (OperationCanceledException)
         {
-            // 启动过程被取消（例如用户退出程序）：必须把已经拉起来的子进程收掉，
-            // 否则 llama-server 会变成一个占着显存的孤儿进程，而且没人再能管它。
+            // 启动过程被取消（用户退出程序 / Dispose / 回退等待期间被叫停）：
+            // 必须把已经拉起来的子进程收掉，否则 llama-server 会变成一个占着显存的孤儿进程，
+            // 而且句柄只存在 _process 里，没人再能管它。
             _logger.Warn("LLM 启动被取消，正在终止已启动的 llama-server。");
             try
             {
@@ -451,6 +535,69 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 启动成功后把"实际生效的 ngl / 是否回落到 CPU"如实写回全局运行模式。
+    ///
+    /// 单独成方法：这里有两个互相独立的"谎报"点（OOM 降层后仍显示计划层数、
+    /// CPU-only 构建忽略了 -ngl 却仍显示 GPU 模式），各自带一段理由。
+    /// </summary>
+    private void ReportEffectiveRuntime(GpuPlan plan, int ngl)
+    {
+        // 实际生效的 ngl 可能低于启动前的计划值（OOM 回退会逐次调低）。
+        // 必须把真实值写回全局运行模式，否则 UI 会继续显示启动前算出来的层数，
+        // 而服务其实跑在更少的层上 —— 又是一次"谎报"。
+        if (ngl != plan.Ngl && _mode.Mode == RuntimeMode.Gpu)
+        {
+            var actualReason = $"OOM 回退后实际 ngl={ngl}（启动前计划 {plan.Ngl}）";
+            _logger.Warn(actualReason);
+            _mode.Update(new RuntimeModeSnapshot(
+                RuntimeMode.Gpu,
+                ngl,
+                plan.FreeVramMb,
+                plan.TotalLayers,
+                actualReason));
+
+            // 已经通过"降层"提示告知过用户，这里收掉那条临时气泡。
+            _bubble.Clear(BubbleOomRetry);
+        }
+
+        // 只读真实能力：如果这个 llama-server 是 CPU-only 构建，它会把 -ngl 忽略掉。
+        // 那种情况下必须把运行模式如实改回 CPU，而不是让 UI 继续显示"GPU 模式（ngl=N）"——
+        // 否则用户会以为模型跑在 GPU 上，与手册 §2 的"运行模式"语义直接冲突。
+        if (_gpuOffloadUnsupported && _mode.Mode == RuntimeMode.Gpu)
+        {
+            const string reason = "llama-server 未编译 GPU 支持，-ngl 被忽略，已改用 CPU 推理";
+            _logger.Warn(reason);
+            _mode.Update(new RuntimeModeSnapshot(RuntimeMode.Cpu, 0, plan.FreeVramMb, plan.TotalLayers, reason));
+            _bubble.Show(
+                "llm-cpu-fallback",
+                "当前 llama-server 没有 GPU 支持，已按 CPU 模式运行。如需 GPU 推理请用 CUDA 重新构建（build_native.bat）。",
+                BubbleLevel.Warning);
+        }
+    }
+
+    /// <summary>
+    /// 把调用方的 token 与控制器生命周期合成一个 token。
+    ///
+    /// <see cref="_lifetime"/> 在 <see cref="DisposeAsync"/> 里先 Cancel 再 Dispose；
+    /// 若此处正好读到已 Dispose 的 CTS，Token 会抛 ObjectDisposedException ——
+    /// 那种情况下按"已取消"处理才是对的（启动流程不该继续跑）。
+    /// </summary>
+    private CancellationTokenSource CreateLifetimeLinkedTokenSource(CancellationToken cancellationToken)
+    {
+        CancellationToken lifetimeToken;
+        try
+        {
+            lifetimeToken = _lifetime.Token;
+        }
+        catch (ObjectDisposedException)
+        {
+            lifetimeToken = new CancellationToken(canceled: true);
+        }
+
+        return CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetimeToken);
+    }
+
     /// <summary>轮询 /health 直到就绪或超时（手册 §1.6 步骤 4）。</summary>
     public async Task<bool> WaitForHealthyAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
@@ -462,9 +609,12 @@ public sealed class LlamaServerController : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
 
             // 进程若已退出，就没必要继续等了。
+            // 用 TryGetHasExited 而不是直接读 _process.HasExited：并发 Start 时
+            // _process 可能指向一个还没 Start() 的 Process，那个属性会抛
+            // InvalidOperationException，把整条启动链带崩。
             lock (_sync)
             {
-                if (_process is { HasExited: true })
+                if (TryGetHasExited(_process, out var hasExited) && hasExited)
                 {
                     return false;
                 }
@@ -525,7 +675,7 @@ public sealed class LlamaServerController : IAsyncDisposable
             return false;
         }
 
-        _bubble.Clear("llm-offline");
+        _bubble.Clear(BubbleOffline);
         _bubble.Show(
             "gpu-yielded",
             unloadedViaApi
@@ -561,7 +711,7 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
 
         _logger.Error($"恢复 llama-server 失败：{result.Message}");
-        _bubble.Show("llm-offline", "恢复 LLM 服务失败，请手动重启程序。", BubbleLevel.Error);
+        _bubble.Show(BubbleOffline, "恢复 LLM 服务失败，请手动重启程序。", BubbleLevel.Error);
         return false;
     }
 
@@ -636,6 +786,27 @@ public sealed class LlamaServerController : IAsyncDisposable
         try
         {
             await StopProcessCoreAsync(CancellationToken.None).ConfigureAwait(false);
+
+            /*
+             * 上一个进程没被杀掉时**绝不能**再起一个新的：
+             * 两个 llama-server 会抢同一个端口（--port）与同一份显存，
+             * 结果不是新进程绑定失败，就是两个都在跑、谁也没人管。
+             * StopProcessCoreAsync 只在"确认已退出"时才清空 _process，
+             * 所以这里读到非空就说明它没走干净。
+             */
+            Process? leftover;
+            lock (_sync)
+            {
+                leftover = _process;
+            }
+
+            if (leftover is not null && !(TryGetHasExited(leftover, out var leftoverExited) && leftoverExited))
+            {
+                _logger.Error(
+                    $"上一个 llama-server（PID={SafeId(leftover)}）没能终止，为避免抢同一端口/显存，本次不再启动新进程。");
+                process.Dispose();
+                return (false, $"上一个 llama-server（PID={SafeId(leftover)}）未能终止，已放弃本次启动。");
+            }
 
             lock (_sync)
             {
@@ -791,7 +962,7 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
 
         _logger.Error($"llama-server 意外退出（exit code {exitCode}），按设计不做自动恢复。");
-        _bubble.Show("llm-offline", "LLM 服务已离线。请查看日志后手动重启程序。", BubbleLevel.Error);
+        _bubble.Show(BubbleOffline, "LLM 服务已离线。请查看日志后手动重启程序。", BubbleLevel.Error);
     }
 
     /// <summary>
@@ -831,37 +1002,107 @@ public sealed class LlamaServerController : IAsyncDisposable
             return;
         }
 
+        var pid = SafeId(process);
+        var stopped = false;
+
         try
         {
-            if (!process.HasExited)
+            if (!TryGetHasExited(process, out var alreadyExited) || !alreadyExited)
             {
-                _logger.Info($"正在终止 llama-server（PID={process.Id}）...");
+                _logger.Info($"正在终止 llama-server（PID={pid}）...");
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
             }
+
+            stopped = true;
         }
         catch (Exception ex)
         {
-            _logger.Warn($"终止 llama-server 时出现异常：{ex.Message}");
+            _logger.Warn($"终止 llama-server（PID={pid}）时出现异常：{ex.Message}");
         }
-        finally
-        {
-            lock (_sync)
-            {
-                if (ReferenceEquals(_process, process))
-                {
-                    _process = null;
-                }
-            }
 
-            try
+        if (!stopped && !(TryGetHasExited(process, out var gone) && gone))
+        {
+            /*
+             * Kill 失败（拒绝访问 / 进程正在退出 / 等待被取消）时**不能**把句柄扔掉。
+             *
+             * 原实现无论成败都置 null 并 Dispose：那个 llama-server 立刻变成
+             * "没人管、仍占着显存和端口"的孤儿进程，连"再杀一次"的机会都没有，
+             * 后续的 unload 还会如实报失败却什么也做不了。
+             * 这里保留 _process 与句柄，让下一次 Stop / 退出流程可以重试；
+             * StartProcessAsync 也会因为读到这个非空句柄而拒绝再起第二个进程。
+             */
+            _logger.Error(
+                $"未能确认 llama-server（PID={pid}）已退出：保留进程句柄以便重试终止。" +
+                "该进程可能仍占用显存与端口，必要时请用任务管理器结束它。");
+            return;
+        }
+
+        lock (_sync)
+        {
+            if (ReferenceEquals(_process, process))
             {
-                process.Dispose();
+                _process = null;
             }
-            catch
-            {
-                // 忽略。
-            }
+        }
+
+        try
+        {
+            process.Dispose();
+        }
+        catch
+        {
+            // 忽略：句柄已经没用了，Dispose 抛异常也不影响后续。
+        }
+    }
+
+    /// <summary>
+    /// 读 <see cref="Process.HasExited"/> 的兜底版本。
+    ///
+    /// 这个属性会在两种真实存在的并发窗口里抛异常：
+    ///   * Process 对象已创建但还没 <c>Start()</c>（InvalidOperationException）——
+    ///     并发 Start 时别的线程可能正好读到它；
+    ///   * 句柄已被释放。
+    /// 返回 false 表示"状态未知"：调用方一律按"可能还在跑"处理（宁可多试一次 Kill，
+    /// 也不要误判成已退出而留下孤儿进程）。
+    /// </summary>
+    private static bool TryGetHasExited(Process? process, out bool hasExited)
+    {
+        hasExited = true;
+
+        if (process is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            hasExited = process.HasExited;
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            // 还没 Start：它不可能是"正在跑的服务"。
+            hasExited = true;
+            return false;
+        }
+        catch (Exception)
+        {
+            hasExited = false;
+            return false;
+        }
+    }
+
+    /// <summary>读 PID 的兜底版本（进程对象可能还没 Start 或已失效）。</summary>
+    private static string SafeId(Process process)
+    {
+        try
+        {
+            return process.Id.ToString();
+        }
+        catch (Exception)
+        {
+            return "未知";
         }
     }
 
