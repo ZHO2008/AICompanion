@@ -46,6 +46,14 @@ public sealed class ModuleManifest
     public string? Requires { get; set; }
 
     public string? Entry { get; set; }
+
+    /// <summary>
+    /// 模块自带的模型文件（相对模块目录或仓库根）。缺失时沿用 config.yaml 里的路径。
+    ///
+    /// 用途：asr 模块把 ggml 模型一起打包时，不必让用户再手改 asr.model_path
+    /// （程序绝不回写 config.yaml，见准则 9），运行时优先用模块目录里的这份。
+    /// </summary>
+    public string? Model { get; set; }
 }
 
 /// <summary>一个已识别模块的只读快照。</summary>
@@ -257,6 +265,132 @@ public static class ModuleRegistry
         }
 
         return $"modules/{stored}/{entry}";
+    }
+
+    /// <summary>
+    /// 模块引擎标识前缀：<c>module:&lt;目录名&gt;</c>。
+    ///
+    /// 运行时由 TTS 引擎工厂识别成"复用内置 Piper 实现、但入口/模型指向模块目录"，
+    /// 这样"模块接进运行时"不需要新的引擎实现，也就不用碰 TTS 的对外接口与状态机。
+    /// </summary>
+    public const string ModuleEnginePrefix = "module:";
+
+    /// <summary>模块接入运行时的解析结果。路径都是**相对仓库根**的写法，便于原样写进日志。</summary>
+    public sealed record ModuleRuntimeBinding(
+        string DirectoryName,
+        string? EntryRelativePath,
+        string? ModelRelativePath)
+    {
+        /// <summary>形如 <c>module:piper-mod</c>，写进 <c>TtsConfig.Engine</c>。</summary>
+        public string EngineId => ModuleEnginePrefix + DirectoryName;
+    }
+
+    /// <summary>
+    /// 给 AppHost 用：把「已启用」的某一类模块解析成可接入运行时的路径。
+    ///
+    /// 约定（宁可保守，绝不因模块问题影响启动）：
+    ///   - 没启用 / 目录不存在 / 缺 module.json / manifest 解析失败 / kind 不符 → 返回 null 绑定；
+    ///   - entry 指向的文件不存在、或根本没写 entry 且目录里没有 *.exe → 该字段为 null；
+    ///   - model 字段指向的文件不存在 → 该字段为 null；
+    ///   - 两者都为 null 时返回 null 绑定，让调用方继续用内置实现。
+    ///
+    /// 第二个返回值一律说明"找到了什么、缺了什么、为什么回退"，调用方无论用不用都写进日志。
+    /// </summary>
+    public static (ModuleRuntimeBinding? Binding, string Description) ResolveEnabledRuntime(ModuleKind kind)
+    {
+        try
+        {
+            var stored = AppearanceStore.LoadEnabledModule(KindKey(kind));
+            if (string.IsNullOrWhiteSpace(stored))
+            {
+                return (null, $"Assets\\appearance.json 里没有启用的{KindLabel(kind)}模块");
+            }
+
+            var directory = Path.Combine(ModulesRoot, stored);
+            if (!Directory.Exists(directory))
+            {
+                return (null, $"已启用的模块目录 modules/{stored} 不存在");
+            }
+
+            var manifestPath = Path.Combine(directory, "module.json");
+            if (!File.Exists(manifestPath))
+            {
+                return (null, $"modules/{stored} 里没有 module.json");
+            }
+
+            var manifest = ReadManifest(manifestPath);
+            if (manifest is null)
+            {
+                return (null, $"modules/{stored}/module.json 解析失败（格式错误）");
+            }
+
+            var declaredKind = InferKind(manifest, directory);
+            if (declaredKind != kind)
+            {
+                return (null, $"modules/{stored} 的 kind 是 {KindKey(declaredKind ?? ModuleKind.Llm)}，与{KindLabel(kind)}模块不符");
+            }
+
+            var notes = new List<string>();
+
+            string? entryRelative = null;
+            var entryName = ResolveEntryName(directory, manifest);
+            if (entryName is null)
+            {
+                notes.Add("manifest 没写 entry，目录里也没有 *.exe");
+            }
+            else if (!File.Exists(Path.Combine(directory, entryName)))
+            {
+                notes.Add($"entry \"{entryName}\" 指向的文件不存在");
+            }
+            else
+            {
+                entryRelative = $"modules/{stored}/{entryName.Replace('\\', '/')}";
+            }
+
+            string? modelRelative = null;
+            if (string.IsNullOrWhiteSpace(manifest.Model))
+            {
+                notes.Add("manifest 没写 model");
+            }
+            else
+            {
+                var modelName = manifest.Model!.Trim().Replace('\\', '/');
+                var inModule = Path.Combine(directory, modelName.Replace('/', Path.DirectorySeparatorChar));
+
+                if (File.Exists(inModule))
+                {
+                    modelRelative = $"modules/{stored}/{modelName}";
+                }
+                else if (File.Exists(AppPaths.Resolve(modelName)))
+                {
+                    // 也允许写成仓库根相对路径（例如 models/asr/ggml-base.bin）。
+                    modelRelative = modelName;
+                }
+                else
+                {
+                    notes.Add($"model \"{modelName}\" 指向的文件不存在");
+                }
+            }
+
+            var detail = string.Join("；", new[]
+            {
+                entryRelative is null ? null : $"入口={entryRelative}",
+                modelRelative is null ? null : $"模型={modelRelative}",
+                notes.Count == 0 ? null : $"缺：{string.Join("、", notes)}",
+            }.Where(part => part is not null));
+
+            if (entryRelative is null && modelRelative is null)
+            {
+                return (null, detail);
+            }
+
+            return (new ModuleRuntimeBinding(stored, entryRelative, modelRelative), detail);
+        }
+        catch (Exception ex)
+        {
+            // 任何意外都按"没有可用模块"处理：模块不该有能力让程序起不来。
+            return (null, $"解析模块时异常：{ex.Message}");
+        }
     }
 
     /// <summary>只读：列出某类模块（用于「后端选择」下拉）。</summary>

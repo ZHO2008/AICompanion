@@ -159,9 +159,9 @@ public sealed class TrayIcon : IDisposable
     {
         try
         {
-            // 必须传 onAppearanceChanged（与主窗口打开设置面板时一致）：
-            // 否则从托盘改完"水平微调"/气泡时长并保存后，角色上不会有任何变化（要重启才生效）。
-            var settings = new SettingsWindow(_host, _bubbles, _window.ApplyUserAppearanceSettings)
+            // 外观类的"立即生效"由 AppHost.RequestAppearanceChange 通知主窗口，
+            // 设置面板不再需要传入主窗口的方法引用（从托盘与从功能栏打开走同一条路）。
+            var settings = new SettingsWindow(_host, _bubbles)
             {
                 Owner = _window.IsVisible ? _window : null,
             };

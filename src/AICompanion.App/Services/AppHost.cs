@@ -55,6 +55,15 @@ public sealed class AppHost : IAsyncDisposable
 
     private FileLogger? _rootLogger;
 
+    /// <summary>
+    /// config.yaml 里 live2d.default_model_path 的**原值**。
+    ///
+    /// 界面把 Live2D 关掉时会把内存里的 DefaultModelPath 清空（与启动时的折算一致），
+    /// 之后用户在设置面板重新打开 Live2D，要靠它把路径恢复回去 —— 否则只能重启。
+    /// 只记在内存，config.yaml 一个字都不改（准则 9）。
+    /// </summary>
+    private string _configuredLive2dModelPath = string.Empty;
+
     /// <param name="dispatcher">
     /// UI 线程调度器。AppHost 自身不做封送（需要 UI 线程的组件在各自内部处理，
     /// 例如 BubbleNotifier），因此这里**只保留参数、不再存字段**：
@@ -138,6 +147,43 @@ public sealed class AppHost : IAsyncDisposable
 
     /// <summary>带播放事件的播放器（动作调度与口型同步订阅它）。</summary>
     public ObservableAudioPlayer ObservableAudio { get; private set; } = null!;
+
+    /// <summary>
+    /// 设置面板改完外观项后的"立即应用"通知。MainWindow 在构造时订阅、关闭时退订。
+    ///
+    /// 为什么放在 AppHost 而不是让设置面板直接持有 MainWindow：
+    ///   - 设置面板不必知道窗口类型（托盘里打开面板时也一样）；
+    ///   - 主窗口已关闭 / 还没就绪时这里没有订阅者，天然就降级为"下次启动生效"。
+    /// </summary>
+    public event EventHandler<AppearanceChange>? AppearanceChangeRequested;
+
+    /// <summary>是否有主窗口在监听外观变更（设置面板据此如实标注"已生效"还是"下次启动生效"）。</summary>
+    public bool HasAppearanceTarget => AppearanceChangeRequested is not null;
+
+    /// <summary>
+    /// 请求把外观设置立即应用到已打开的桌宠窗口。
+    /// 没有订阅者（主窗口未就绪或已关闭）时只记 Debug，绝不抛出 —— 改设置不该让程序崩。
+    /// </summary>
+    public void RequestAppearanceChange(AppearanceChange change)
+    {
+        var handler = AppearanceChangeRequested;
+
+        if (handler is null)
+        {
+            Logger.Debug($"外观设置变更（{change}）没有可用的桌宠窗口接收，降级为下次启动生效。");
+            return;
+        }
+
+        try
+        {
+            handler(this, change);
+        }
+        catch (Exception ex)
+        {
+            // 订阅者（主窗口）已经各自吞异常，这里再兜一层，保证设置面板的调用栈干净。
+            Logger.Warn($"应用外观设置变更失败（{change}，不影响运行，下次启动仍会生效）：{ex.Message}");
+        }
+    }
 
     /// <summary>启动过程中发现的问题（用于启动后一次性提示与设置面板展示）。</summary>
     public IReadOnlyList<string> StartupProblems => _startupProblems;
@@ -233,6 +279,10 @@ public sealed class AppHost : IAsyncDisposable
         ApplyTtsEnginePreference();
         ApplyAiTogglePreference();
         ApplySettingsPanelPreferences();
+
+        // 「拓展」页启用的 tts / asr 模块接进运行时：必须赶在 TTSManager / ASR 构造之前，
+        // 因为它们会在构造时读取 tts.engine、tts.piper.*、asr.model_path 等配置。
+        ApplyModuleRuntimePreferences();
 
         NvidiaSmi = new NvidiaSmi(Logger);
         RuntimeMode = new RuntimeModeState();
@@ -510,6 +560,9 @@ public sealed class AppHost : IAsyncDisposable
     {
         try
         {
+            // 先记下 config.yaml 的原值：后面的 ReapplyLive2dPreference 可能把它清空。
+            _configuredLive2dModelPath = Config.Live2d.DefaultModelPath;
+
             ApplyText("llm.model_path", AppearanceStore.LoadLlmModelPath(), Config.Llm.ModelPath,
                 value => Config.Llm.ModelPath = value);
 
@@ -571,16 +624,7 @@ public sealed class AppHost : IAsyncDisposable
             }
 
             // Live2D 开关：关掉就把模型路径清空，MainWindow 会按既有降级链落到静态立绘。
-            if (AppearanceStore.LoadLive2dEnabled() is false)
-            {
-                Logger.Info("按界面偏好关闭 Live2D 渲染（下次启动使用静态立绘）。");
-                Config.Live2d.DefaultModelPath = string.Empty;
-            }
-            else
-            {
-                ApplyText("live2d.default_model_path", AppearanceStore.LoadLive2dModelPath(),
-                    Config.Live2d.DefaultModelPath, value => Config.Live2d.DefaultModelPath = value);
-            }
+            ReapplyLive2dPreference();
 
             // 启用中的对话模块：入口可执行文件替换 config.yaml 的 llm.server_executable_path。
             var moduleEntry = ModuleRegistry.ResolveEnabledEntryRelative(ModuleKind.Llm);
@@ -624,6 +668,187 @@ public sealed class AppHost : IAsyncDisposable
                 $"按界面偏好把 {name} 由 {current} 覆盖为 {preferred.Value}" +
                 "（来源 Assets\\appearance.json，未改动 config.yaml）。");
         }
+    }
+
+    /// <summary>
+    /// 按 Assets\appearance.json 重算 Live2D 的两项内存配置（开关 → 模型路径）。
+    ///
+    /// 两个调用点：启动时（<see cref="ApplySettingsPanelPreferences"/>），
+    /// 以及设置面板改完「外观 → Live2D 开关 / 模型」之后（MainWindow 收到
+    /// <see cref="RequestAppearanceChange"/> 先调这里，再走既有的 LoadAvatar 重建链）。
+    ///
+    /// 只改内存，绝不回写 config.yaml（准则 9）。
+    /// </summary>
+    public void ReapplyLive2dPreference()
+    {
+        try
+        {
+            if (AppearanceStore.LoadLive2dEnabled() is false)
+            {
+                if (!string.IsNullOrEmpty(Config.Live2d.DefaultModelPath))
+                {
+                    Logger.Info("按界面偏好关闭 Live2D 渲染，改用静态立绘（仅改内存，config.yaml 未改动）。");
+                }
+
+                Config.Live2d.DefaultModelPath = string.Empty;
+                return;
+            }
+
+            var preferred = AppearanceStore.LoadLive2dModelPath();
+            var target = string.IsNullOrWhiteSpace(preferred) ? _configuredLive2dModelPath : preferred!;
+
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                // 连 config.yaml 都没配模型路径：保持现状，让 MainWindow 走它自己的降级链。
+                return;
+            }
+
+            var current = Config.Live2d.DefaultModelPath;
+            if (string.Equals(target, current, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            Config.Live2d.DefaultModelPath = target;
+
+            Logger.Info(string.IsNullOrEmpty(current)
+                ? $"按界面偏好重新启用 Live2D 渲染，模型路径 \"{target}\"（仅改内存，config.yaml 未改动）。"
+                : $"按界面偏好把 live2d.default_model_path 由 \"{current}\" 覆盖为 \"{target}\"" +
+                  "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+        }
+        catch (Exception ex)
+        {
+            // 外观偏好算不出来不该影响启动/继续运行：保持当前内存配置即可。
+            Logger.Warn($"重算 Live2D 外观偏好失败（不影响启动，沿用当前值）：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 把「拓展」页里启用的 tts / asr 模块接进运行时。
+    ///
+    /// 之前这两类模块只影响设置面板的门禁，运行时完全不看它们 —— 用户"启用了 TTS 模块"，
+    /// 实际出声的还是 config.yaml 里的引擎，且日志里没有任何说明。
+    ///
+    /// 现在：
+    ///   - tts 模块有可用入口 → 引擎标识改成 <c>module:&lt;目录名&gt;</c>，并把 piper 的入口/模型
+    ///     指向模块目录（只改内存）；没有入口 → 保持内置引擎，记一条 Info 说明原因；
+    ///   - asr 模块带模型 → 优先用模块里的模型路径；带 ai_asr 动态库入口 → 优先用它；
+    ///     两者都没有 → 保持现状并说明原因。
+    ///
+    /// 任何异常都只记 Warn，绝不让启动失败（模块是可选增强，不是必需件）。
+    /// </summary>
+    private void ApplyModuleRuntimePreferences()
+    {
+        try
+        {
+            ApplyTtsModulePreference();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"接入语音合成模块失败（不影响启动，继续使用内置引擎 {Config.Tts.Engine}）：{ex.Message}");
+        }
+
+        try
+        {
+            ApplyAsrModulePreference();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"接入语音识别模块失败（不影响启动，继续使用内置 ASR）：{ex.Message}");
+        }
+    }
+
+    private void ApplyTtsModulePreference()
+    {
+        var (binding, detail) = ModuleRegistry.ResolveEnabledRuntime(ModuleKind.Tts);
+
+        if (binding?.EntryRelativePath is null)
+        {
+            Logger.Info(
+                $"语音合成模块未接入运行时（{detail}），继续使用内置 TTS 引擎 \"{Config.Tts.Engine}\"。");
+            return;
+        }
+
+        var previousEngine = Config.Tts.Engine;
+
+        // 复用 Piper 实现：模块提供的是 piper 兼容的命令行入口（piper.exe 或自定义 exe），
+        // 因此不改 TTS 的对外接口与状态机，只把入口/模型路径指到模块目录。
+        Config.Tts.Piper.ExecutablePath = binding.EntryRelativePath;
+
+        if (binding.ModelRelativePath is { } moduleModel)
+        {
+            Config.Tts.Piper.ModelPath = moduleModel;
+        }
+
+        Config.Tts.Engine = binding.EngineId;
+
+        var engineNote = string.Equals(previousEngine, binding.EngineId, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : $"（原配置引擎 \"{previousEngine}\"）";
+
+        Logger.Info(
+            $"语音合成模块已接入运行时：{detail}；引擎标识 {binding.EngineId}{engineNote}。" +
+            "实现复用内置 Piper，入口须接受 piper 的 --model / --output_file 参数，" +
+            "否则合成失败时会按既有降级链继续降到 SAPI。仅改内存，config.yaml 未改动。");
+    }
+
+    private void ApplyAsrModulePreference()
+    {
+        var (binding, detail) = ModuleRegistry.ResolveEnabledRuntime(ModuleKind.Asr);
+
+        if (binding is null)
+        {
+            Logger.Info(
+                $"语音识别模块未接入运行时（{detail}），继续使用内置 ASR（库 {Config.Asr.LibraryPath}，" +
+                $"模型 {Config.Asr.ModelPath}）。");
+            return;
+        }
+
+        var applied = new List<string>();
+
+        if (binding.ModelRelativePath is { } moduleModel &&
+            !string.Equals(moduleModel, Config.Asr.ModelPath, StringComparison.OrdinalIgnoreCase))
+        {
+            var previousModel = Config.Asr.ModelPath;
+            Config.Asr.ModelPath = moduleModel;
+            applied.Add($"模型 \"{previousModel}\" → \"{moduleModel}\"");
+        }
+
+        if (binding.EntryRelativePath is { } moduleEntry)
+        {
+            if (moduleEntry.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.Equals(moduleEntry, Config.Asr.LibraryPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    var previousLibrary = Config.Asr.LibraryPath;
+                    Config.Asr.LibraryPath = moduleEntry;
+                    applied.Add($"动态库 \"{previousLibrary}\" → \"{moduleEntry}\"");
+                }
+            }
+            else
+            {
+                /*
+                 * 可执行程序入口（如 whisper-cli.exe）当前 ASR 用不上：
+                 * 运行时走的是 ai_asr.dll 桥接 + ggml 模型，没有"拉起外部识别进程"的实现。
+                 * 与其猜它的命令行格式，不如保持内置行为，并在日志里说清楚为什么没用它。
+                 */
+                Logger.Info(
+                    $"语音识别模块的入口 {moduleEntry} 是可执行程序，当前实现只支持 ai_asr 动态库 + ggml 模型，" +
+                    "已忽略该入口（保持内置行为）。");
+            }
+        }
+
+        if (applied.Count == 0)
+        {
+            Logger.Info(
+                $"语音识别模块已启用但无需改动运行配置（{detail}），继续使用内置 ASR" +
+                $"（库 {Config.Asr.LibraryPath}，模型 {Config.Asr.ModelPath}）。");
+            return;
+        }
+
+        Logger.Info(
+            $"语音识别模块已接入运行时：{detail}；" + string.Join("；", applied) +
+            "（来源 Assets\\appearance.json 里启用的模块，未改动 config.yaml）。");
     }
 
     /// <summary>HealthMonitor 在休眠唤醒后用它尝试重启一次失败的服务。</summary>

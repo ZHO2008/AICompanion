@@ -54,12 +54,32 @@ public partial class SettingsWindow : Window
     private readonly AppHost _host;
     private readonly BubbleNotifier _bubbles;
     private readonly DispatcherTimer _refreshTimer;
-    private readonly Action? _onAppearanceChanged;
 
     /// <summary>滑块的自动保存防抖：拖动时每个像素都写一次 appearance.json 没有必要。</summary>
     private readonly DispatcherTimer _saveTimer;
 
-    private Action? _pendingSave;
+    /// <summary>
+    /// 外观项的"立即应用"防抖（180ms ≥ 要求的 150ms）。
+    ///
+    /// 为什么必须防抖：缩放/不透明度/立绘这几项一变就要让主窗口重算，
+    /// 而立绘/Live2D 会触发 LoadAvatar —— 每像素重建一次 Live2D 是灾难。
+    /// 与落盘的 400ms 防抖分开：应用要快（用户立刻看到），落盘可以合并。
+    /// </summary>
+    private readonly DispatcherTimer _applyTimer;
+
+    /// <summary>
+    /// 待落盘的改动，按"改的是哪一项"分槽。
+    ///
+    /// 以前是单槽（一个 Action 字段）：400ms 防抖窗口里先后动两个滑块时，
+    /// 后一个会把前一个**覆盖掉**，直接丢掉一次修改（实测：先拖缩放再拖不透明度，
+    /// 缩放值根本没写进 appearance.json）。分槽后同一个 key 只保留最后一次，
+    /// 不同 key 互不影响。
+    /// </summary>
+    private readonly Dictionary<string, Action> _pendingSaves = new(StringComparer.Ordinal);
+
+    /// <summary>待应用的变更（多次改动合并成一次）。</summary>
+    private AppearanceChange? _pendingApply;
+
     private string _versionText = "0.0.0";
 
     /// <summary>显存查询是否在飞行中（防止 2 秒定时器叠加 nvidia-smi 子进程）。</summary>
@@ -81,11 +101,15 @@ public partial class SettingsWindow : Window
 
     private SettingsPage _page = SettingsPage.Appearance;
 
-    public SettingsWindow(AppHost host, BubbleNotifier bubbles, Action? onAppearanceChanged = null)
+    /// <summary>
+    /// 外观类的"立即生效"不再走构造参数里的回调，而是统一用
+    /// <see cref="AppHost.RequestAppearanceChange"/> 通知已打开的桌宠窗口
+    /// （主窗口没开时它会自己降级为"下次启动生效"并记 Debug）。
+    /// </summary>
+    public SettingsWindow(AppHost host, BubbleNotifier bubbles)
     {
         _host = host;
         _bubbles = bubbles;
-        _onAppearanceChanged = onAppearanceChanged;
 
         InitializeComponent();
 
@@ -115,24 +139,21 @@ public partial class SettingsWindow : Window
         _saveTimer.Tick += (_, _) =>
         {
             _saveTimer.Stop();
-            var pending = _pendingSave;
-            _pendingSave = null;
 
-            if (pending is null)
+            if (_pendingSaves.Count == 0)
             {
                 return;
             }
 
-            try
-            {
-                pending();
-                MarkAutoSaved();
-            }
-            catch (Exception ex)
-            {
-                _host.Logger.Warn($"自动保存设置失败：{ex.Message}");
-            }
+            FlushPendingSave();
+            MarkAutoSaved();
         };
+
+        _applyTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(180),
+        };
+        _applyTimer.Tick += (_, _) => FlushPendingApply();
 
         Loaded += async (_, _) =>
         {
@@ -144,9 +165,12 @@ public partial class SettingsWindow : Window
 
         Closed += (_, _) =>
         {
+            // 关闭前先把这次拖动的结果落盘、再应用一次，避免"拖完立刻关面板"丢掉效果。
             FlushPendingSave();
+            FlushPendingApply();
             _refreshTimer.Stop();
             _saveTimer.Stop();
+            _applyTimer.Stop();
         };
 
         LoadStaticInfo();
@@ -992,15 +1016,20 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        // 立绘 / Live2D 模型由主窗口在启动时读取；这里只落盘，界面上如实标注生效时机。
+        // 立绘 / Live2D 模型由主窗口重建形象（LoadAvatar 的三级兜底链）；这里只落盘并请求立即应用。
         AppearanceStore.SaveLive2dModelPath(option.Live2dPath);
         AppearanceStore.SaveImagePath(option.ImagePath);
 
-        AppearanceHintText.Text = option.Live2dPath is not null || option.ImagePath is not null
-            ? $"已保存：{(option.Live2dPath ?? option.ImagePath)}（下次启动加载）"
-            : "已恢复为 config.yaml 里的外观（下次启动生效）";
+        AppearanceHintText.Text = option.Live2dPath is not null
+            ? $"已选择 Live2D：{option.Live2dPath}（换模型需重启后加载）"
+            : option.ImagePath is not null
+                ? $"已选择立绘：{option.ImagePath}（关闭 Live2D 后由它接管显示）"
+                : "已恢复为 config.yaml 里的外观，正在应用到桌宠…";
 
-        _host.Logger.Info($"设置面板选择外观资源：{option.Live2dPath ?? option.ImagePath ?? "跟随 config.yaml"}（下次启动加载）。");
+        _host.Logger.Info($"设置面板选择外观资源：{option.Live2dPath ?? option.ImagePath ?? "跟随 config.yaml"}。");
+
+        // 立绘与开关即时生效；换 Live2D **模型**仍需重启（渲染器不支持热重建，见 Live2DRenderer 的说明）。
+        ScheduleApply(AppearanceChange.Avatar);
     }
 
     private void OnLive2dChanged(object sender, RoutedEventArgs e)
@@ -1014,10 +1043,12 @@ public partial class SettingsWindow : Window
         AppearanceStore.SaveLive2dEnabled(enabled);
 
         AppearanceHintText.Text = enabled
-            ? "Live2D 已启用（下次启动生效）"
-            : "Live2D 已关闭，将使用静态立绘（下次启动生效）";
+            ? "Live2D 已启用，正在应用到桌宠…"
+            : "Live2D 已关闭，正在切换为静态立绘…";
 
-        _host.Logger.Info($"设置面板{(enabled ? "启用" : "关闭")} Live2D（下次启动生效）。");
+        _host.Logger.Info($"设置面板{(enabled ? "启用" : "关闭")} Live2D。");
+
+        ScheduleApply(AppearanceChange.Avatar);
     }
 
     private void OnScaleChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1028,8 +1059,9 @@ public partial class SettingsWindow : Window
         }
 
         UpdateAppearanceLabels();
-        AppearanceHintText.Text = $"缩放 {ScaleSlider.Value:P0} 已保存（下次启动生效）";
-        ScheduleSave(() => AppearanceStore.SaveScale(Math.Round(ScaleSlider.Value, 2)));
+        AppearanceHintText.Text = $"缩放 {ScaleSlider.Value:P0}，正在应用到桌宠…";
+        ScheduleSave("scale", () => AppearanceStore.SaveScale(Math.Round(ScaleSlider.Value, 2)));
+        ScheduleApply(AppearanceChange.Scale);
     }
 
     private void OnBubbleSecondsChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1039,7 +1071,8 @@ public partial class SettingsWindow : Window
             UpdateAppearanceLabels();
             _bubbles.DefaultDuration = TimeSpan.FromSeconds(Math.Max(1, BubbleSecondsSlider.Value));
             AppearanceHintText.Text = "气泡时长已即时生效，正在自动保存…";
-            ScheduleSave(() => AppearanceStore.SaveBubbleSeconds(Math.Round(BubbleSecondsSlider.Value)));
+            ScheduleSave("bubbleSeconds", () => AppearanceStore.SaveBubbleSeconds(Math.Round(BubbleSecondsSlider.Value)));
+            ScheduleApply(AppearanceChange.Preferences);
         }
     }
 
@@ -1048,9 +1081,9 @@ public partial class SettingsWindow : Window
         if (_appearanceInitialized)
         {
             UpdateAppearanceLabels();
-            _onAppearanceChanged?.Invoke();
-            AppearanceHintText.Text = "不透明度已即时生效，正在自动保存…";
-            ScheduleSave(() => AppearanceStore.SaveTransparentOpacity(Math.Round(OpacitySlider.Value, 2)));
+            AppearanceHintText.Text = "不透明度正在应用…";
+            ScheduleSave("transparentOpacity", () => AppearanceStore.SaveTransparentOpacity(Math.Round(OpacitySlider.Value, 2)));
+            ScheduleApply(AppearanceChange.Preferences);
         }
     }
 
@@ -1059,9 +1092,9 @@ public partial class SettingsWindow : Window
         if (_appearanceInitialized)
         {
             UpdateAppearanceLabels();
-            _onAppearanceChanged?.Invoke();
-            AppearanceHintText.Text = "模型水平微调已即时生效，正在自动保存…";
-            ScheduleSave(() => AppearanceStore.SaveHorizontalOffset(Math.Round(HorizontalOffsetSlider.Value, 3)));
+            AppearanceHintText.Text = "模型水平微调正在应用…";
+            ScheduleSave("horizontalOffset", () => AppearanceStore.SaveHorizontalOffset(Math.Round(HorizontalOffsetSlider.Value, 3)));
+            ScheduleApply(AppearanceChange.Preferences);
         }
     }
 
@@ -1070,6 +1103,10 @@ public partial class SettingsWindow : Window
         // 归零即"回到自动居中"
         HorizontalOffsetSlider.Value = 0;
         UpdateAppearanceLabels();
+
+        // 值本来就是 0 时 ValueChanged 不会触发，这里补一次，保证"点归零就回正"。
+        ScheduleSave("horizontalOffset", () => AppearanceStore.SaveHorizontalOffset(0));
+        ScheduleApply(AppearanceChange.Preferences);
     }
 
     private void OnHidePet(object sender, RoutedEventArgs e)
@@ -1250,7 +1287,7 @@ public partial class SettingsWindow : Window
         }
 
         TtsVoiceText.Text = $"全局默认音色：{_host.Config.Tts.DefaultVoice}（界面覆盖层，config.yaml 未改动）";
-        ScheduleSave(() => AppearanceStore.SaveTtsVoice(TtsVoiceBox.Text.Trim()));
+        ScheduleSave("ttsVoice", () => AppearanceStore.SaveTtsVoice(TtsVoiceBox.Text.Trim()));
     }
 
     private void OnTtsSpeedChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1264,7 +1301,7 @@ public partial class SettingsWindow : Window
         var speed = Math.Round(TtsSpeedSlider.Value, 2);
 
         _host.Config.Tts.GptSoVits.SpeedFactor = speed;
-        ScheduleSave(() => AppearanceStore.SaveTtsSpeed(Math.Round(TtsSpeedSlider.Value, 2)));
+        ScheduleSave("ttsSpeed", () => AppearanceStore.SaveTtsSpeed(Math.Round(TtsSpeedSlider.Value, 2)));
     }
 
     private void OnAsrCaptureChanged(object sender, SelectionChangedEventArgs e)
@@ -1340,7 +1377,7 @@ public partial class SettingsWindow : Window
         var minutes = Math.Round(IdleMinutesSlider.Value);
 
         _host.Config.Idle.IdleMinutes = minutes;
-        ScheduleSave(() => AppearanceStore.SaveIdleMinutes(Math.Round(IdleMinutesSlider.Value)));
+        ScheduleSave("idleMinutes", () => AppearanceStore.SaveIdleMinutes(Math.Round(IdleMinutesSlider.Value)));
     }
 
     private void OnIdleCooldownChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1354,7 +1391,7 @@ public partial class SettingsWindow : Window
         var minutes = Math.Round(IdleCooldownSlider.Value);
 
         _host.Config.Idle.MaintenanceCooldownMinutes = minutes;
-        ScheduleSave(() => AppearanceStore.SaveMaintenanceCooldownMinutes(Math.Round(IdleCooldownSlider.Value)));
+        ScheduleSave("idleCooldown", () => AppearanceStore.SaveMaintenanceCooldownMinutes(Math.Round(IdleCooldownSlider.Value)));
     }
 
     private void OnStartPositionChanged(object sender, TextChangedEventArgs e)
@@ -1370,7 +1407,7 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        ScheduleSave(() =>
+        ScheduleSave("startPosition", () =>
         {
             var (currentX, currentY) = ParseStartPosition();
             if (currentX is not null && currentY is not null)
@@ -2216,11 +2253,15 @@ public partial class SettingsWindow : Window
 
     /// <summary>
     /// 自动保存（防抖）：滑块拖动与文本框输入会连续触发，等 400ms 再写一次文件。
-    /// 运行时效果仍然即时生效，只有落盘被合并。
     /// </summary>
-    private void ScheduleSave(Action save)
+    /// <param name="key">
+    /// 改的是哪一项：同一项只保留最后一次改动，不同项各自保留
+    /// （见 <see cref="_pendingSaves"/> 的说明）。
+    /// </param>
+    /// <param name="save">真正落盘的动作。</param>
+    private void ScheduleSave(string key, Action save)
     {
-        _pendingSave = save;
+        _pendingSaves[key] = save;
         _saveTimer.Stop();
         _saveTimer.Start();
     }
@@ -2229,17 +2270,74 @@ public partial class SettingsWindow : Window
     {
         _saveTimer.Stop();
 
-        var pending = _pendingSave;
-        _pendingSave = null;
+        if (_pendingSaves.Count == 0)
+        {
+            return;
+        }
 
-        try
+        var pending = _pendingSaves.Values.ToArray();
+        _pendingSaves.Clear();
+
+        // 逐项独立 try：一项写失败不能连累其它项。
+        foreach (var save in pending)
         {
-            pending?.Invoke();
+            try
+            {
+                save();
+            }
+            catch (Exception ex)
+            {
+                _host.Logger.Warn($"保存设置失败（已跳过该项，其余继续）：{ex.Message}");
+            }
         }
-        catch (Exception ex)
+    }
+
+    /// <summary>
+    /// 安排一次"立即应用"：拖动滑块期间连续调用只会应用最后一次（180ms 防抖）。
+    ///
+    /// 不同类型的改动合并策略：同一类就保持，出现两类就升级成 <see cref="AppearanceChange.All"/> ——
+    /// 反正应用走的都是同一批既有方法，多做一次比漏做安全。
+    /// </summary>
+    private void ScheduleApply(AppearanceChange change)
+    {
+        var previous = _pendingApply;
+
+        _pendingApply = previous is null || previous == change
+            ? change
+            : AppearanceChange.All;
+
+        _applyTimer.Stop();
+        _applyTimer.Start();
+    }
+
+    /// <summary>
+    /// 立刻应用待处理的变更（防抖计时到点 / 关面板时调用）。
+    ///
+    /// 顺序很关键：主窗口是从 Assets\appearance.json 读值的，
+    /// 所以必须**先**把这次拖动的结果落盘，再去通知它 — 否则它读到的是上一帧的值。
+    /// </summary>
+    private void FlushPendingApply()
+    {
+        _applyTimer.Stop();
+
+        var change = _pendingApply;
+        _pendingApply = null;
+
+        if (change is null)
         {
-            _host.Logger.Warn($"关闭设置面板前保存失败：{ex.Message}");
+            return;
         }
+
+        FlushPendingSave();
+
+        _host.RequestAppearanceChange(change.Value);
+
+        // 如实标注：主窗口不在（已关闭 / 未就绪）时说明要等下次启动。
+        AppearanceHintText.Text = !_host.HasAppearanceTarget
+            ? "已保存（桌宠窗口当前不可达，下次启动生效）。"
+            : change.Value == AppearanceChange.Avatar
+                ? "已保存，并已应用到桌宠（换 Live2D 模型 / 首次启用需重启）。"
+                : "已保存，并已即时应用到桌宠。";
     }
 
     private void MarkAutoSaved()
@@ -2292,7 +2390,11 @@ public partial class SettingsWindow : Window
             _host.Config.Tts.GptSoVits.SpeedFactor = Math.Round(TtsSpeedSlider.Value, 2);
 
             _bubbles.DefaultDuration = TimeSpan.FromSeconds(Math.Max(1, BubbleSecondsSlider.Value));
-            _onAppearanceChanged?.Invoke();
+
+            // 覆盖层已删掉：取消排队中的变更，直接按"全部回到出厂默认"请求一次即时应用。
+            _applyTimer.Stop();
+            _pendingApply = null;
+            _host.RequestAppearanceChange(AppearanceChange.All);
 
             // 模块启用状态也在同一个文件里，清掉后重新按"第一个可用模块"识别。
             _ = RefreshEnvironmentAndModulesAsync();

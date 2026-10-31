@@ -53,8 +53,35 @@ public static class TTSEngineFactory
         _ => engineType,
     };
 
+    /// <summary>
+    /// 「拓展」页启用的 tts 模块的引擎标识前缀：<c>module:&lt;目录名&gt;</c>。
+    ///
+    /// 为什么用新标识而不是悄悄改成 piper：状态栏、日志与设置面板都要如实说出
+    /// "现在用的是哪个模块"，否则用户看到 piper 却不知道路径已被模块覆盖。
+    /// 实现上仍然复用 <see cref="PiperEngine"/>（模块提供 piper 兼容的命令行入口），
+    /// 因此 TTS 的对外接口与状态机一行都不用改。
+    /// </summary>
+    public const string ModulePrefix = "module:";
+
+    /// <summary>是否是模块引擎标识。</summary>
+    public static bool IsModuleEngine(string engineType) =>
+        engineType.StartsWith(ModulePrefix, StringComparison.OrdinalIgnoreCase);
+
     public static ITTSEngine Create(string engineType, TtsEngineContext context)
     {
+        if (IsModuleEngine(engineType))
+        {
+            // 入口与模型路径已由 AppHost 按模块目录写进 config.Tts.Piper（只改内存）。
+            // 这里只负责把它们落到 Piper 实现上，并说明"为什么是 piper"。
+            var moduleName = engineType[ModulePrefix.Length..];
+
+            context.Logger.Info(
+                $"TTS 引擎标识 {engineType} → 复用 Piper 实现；" +
+                $"入口 {context.Config.Tts.Piper.ExecutablePath}，模型 {context.Config.Tts.Piper.ModelPath}（来自模块 {moduleName}）。");
+
+            return new PiperEngine(context.Config, context.Logger);
+        }
+
         if (string.Equals(engineType, Chatterbox, StringComparison.OrdinalIgnoreCase))
         {
             return new ChatterboxEngine(context.Config, context.Logger);

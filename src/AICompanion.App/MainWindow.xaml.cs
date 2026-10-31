@@ -198,6 +198,18 @@ public partial class MainWindow : Window
         _unsubscribe.Add(() => _bubbles.Changed -= onBubblesChanged);
         RefreshBubbles();
 
+        /*
+         * 设置面板改完「外观」页后要立即生效，走 AppHost 的通知（不直接持有设置窗口）。
+         *
+         * 挂在构造里而不是 OnHostReady：设置面板最早也要等启动完成后才能打开，
+         * 这时窗口已经存在；提前挂上可以顺带覆盖"启动过程中就收到通知"的情况。
+         * 关窗时退订（见 OnClosed），于是之后的通知自然降级为"下次启动生效"。
+         */
+        EventHandler<AppearanceChange> onAppearanceChangeRequested =
+            (_, change) => ApplyAppearanceChange(change);
+        _host.AppearanceChangeRequested += onAppearanceChangeRequested;
+        _unsubscribe.Add(() => _host.AppearanceChangeRequested -= onAppearanceChangeRequested);
+
         // Live2D 三级兜底在窗口构造阶段就要算出来，否则启动早期会显示空白。
         // 注意此时 config.yaml 还没加载，AppPaths 仍指向 exe 目录，
         // 因此先做一次 provisional 预览（不告警），OnHostReady 里再用真实根目录正式加载。
@@ -742,15 +754,36 @@ public partial class MainWindow : Window
     {
         AvatarImage.Source = bitmap;
 
-        // 有 Live2D 渲染器时静态图只作为后备，不能显示出来盖在模型上
-        AvatarImage.Visibility = _live2d is null ? Visibility.Visible : Visibility.Collapsed;
+        /*
+         * 有 Live2D 渲染器时静态图只作为后备，不能显示出来盖在模型上。
+         *
+         * 但设置面板**运行中**关掉 Live2D 之后，渲染器仍然存在
+         * （原生对象既不能释放也不能重建，见 Live2DRenderer.StopRenderLoop 的说明），
+         * 这时必须让立绘显示出来、把 Live2D 控件收起来，否则用户会觉得"关不掉"。
+         * 因此判据从"有没有渲染器"改成"渲染器是不是当前该显示的那一路"。
+         */
+        var live2dShowing = _live2d is not null && AppearanceStore.LoadLive2dEnabled() is not false;
+
+        AvatarImage.Visibility = live2dShowing ? Visibility.Collapsed : Visibility.Visible;
         FallbackBackground.Visibility = Visibility.Collapsed;
+
+        if (!live2dShowing && Live2DHost is not null)
+        {
+            Live2DHost.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void ShowFallbackAvatar(string detail)
     {
         AvatarImage.Source = null;
         AvatarImage.Visibility = Visibility.Collapsed;
+
+        // 与 SetAvatarImage 同理：纯色兜底时，只有"Live2D 不该显示"才把它的控件收起来。
+        if (Live2DHost is not null &&
+            (_live2d is null || AppearanceStore.LoadLive2dEnabled() is false))
+        {
+            Live2DHost.Visibility = Visibility.Collapsed;
+        }
 
         FallbackText.Text = $"{_host.Config.Ui.FallbackDisplayName}\n\n{detail}";
         FallbackBackground.Visibility = Visibility.Visible;
@@ -1955,7 +1988,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var settings = new SettingsWindow(_host, _bubbles, ApplyUserAppearanceSettings)
+            var settings = new SettingsWindow(_host, _bubbles)
             {
                 Owner = IsVisible ? this : null,
             };
@@ -1968,6 +2001,109 @@ public partial class MainWindow : Window
             _host.Logger.Error($"打开设置面板失败：{ex.Message}", ex);
             _bubbles.Show("settings-failed", "打开设置面板失败，详见日志。", BubbleLevel.Error);
         }
+    }
+
+    /// <summary>
+    /// 设置面板改完「外观」页后的立即应用入口（由 <see cref="AppHost.RequestAppearanceChange"/> 触发）。
+    ///
+    /// 这里只做分发，具体动作全部复用窗口已有的方法：
+    ///   - 缩放 → <see cref="ApplyInitialScale"/>（与启动时同一套"界面偏好 → config.yaml → 自动适配"解析）；
+    ///   - 立绘 / Live2D → 先让 AppHost 重算内存里的 Live2D 偏好，再走 <see cref="LoadAvatar"/> 的降级链；
+    ///   - 其余三项 → <see cref="ApplyUserAppearanceSettings"/>（气泡时长 / 不透明度 / 水平微调）。
+    ///
+    /// 任何一步失败都只记 Warn：设置已经落盘，最坏情况就是"下次启动生效"，不该弹错也不该崩。
+    /// </summary>
+    private void ApplyAppearanceChange(AppearanceChange change)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(() => ApplyAppearanceChange(change)));
+            return;
+        }
+
+        if (!_hostReady || !IsLoaded)
+        {
+            // 窗口还没就绪或已经关闭：设置照样存在 appearance.json 里，下次启动生效。
+            _host.Logger.Debug($"收到外观变更（{change}）时主窗口未就绪或已关闭，跳过即时应用。");
+            return;
+        }
+
+        try
+        {
+            switch (change)
+            {
+                case AppearanceChange.Avatar:
+                    ApplyAvatarAppearance();
+                    break;
+
+                case AppearanceChange.Scale:
+                    ApplyInitialScale();
+                    break;
+
+                case AppearanceChange.All:
+                    ApplyAvatarAppearance();
+                    ApplyInitialScale();
+                    break;
+            }
+
+            ApplyUserAppearanceSettings();
+            _host.Logger.Info($"外观设置已即时应用（{change}）。");
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Warn($"即时应用外观设置失败（{change}，已保存的偏好下次启动仍会生效）：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 立绘 / Live2D 开关改完后的即时应用。
+    ///
+    /// Live2D 开关在 config.yaml 里没有对应键（启动时由 AppHost 折成模型路径），
+    /// 因此先让 AppHost 用同一套规则重算内存配置，再走 <see cref="LoadAvatar"/> 已有的三级降级链 ——
+    /// 不在窗口里另写一套"开关 → 用哪张图"的判断。
+    ///
+    /// 能即时做与不能即时做的，分三种情况：
+    ///   - 关掉 Live2D：<see cref="LoadAvatar"/> 选一张静态立绘，SetAvatarImage 会把 Live2D 控件收起来；
+    ///   - 重新打开（本次运行本来就在用 Live2D）：把控件挂回去即可 —— **绝不重建渲染器**
+    ///     （Live2DRenderer 的注释写明原生对象重建会在 lapp / nvoglv64 里崩）；
+    ///   - 启动时 Live2D 是关着的：那次运行根本没有渲染器，新建一个等于运行中重建，
+    ///     风险不低于崩溃，因此如实提示"重启后生效"，不硬来。
+    /// </summary>
+    private void ApplyAvatarAppearance()
+    {
+        _host.ReapplyLive2dPreference();
+
+        // 静态立绘的挑选（含"关掉 Live2D 时改用立绘"）走既有降级链。
+        LoadAvatar();
+
+        if (AppearanceStore.LoadLive2dEnabled() is false)
+        {
+            _host.Logger.Info("已关闭 Live2D 显示，改用静态立绘（渲染器保留，不销毁）。");
+            return;
+        }
+
+        if (_live2d is null)
+        {
+            _host.Logger.Info("Live2D 已在偏好里启用，但本次运行没有可复用的渲染器（启动时是关着的）；重建渲染器需重启后生效。");
+            _bubbles.Show(
+                "live2d-restart",
+                "Live2D 已启用，重启程序后生效。",
+                BubbleLevel.Info,
+                TimeSpan.FromSeconds(6));
+            return;
+        }
+
+        /*
+         * 本次运行本来就在用 Live2D：控件可能在"关掉"那一步被收起过，这里挂回来继续渲染。
+         * 换模型不在这里做（需要重建渲染器），设置面板的提示文案已如实说明。
+         */
+        Live2DHost.Child = _live2d.View;
+        Live2DHost.Visibility = Visibility.Visible;
+        AvatarImage.Visibility = Visibility.Collapsed;
+        FallbackBackground.Visibility = Visibility.Collapsed;
+        _live2d.Start();
+
+        _host.Logger.Info("Live2D 保持显示（复用本次运行已建好的渲染器，未重建）。");
     }
 
     /// <summary>

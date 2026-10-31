@@ -176,7 +176,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="模型 / 立绘" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="Live2D 模型优先于静态立绘；保存后下次启动加载" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="Live2D 模型优先于静态立绘；换模型需重启，立绘与开关即时生效" />
                                     </StackPanel>
                                     <ComboBox x:Name="AppearanceAssetCombo"
                                               Grid.Column="1"
@@ -191,7 +191,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="Live2D 渲染" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="关闭后使用静态立绘（下次启动生效）" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="关闭后立刻切回静态立绘" />
                                     </StackPanel>
                                     <CheckBox x:Name="Live2dCheck"
                                               Grid.Column="1"
@@ -207,7 +207,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="缩放等级" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="角色整体大小（下次启动生效）" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="角色整体大小，拖动即刻生效" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="ScaleSlider"
