@@ -51,23 +51,57 @@ public static class UserGpuPreferences
     /// <summary>「高性能」的取值。带分号是 Windows 自己的写法（多个设置以分号分隔）。</summary>
     public const string HighPerformanceValue = "GpuPreference=2;";
 
-    /// <summary>读当前值（不存在返回空串）。</summary>
+    /// <summary>日志/气泡里回显既有值时的长度上限（注册表值最长 16 K，原样回显会把界面撑坏）。</summary>
+    private const int MaxDisplayValueLength = 120;
+
+    /// <summary>读当前值（不存在返回空串）。读失败也返回空串 —— 需要区分两者时用 <see cref="TryRead"/>。</summary>
     public static string Read(string exePath)
+        => TryRead(exePath, out var value) ? value : string.Empty;
+
+    /// <summary>
+    /// 读当前值，并区分"确实没有值"与"读失败"（键被 ACL/策略锁死）。
+    ///
+    /// 为什么必须区分：以前读失败与"没有值"都返回空串，于是
+    /// <see cref="EnsureHighPerformance"/> 会认为"用户没设过"直接写入 <c>GpuPreference=2;</c>
+    /// —— 读不到的那一刻正好把用户手动设的「省电」覆盖掉。现在读失败 → 不写。
+    /// </summary>
+    public static bool TryRead(string exePath, out string value)
     {
+        value = string.Empty;
+
         if (string.IsNullOrWhiteSpace(exePath))
         {
-            return string.Empty;
+            return false;
         }
 
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(KeyPath);
-            return (key?.GetValue(exePath) as string)?.Trim() ?? string.Empty;
+
+            // 键不存在不算失败：这就是"从没设过"的正常状态。
+            if (key is null)
+            {
+                return true;
+            }
+
+            value = (key.GetValue(exePath) as string)?.Trim() ?? string.Empty;
+            return true;
         }
         catch (Exception)
         {
+            return false;
+        }
+    }
+
+    /// <summary>把可能很长的注册表值压成一行可显示文本（日志与气泡共用，避免两处各写一份截断）。</summary>
+    public static string ShortenForDisplay(string? value, int max = MaxDisplayValueLength)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
             return string.Empty;
         }
+
+        return value.Length <= max ? value : value[..max] + "…";
     }
 
     /// <summary>判断一个既存值是否已经等价于「高性能」。</summary>
@@ -78,10 +112,21 @@ public static class UserGpuPreferences
             return false;
         }
 
-        // Windows 可能写成 "GpuPreference=2" / "GpuPreference=2;" / 前后带空格，统一规模后再比。
-        var normalized = value.Replace(" ", string.Empty).TrimEnd(';');
+        /*
+         * Windows 可能写成 "GpuPreference=2" / "GpuPreference=2;" / 前后带空格；
+         * 也可能在同一个值里带上别的设置（实测有 "GpuPreference=2;SwapChainBufferCount=3;"）。
+         * 以前整串相等才认，遇到后者会误判成"用户手动设的"从而永远不自动修复。
+         * 现在按 ';' 切开逐项比，空白容错与原来一致。
+         */
+        foreach (var token in value.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (string.Equals(token.Replace(" ", string.Empty), "GpuPreference=2", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
 
-        return string.Equals(normalized, "GpuPreference=2", StringComparison.OrdinalIgnoreCase);
+        return false;
     }
 
     /// <summary>
@@ -96,7 +141,19 @@ public static class UserGpuPreferences
                 GpuPreferenceState.WriteFailed, string.Empty, string.Empty, "取不到程序自身的完整路径");
         }
 
-        var existing = Read(exePath);
+        /*
+         * 先读后写，且必须区分"真的没有值"与"读失败"：
+         * 读失败时若当成"用户没设过"直接写入 GpuPreference=2;，
+         * 正好会把用户手动设的「省电」覆盖掉（读不到的那一刻就是覆盖的时刻）。
+         */
+        if (!TryRead(exePath, out var existing))
+        {
+            return new GpuPreferenceOutcome(
+                GpuPreferenceState.WriteFailed,
+                exePath,
+                string.Empty,
+                "读取现有显卡偏好失败；为避免覆盖你手动设置的显卡偏好，本次没有写入");
+        }
 
         if (LooksLikeHighPerformance(existing))
         {
@@ -159,7 +216,9 @@ public static class UserGpuPreferences
 
         try
         {
-            var module = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            // Process 持有进程句柄：用完必须 Dispose，否则每次兜底都漏一个句柄。
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            var module = process.MainModule?.FileName;
 
             if (!string.IsNullOrWhiteSpace(module))
             {

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
 
 namespace AICompanion.App.Services;
@@ -69,15 +70,54 @@ public static class GpuInventory
     /// </summary>
     private const int MaxAdapterSubKeys = 16;
 
-    /// <summary>枚举本机的显示适配器（不含虚拟显示器驱动）。失败返回空清单。</summary>
-    public static IReadOnlyList<GpuAdapterInfo> ListAdapters()
+    /// <summary>
+    /// <see cref="EnumDisplayDevices"/> 的索引上限。与子键上限语义不同（这是 GDI 设备序号），
+    /// 数值相同只是巧合 —— 枚举本身在第一个失败的序号处就 break，16 只是防御性上限。
+    /// </summary>
+    private const int MaxDisplayDevices = 16;
+
+    /// <summary>
+    /// 单个字符串字段的长度上限。注册表字符串值最大可到 16 K 字符，
+    /// 原样拼进日志/气泡会把一行日志撑到几 KB；显卡名不可能超过这个长度。
+    /// </summary>
+    private const int MaxFieldLength = 160;
+
+    /// <summary>0000…000F：显卡实例子键名。预生成，避免每次探测都做 16 次 <c>i.ToString("D4")</c>。</summary>
+    private static readonly string[] AdapterSubKeyNames = CreateAdapterSubKeyNames();
+
+    /// <summary>
+    /// 虚拟显示器驱动的名字关键字。**必须是静态字段**：写在方法里就会在每次调用时
+    /// 新分配一个数组，而本方法在一次探测里会被调 2×16 次。
+    /// </summary>
+    private static readonly string[] VirtualDisplayMarkers =
     {
-        var adapters = ReadAdaptersFromRegistry();
+        "Idd", "Indirect", "Basic Display", "Basic Render", "Mirror", "Remote Display",
+        "Virtual Display", "DisplayLink", "Parsec", "Sunshine", "UsbDisplay",
+    };
+
+    /// <summary>与具体型号无关的品牌/通用词（<see cref="CoreTokens"/> 用）。同样只分配一次。</summary>
+    private static readonly HashSet<string> GenericDeviceTokens = new(StringComparer.Ordinal)
+    {
+        "nvidia", "amd", "ati", "intel", "geforce", "radeon", "graphics", "controller",
+        "family", "series", "laptop", "desktop", "gpu", "corporation", "inc", "corp", "ltd",
+        "tm", "r", "c", "ve", "pcie", "sse2", "compatibility", "profile", "context", "mesa",
+    };
+
+    /// <summary>
+    /// 枚举本机的显示适配器（不含虚拟显示器驱动）。失败返回空清单。
+    /// </summary>
+    /// <param name="diagnostics">
+    /// 可选：收集"某一项为什么没读到"的说明（异常类型 + 消息）。不传就完全不记录 ——
+    /// 每个 try/catch 仍然只降级不抛出，但不再把 ACL/结构异常静默吞掉。
+    /// </param>
+    public static IReadOnlyList<GpuAdapterInfo> ListAdapters(ICollection<string>? diagnostics = null)
+    {
+        var adapters = ReadAdaptersFromRegistry(diagnostics);
 
         if (adapters.Count == 0)
         {
             // 注册表读不到（权限/被清理工具改坏）时退回 GDI：只有名字与 PnP id，没有驱动版本。
-            adapters.AddRange(ReadAdaptersFromGdi());
+            adapters.AddRange(ReadAdaptersFromGdi(diagnostics));
         }
 
         return adapters;
@@ -86,7 +126,15 @@ public static class GpuInventory
     /// <summary>
     /// 主显示器所在的显示适配器（DWM 合成的那块）。探测失败返回 null。
     /// </summary>
-    public static GpuAdapterInfo? FindPrimaryDisplayAdapter()
+    /// <param name="known">
+    /// 可选：调用方已经读到的适配器清单。传进来就不会再把注册表 + GDI 走一遍
+    /// （<see cref="ListAdapters"/> 每次都是 16 次 OpenSubKey + 最多 16 次 EnumDisplayDevices）。
+    /// 传 null 时按需自行探测。
+    /// </param>
+    /// <param name="diagnostics">同 <see cref="ListAdapters"/>；只在真的自探测时才可能写入。</param>
+    public static GpuAdapterInfo? FindPrimaryDisplayAdapter(
+        IReadOnlyList<GpuAdapterInfo>? known = null,
+        ICollection<string>? diagnostics = null)
     {
         string? deviceName = FindPrimaryMonitorDeviceName();
 
@@ -106,11 +154,11 @@ public static class GpuInventory
         var name = device.Value.Name;
 
         // 驱动版本只有注册表有：按 PnP id（其次按名字）把两边的同一条目合起来。
-        var known = ListAdapters();
-        var match = known.FirstOrDefault(a =>
+        var inventory = known ?? ListAdapters(diagnostics);
+        var match = inventory.FirstOrDefault(a =>
                 !string.IsNullOrWhiteSpace(a.PnpId) &&
                 string.Equals(a.PnpId, pnpId, StringComparison.OrdinalIgnoreCase))
-            ?? known.FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
+            ?? inventory.FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
 
         var vendor = match?.Vendor ?? VendorOf($"{name} {pnpId}");
 
@@ -196,13 +244,15 @@ public static class GpuInventory
             return true;
         }
 
-        string[] markers =
+        foreach (var marker in VirtualDisplayMarkers)
         {
-            "Idd", "Indirect", "Basic Display", "Basic Render", "Mirror", "Remote Display",
-            "Virtual Display", "DisplayLink", "Parsec", "Sunshine", "UsbDisplay",
-        };
+            if (name.Contains(marker, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
 
-        return markers.Any(m => name.Contains(m, StringComparison.OrdinalIgnoreCase));
+        return false;
     }
 
     /// <summary>
@@ -226,6 +276,9 @@ public static class GpuInventory
             return false;
         }
 
+        // 归一化是这条路径里最贵的操作（小写 + 逐字符扫描 + 建字符串）。
+        // 以前 ModelTokens / CoreTokens 各自内部又归一化一遍，一次比较最多归一化 6 次；
+        // 现在只做 2 次，token 函数直接吃归一化结果。
         var na = NormalizeDeviceName(a);
         var nb = NormalizeDeviceName(b);
 
@@ -239,8 +292,8 @@ public static class GpuInventory
             return true;
         }
 
-        var ta = ModelTokens(a);
-        var tb = ModelTokens(b);
+        var ta = ModelTokens(na);
+        var tb = ModelTokens(nb);
 
         if (ta.Count > 0 && tb.Count > 0)
         {
@@ -249,8 +302,8 @@ public static class GpuInventory
 
         if (ta.Count > 0 || tb.Count > 0)
         {
-            var ca = CoreTokens(a);
-            var cb = CoreTokens(b);
+            var ca = CoreTokens(na);
+            var cb = CoreTokens(nb);
 
             return ca.Count > 0 && cb.Count > 0 && (ca.IsSubsetOf(cb) || cb.IsSubsetOf(ca));
         }
@@ -258,38 +311,49 @@ public static class GpuInventory
         return na.Contains(nb, StringComparison.Ordinal) || nb.Contains(na, StringComparison.Ordinal);
     }
 
-    /// <summary>归一化：小写、只留字母数字与空格、压缩空格。</summary>
+    /// <summary>
+    /// 归一化：小写、只留字母数字与空格、压缩并去掉首尾空格。
+    /// 单趟扫描 + <see cref="StringBuilder"/>，避免 Select/ToArray/new string/Split/Join 五次分配。
+    /// </summary>
     private static string NormalizeDeviceName(string value)
     {
-        var chars = value.ToLowerInvariant()
-            .Select(c => char.IsLetterOrDigit(c) ? c : ' ')
-            .ToArray();
+        var builder = new StringBuilder(value.Length);
+        var pendingSpace = false;
 
-        return string.Join(' ', new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries));
-    }
-
-    /// <summary>型号号码：含数字的 token（620 / 780m / 5060 / a370m）。</summary>
-    private static HashSet<string> ModelTokens(string value)
-        => NormalizeDeviceName(value)
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Where(t => t.Any(char.IsDigit) && t.Length >= 2)
-            .ToHashSet(StringComparer.Ordinal);
-
-    /// <summary>去掉品牌/通用词之后剩下的 token，用于"只有一边带号码"时的包含比较。</summary>
-    private static HashSet<string> CoreTokens(string value)
-    {
-        string[] generic =
+        foreach (var ch in value)
         {
-            "nvidia", "amd", "ati", "intel", "geforce", "radeon", "graphics", "controller",
-            "family", "series", "laptop", "desktop", "gpu", "corporation", "inc", "corp", "ltd",
-            "tm", "r", "c", "ve", "pcie", "sse2", "compatibility", "profile", "context", "mesa",
-        };
+            if (char.IsLetterOrDigit(ch))
+            {
+                if (pendingSpace && builder.Length > 0)
+                {
+                    builder.Append(' ');
+                }
 
-        return NormalizeDeviceName(value)
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Where(t => Array.IndexOf(generic, t) < 0)
-            .ToHashSet(StringComparer.Ordinal);
+                pendingSpace = false;
+                builder.Append(char.ToLowerInvariant(ch));
+            }
+            else
+            {
+                pendingSpace = true;
+            }
+        }
+
+        return builder.ToString();
     }
+
+    /// <summary>型号号码：含数字的 token（620 / 780m / 5060 / a370m）。入参必须已归一化。</summary>
+    private static HashSet<string> ModelTokens(string normalized)
+        => normalized
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => t.Length >= 2 && t.Any(char.IsDigit))
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>去掉品牌/通用词之后剩下的 token，用于"只有一边带号码"时的包含比较。入参必须已归一化。</summary>
+    private static HashSet<string> CoreTokens(string normalized)
+        => normalized
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => !GenericDeviceTokens.Contains(t))
+            .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>把适配器清单拼成一行日志文本。</summary>
     public static string DescribeAdapters(IReadOnlyList<GpuAdapterInfo> adapters)
@@ -299,7 +363,7 @@ public static class GpuInventory
 
     // ================================================================== 注册表
 
-    private static List<GpuAdapterInfo> ReadAdaptersFromRegistry()
+    private static List<GpuAdapterInfo> ReadAdaptersFromRegistry(ICollection<string>? diagnostics)
     {
         var adapters = new List<GpuAdapterInfo>();
 
@@ -309,13 +373,12 @@ public static class GpuInventory
 
             if (klass is null)
             {
+                diagnostics?.Add($"显示类注册表键不存在或不可读：HKLM\\{DisplayClassKeyPath}");
                 return adapters;
             }
 
-            for (var i = 0; i < MaxAdapterSubKeys; i++)
+            foreach (var subKeyName in AdapterSubKeyNames)
             {
-                var subKeyName = i.ToString("D4");
-
                 try
                 {
                     using var sub = klass.OpenSubKey(subKeyName);
@@ -325,16 +388,18 @@ public static class GpuInventory
                         continue;
                     }
 
-                    var name = (sub.GetValue("DriverDesc") as string)?.Trim();
+                    // 值可能不是字符串（REG_BINARY / REG_DWORD）→ as string 得到 null，
+                    // 也可能异常地长（最长 16 K）→ 统一截断后再用，避免把日志行撑爆。
+                    var name = ClampField((sub.GetValue("DriverDesc") as string)?.Trim());
 
                     if (string.IsNullOrWhiteSpace(name))
                     {
                         continue;
                     }
 
-                    var provider = (sub.GetValue("ProviderName") as string)?.Trim() ?? string.Empty;
-                    var version = (sub.GetValue("DriverVersion") as string)?.Trim() ?? string.Empty;
-                    var pnpId = (sub.GetValue("MatchingDeviceId") as string)?.Trim() ?? string.Empty;
+                    var provider = ClampField((sub.GetValue("ProviderName") as string)?.Trim());
+                    var version = ClampField((sub.GetValue("DriverVersion") as string)?.Trim());
+                    var pnpId = ClampField((sub.GetValue("MatchingDeviceId") as string)?.Trim());
 
                     if (IsVirtualDisplayDriver(name, pnpId))
                     {
@@ -352,25 +417,55 @@ public static class GpuInventory
 
                     adapters.Add(new GpuAdapterInfo(name, provider, version, pnpId, vendor));
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // 单个子键读不了（ACL/被改成非标准结构）时跳过，不影响其他显卡。
+                    // 单个子键读不了（ACL/被改成非标准结构）时跳过，不影响其他显卡；
+                    // 但把类型与消息留给调用方，否则"少了一块卡"永远查不出来。
+                    diagnostics?.Add($"显示类子键 {subKeyName} 读取失败：{ex.GetType().Name}：{ex.Message}");
                 }
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             // HKLM 读不到（极少数被策略锁死的机器）：由调用方退回 GDI 枚举。
+            diagnostics?.Add(
+                $"显示类注册表键 HKLM\\{DisplayClassKeyPath} 读取失败：{ex.GetType().Name}：{ex.Message}");
         }
 
         return adapters;
+    }
+
+    /// <summary>把可能为 null / 过长的字符串压成可安全写进日志与界面的一段文本。</summary>
+    private static string ClampField(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return value.Length <= MaxFieldLength ? value : value[..MaxFieldLength] + "…";
+    }
+
+    private static string[] CreateAdapterSubKeyNames()
+    {
+        var names = new string[MaxAdapterSubKeys];
+
+        for (var i = 0; i < names.Length; i++)
+        {
+            names[i] = i.ToString("D4");
+        }
+
+        return names;
     }
 
     // ================================================================== GDI
 
     private static string? FindPrimaryMonitorDeviceName()
     {
-        var monitors = new List<(string Device, RECT Rect, bool Primary)>();
+        // Device 显式声明为可空：FirstOrDefault 查不到时返回的是 default 元组，
+        // 里面的 string 元素就是 null。声明成非空会让下面那句 null 判断变成"看起来多余"，
+        // 一旦有人"顺手清理"就会变成 NullReferenceException。
+        var monitors = new List<(string? Device, RECT Rect, bool Primary)>();
 
         try
         {
@@ -417,7 +512,7 @@ public static class GpuInventory
     {
         try
         {
-            for (uint i = 0; i < MaxAdapterSubKeys; i++)
+            for (uint i = 0; i < MaxDisplayDevices; i++)
             {
                 var device = new DISPLAY_DEVICE
                 {
@@ -438,8 +533,10 @@ public static class GpuInventory
                     continue;
                 }
 
-                var name = string.IsNullOrWhiteSpace(device.DeviceString) ? deviceName : device.DeviceString.Trim();
-                return (name, device.DeviceID?.Trim() ?? string.Empty);
+                var name = string.IsNullOrWhiteSpace(device.DeviceString)
+                    ? deviceName
+                    : ClampField(device.DeviceString.Trim());
+                return (name, ClampField(device.DeviceID?.Trim()));
             }
         }
         catch (Exception)
@@ -450,13 +547,13 @@ public static class GpuInventory
         return null;
     }
 
-    private static List<GpuAdapterInfo> ReadAdaptersFromGdi()
+    private static List<GpuAdapterInfo> ReadAdaptersFromGdi(ICollection<string>? diagnostics)
     {
         var adapters = new List<GpuAdapterInfo>();
 
         try
         {
-            for (uint i = 0; i < MaxAdapterSubKeys; i++)
+            for (uint i = 0; i < MaxDisplayDevices; i++)
             {
                 var device = new DISPLAY_DEVICE
                 {
@@ -479,7 +576,7 @@ public static class GpuInventory
                     continue;
                 }
 
-                var pnpId = device.DeviceID?.Trim() ?? string.Empty;
+                var pnpId = ClampField(device.DeviceID?.Trim());
 
                 if (IsVirtualDisplayDriver(name, pnpId))
                 {
@@ -499,12 +596,13 @@ public static class GpuInventory
                     continue;
                 }
 
-                adapters.Add(new GpuAdapterInfo(name, string.Empty, string.Empty, pnpId, vendor));
+                adapters.Add(new GpuAdapterInfo(ClampField(name), string.Empty, string.Empty, pnpId, vendor));
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // 返回空清单。
+            // 返回已读到的部分清单，但把失败原因留给调用方。
+            diagnostics?.Add($"GDI 适配器枚举失败：{ex.GetType().Name}：{ex.Message}");
         }
 
         return adapters;

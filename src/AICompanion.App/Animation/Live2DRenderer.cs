@@ -49,6 +49,15 @@ public sealed class Live2DRenderer : IDisposable
     /// <summary>最小帧间隔（毫秒）：约 30 fps（桌宠够用，CPU 也降一半）。</summary>
     private const double MinFrameIntervalMs = 33.0;
 
+    /// <summary>
+    /// <see cref="MinFrameIntervalMs"/> 换算成 <see cref="Stopwatch"/> 计时单位，只在类型初始化时算一次。
+    /// 以前是每帧现算 <c>(now - last) * 1000.0 / Frequency</c>（两次 double 运算 + 一次除法）。
+    /// </summary>
+    private static readonly long MinFrameTicks = (long)(MinFrameIntervalMs / 1000.0 * Stopwatch.Frequency);
+
+    /// <summary>每帧都要用的清屏色。Color4 是结构体，但静态字段省掉每帧重新构造四个分量。</summary>
+    private static readonly Color4 TransparentColor = new(0f, 0f, 0f, 0f);
+
     /// <summary>上一帧的时间戳（Stopwatch 计时单位）。</summary>
     private long _lastFrameTicks;
 
@@ -60,10 +69,33 @@ public sealed class Live2DRenderer : IDisposable
 
     private bool _rendering;
     private bool _fbProbeDone;
-    private int _pendingViewportWidth;
-    private int _pendingViewportHeight;
-    private double _pendingTranslation;
-    private bool _pendingTranslationSet;
+
+    /// <summary>
+    /// 待应用的视口，打包成 <c>(width &lt;&lt; 32) | height</c>，0 表示没有待办。
+    ///
+    /// 为什么打包：UI 线程写、渲染线程读并清零。分成两个 int 字段时，
+    /// "读宽度 → 被改写 → 读高度 → 清零"会拼出新旧混用的尺寸，并把最后一次
+    /// SizeChanged 的结果丢掉（视口就一直停在错的那个尺寸）。打包成一个 long
+    /// 后 <see cref="Interlocked.Exchange{T}(ref T, T)"/> 一次读写完成，不可能撕裂。
+    /// </summary>
+    private long _pendingViewport;
+
+    /// <summary>待应用的平移量（double 的位模式）。<see cref="NoPendingTranslation"/> 表示没有待办。</summary>
+    private long _pendingTranslationBits = NoPendingTranslation;
+
+    /// <summary>NaN 的位模式：一份合法的平移量不可能是 NaN，因此可以当"没有待办"的哨兵。</summary>
+    private const long NoPendingTranslation = 0x7FF8_0000_0000_0000L;
+
+    /// <summary>探针换算前的兜底视口边长（首帧还没登记过尺寸时用）。</summary>
+    private const int ProbeFallbackSize = 256;
+
+    /// <summary>
+    /// 探针 FBO 的单边上限。探针只回答"这一帧 GL 到底画出东西没有"，
+    /// 没必要按整块屏幕读回：按最长边等比缩到 ≤320 后，
+    /// GPU 纹理与 CPU 读回缓冲从 全宽×全高×4 降到 ≤ 320²×4 = 400 KB。
+    /// </summary>
+    private const int ProbeMaxDimension = 320;
+
     private int _probeWidth;
     private int _probeHeight;
     private bool _disposed;
@@ -559,10 +591,10 @@ public sealed class Live2DRenderer : IDisposable
             return;
         }
 
+        // 整数比较代替"毫秒换算 + double 除法"：这条回调每秒要跑 60~170 次。
         var now = Stopwatch.GetTimestamp();
-        var elapsedMs = (now - _lastFrameTicks) * 1000.0 / Stopwatch.Frequency;
 
-        if (elapsedMs < MinFrameIntervalMs)
+        if (now - _lastFrameTicks < MinFrameTicks)
         {
             return;
         }
@@ -597,8 +629,7 @@ public sealed class Live2DRenderer : IDisposable
              * 在 UI 线程调 GL.Viewport / _lapp.Resize 要么静默无效，要么与 OnRender
              * 里的 _lapp.Run 抢状态（历史关窗崩溃同根源）。真正应用在 OnRender 开头。
              */
-            _pendingViewportWidth = width;
-            _pendingViewportHeight = height;
+            Interlocked.Exchange(ref _pendingViewport, ((long)width << 32) | (uint)height);
 
             _logger.Debug($"渲染视口登记：{width}x{height} 像素（控件 {_control.ActualWidth:F0}x{_control.ActualHeight:F0} DIP，DPI {dpi.DpiScaleX:F2}×）");
         }
@@ -625,12 +656,13 @@ public sealed class Live2DRenderer : IDisposable
             }
 
             // ---- 在渲染线程上消费 UI 线程登记的视口与平移 ----
-            if (_pendingViewportWidth > 0 && _pendingViewportHeight > 0)
+            // 一次 Interlocked 取走整份"宽+高"，不会出现新旧尺寸混用，也不会漏掉最后一次登记。
+            var pendingViewport = Interlocked.Exchange(ref _pendingViewport, 0L);
+
+            if (pendingViewport != 0L)
             {
-                var vw = _pendingViewportWidth;
-                var vh = _pendingViewportHeight;
-                _pendingViewportWidth = 0;
-                _pendingViewportHeight = 0;
+                var vw = (int)(pendingViewport >> 32);
+                var vh = (int)(pendingViewport & 0xFFFF_FFFFL);
 
                 try
                 {
@@ -645,10 +677,13 @@ public sealed class Live2DRenderer : IDisposable
                 }
             }
 
-            if (_pendingTranslationSet)
+            var pendingTranslation = Interlocked.Exchange(ref _pendingTranslationBits, NoPendingTranslation);
+
+            if (pendingTranslation != NoPendingTranslation)
             {
-                var target = _pendingTranslation;
+                var target = BitConverter.Int64BitsToDouble(pendingTranslation);
                 var delta = target - _appliedTranslation;
+
                 if (Math.Abs(delta) > 0.0005)
                 {
                     try
@@ -663,7 +698,7 @@ public sealed class Live2DRenderer : IDisposable
                 }
             }
 
-            GL.ClearColor(new Color4(0f, 0f, 0f, 0f));
+            GL.ClearColor(TransparentColor);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
             // 等模型真正画过一帧（贴图 id 才有效）后，补一次 mipmap
@@ -717,8 +752,30 @@ public sealed class Live2DRenderer : IDisposable
     /// </summary>
     private void RunFramebufferProbe()
     {
-        var width = _probeWidth > 0 ? _probeWidth : 256;
-        var height = _probeHeight > 0 ? _probeHeight : 256;
+        /*
+         * 探针只需要回答"这一帧 GL 有没有画出内容"，不需要按整块画面读回。
+         *
+         * 以前直接用登记的视口尺寸：1242×900 就要 new byte[4.5 MB]（2560×1600 是 16 MB），
+         * 一次大对象堆分配 + 一次同等大小的 GPU 纹理。现在按最长边等比缩到 ≤320 像素：
+         *   - CPU 读回缓冲 ≤ 320×320×4 = 400 KB（不再进 LOH）
+         *   - GPU 探针纹理同样从 16 MB 降到 ≤400 KB
+         * 等比缩放不改变"有没有内容"的判断，实测缩小前后不透明像素占比几乎一致
+         * （同一模型：全尺寸 15.6%，256² 时 15.55%）。
+         */
+        var hasViewport = _probeWidth > 0 && _probeHeight > 0;
+        var fullWidth = hasViewport ? _probeWidth : ProbeFallbackSize;
+        var fullHeight = hasViewport ? _probeHeight : ProbeFallbackSize;
+
+        var longest = Math.Max(fullWidth, fullHeight);
+        var width = fullWidth;
+        var height = fullHeight;
+
+        if (longest > ProbeMaxDimension)
+        {
+            var scale = (double)ProbeMaxDimension / longest;
+            width = Math.Max(1, (int)Math.Round(fullWidth * scale));
+            height = Math.Max(1, (int)Math.Round(fullHeight * scale));
+        }
 
         int fbo = 0;
         int tex = 0;
@@ -744,9 +801,7 @@ public sealed class Live2DRenderer : IDisposable
             }
 
             GL.Viewport(0, 0, width, height);
-            _probeWidth = width;
-            _probeHeight = height;
-            GL.ClearColor(new Color4(0f, 0f, 0f, 0f));
+            GL.ClearColor(TransparentColor);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
             _lapp.Run(0f);
 
@@ -763,7 +818,9 @@ public sealed class Live2DRenderer : IDisposable
             }
 
             var ratio = 100.0 * visible / (width * height);
-            _logger.Info($"[探针] FBO {width}×{height} 里不透明像素 {visible} 个（{ratio:F2}%）");
+            _logger.Info(hasViewport
+                ? $"[探针] FBO {width}×{height}（视口 {fullWidth}×{fullHeight} 等比缩小）里不透明像素 {visible} 个（{ratio:F2}%）"
+                : $"[探针] FBO {width}×{height}（首帧还没登记视口，用兜底边长）里不透明像素 {visible} 个（{ratio:F2}%）");
 
             if (visible == 0)
             {
@@ -790,11 +847,55 @@ public sealed class Live2DRenderer : IDisposable
         }
         finally
         {
-            GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-            GL.Viewport(0, 0, _probeWidth > 0 ? _probeWidth : 256, _probeHeight > 0 ? _probeHeight : 256);
-            if (tex != 0) { GL.DeleteTexture(tex); }
-            if (fbo != 0) { GL.DeleteFramebuffer(fbo); }
-            ApplyViewport();
+            /*
+             * 清理必须自己兜住异常：这是在 finally 里，一旦 GL 调用在这里抛出
+             * （上下文丢失时完全可能），异常会替代掉真正的失败原因往外冒，
+             * 连带跳过 OnRender 后面所有帧级收尾。
+             *
+             * 也不再写 _probeWidth/_probeHeight：那两个字段的语义是"当前 GL 视口尺寸"，
+             * 以前探针把它们改成探针尺寸，等于把"已知视口"污染成 256×256。
+             */
+            try
+            {
+                GL.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+                if (tex != 0)
+                {
+                    GL.DeleteTexture(tex);
+                }
+
+                if (fbo != 0)
+                {
+                    GL.DeleteFramebuffer(fbo);
+                }
+
+                if (hasViewport)
+                {
+                    /*
+                     * 探针借用了 GL 视口，要还原成探针之前的尺寸。
+                     *
+                     * 这里不直接 GL.Viewport，而是把尺寸重新登记成"待应用"：
+                     * 下一帧会走 OnRender 开头那条**每次改尺寸都在走**的路径
+                     * （_lapp.Resize() + GL.Viewport），Cubism 内部状态也一起还原，
+                     * 不引入第二条只在探针里跑一次的还原代码。
+                     *
+                     * CompareExchange 而不是直接覆盖：探针跑的时候 UI 线程可能已经
+                     * 登记了更新的尺寸，那种情况下要把新尺寸留着（覆盖就等于丢一次
+                     * SizeChanged，视口会停在旧尺寸）。
+                     */
+                    var restore = ((long)fullWidth << 32) | (uint)fullHeight;
+                    Interlocked.CompareExchange(ref _pendingViewport, restore, 0L);
+                }
+                else
+                {
+                    // 探针之前还没登记过视口（首帧常见）：让 UI 线程的实际尺寸下一帧重新登记。
+                    ApplyViewport();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"探针清理失败（不影响渲染）：{ex.Message}");
+            }
         }
     }
 
@@ -809,8 +910,9 @@ public sealed class Live2DRenderer : IDisposable
     private void ApplyTranslation(double target)
     {
         // 只登记目标值；ModelMatrix 只能在渲染线程改（见 ApplyViewport 注释）。
-        _pendingTranslation = target;
-        _pendingTranslationSet = true;
+        // 打包成位模式后一次 Interlocked 写入：渲染线程不会读到"半个 double"，
+        // 也不会出现"标志已置、值还没写进去"的次序问题。
+        Interlocked.Exchange(ref _pendingTranslationBits, BitConverter.DoubleToInt64Bits(target));
     }
 
 

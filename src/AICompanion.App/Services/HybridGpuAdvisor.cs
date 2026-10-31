@@ -112,7 +112,12 @@ public sealed class HybridGpuAdvisor
             return;
         }
 
-        _logger = logger.ForCategory("Gpu");
+        // 与读取侧同一把锁：渲染线程可能正在 ReportGlAdapter 里写日志，
+        // 这里换掉 _logger 时保证不会读到"旧分类 + 新 sink"的半成品组合。
+        lock (_sync)
+        {
+            _logger = logger.ForCategory("Gpu");
+        }
     }
 
     /// <summary>当前判定结论（还没拿到 GL 信息时为 null）。</summary>
@@ -216,8 +221,12 @@ public sealed class HybridGpuAdvisor
     /// 厂商比较同时用 GL_VENDOR + GL_RENDERER 两处字符串（见 <see cref="GpuInventory.VendorOf"/>），
     /// 型号比较用 <see cref="GpuInventory.SameDevice"/>（模糊匹配，容忍 (R)/(TM)/PNP 后缀差异）。
     /// </summary>
+    /// <param name="adapters">
+    /// 适配器清单。允许为 null（调用方探测失败时可能什么也没有）—— 按空清单处理，
+    /// 走第 2 条 → Consistent，**绝不会**因为空引用把渲染线程带崩。
+    /// </param>
     public static GpuDecision Decide(
-        IReadOnlyList<GpuAdapterInfo> adapters,
+        IReadOnlyList<GpuAdapterInfo>? adapters,
         GpuAdapterInfo? displayAdapter,
         string? glVendor,
         string? glRenderer)
@@ -228,6 +237,8 @@ public sealed class HybridGpuAdvisor
             return new GpuDecision(GpuVerdict.Unknown, "尚未取得 OpenGL 上下文（Live2D 还没画出第一帧）");
         }
 
+        var inventory = adapters ?? Array.Empty<GpuAdapterInfo>();
+
         // 两处字符串一起看：只匹配一处会在"厂商与渲染器自报不一致"的机器上误判。
         var gl = GpuInventory.VendorOf($"{glVendor} {glRenderer}");
         var glName = GlAdapterName(glVendor, glRenderer);
@@ -237,11 +248,11 @@ public sealed class HybridGpuAdvisor
         var displayLabel = GpuInventory.VendorLabel(displayVendor);
 
         // 2. 单显卡：GL 与桌面合成必然在同一适配器上（纯 Intel / 纯 AMD 核显机器绝不能误报）
-        if (adapters.Count <= 1)
+        if (inventory.Count <= 1)
         {
             return new GpuDecision(
                 GpuVerdict.Consistent,
-                $"本机只识别到 {adapters.Count} 块显卡（{GpuInventory.DescribeAdapters(adapters)}），" +
+                $"本机只识别到 {inventory.Count} 块显卡（{GpuInventory.DescribeAdapters(inventory)}），" +
                 $"GL 落在 {glName} 上也只可能在同一块适配器上，无需处理");
         }
 
@@ -254,7 +265,7 @@ public sealed class HybridGpuAdvisor
                 "未做自动修复，避免误伤；若角色不显示，请手动设置高性能显卡");
         }
 
-        var nvidia = adapters.FirstOrDefault(a => a.IsNvidia);
+        var nvidia = inventory.FirstOrDefault(a => a.IsNvidia);
 
         // 4. 有 NVIDIA 卡、GL 却不在它上面 —— 本机实测的失败条件
         if (nvidia is not null && gl != GpuVendor.Nvidia)
@@ -411,7 +422,7 @@ public sealed class HybridGpuAdvisor
 
             case GpuPreferenceState.AlreadyHighPerformance:
                 _logger.Info(
-                    $"该程序的显卡偏好已存在相同值（{outcome.ExistingValue}），本次不重复写入。" +
+                    $"该程序的显卡偏好已存在相同值（{DescribeExisting(outcome)}），本次不重复写入。" +
                     "如果本次 OpenGL 仍不在 NVIDIA 上，请重启程序后再确认（图形偏好只在进程启动时生效）。");
                 ShowBubbleOnce(
                     BubbleLevel.Info,
@@ -421,11 +432,11 @@ public sealed class HybridGpuAdvisor
 
             case GpuPreferenceState.SetByUser:
                 _logger.Info(
-                    $"该程序的显卡偏好已存在（{outcome.ExistingValue}），判定为用户手动设置，跳过不覆盖。" +
+                    $"该程序的显卡偏好已存在（{DescribeExisting(outcome)}），判定为用户手动设置，跳过不覆盖。" +
                     $"如需自动修复，请把它改成「高性能（GpuPreference=2;）」，或手动走：{ManualSteps}。");
                 ShowBubbleOnce(
                     BubbleLevel.Warning,
-                    $"检测到双显卡，但本程序的显卡偏好已由你手动设置（{outcome.ExistingValue}），程序没有覆盖它。" +
+                    $"检测到双显卡，但本程序的显卡偏好已由你手动设置（{DescribeExisting(outcome)}），程序没有覆盖它。" +
                     $"若角色不显示，请到 {ManualSteps}，然后重启程序。",
                     TimeSpan.FromSeconds(18));
                 break;
@@ -441,6 +452,17 @@ public sealed class HybridGpuAdvisor
                     TimeSpan.FromSeconds(20));
                 break;
         }
+    }
+
+    /// <summary>
+    /// 把注册表里读到的既有值压成一行短文本（日志与气泡共用）：
+    /// 注册表字符串值最长 16 K，原样回显会把日志行和气泡一起撑爆。
+    /// </summary>
+    private static string DescribeExisting(GpuPreferenceOutcome outcome)
+    {
+        var display = UserGpuPreferences.ShortenForDisplay(outcome.ExistingValue);
+
+        return display.Length == 0 ? "（空值）" : display;
     }
 
     private void ShowBubbleOnce(BubbleLevel level, string message, TimeSpan duration)
@@ -474,13 +496,28 @@ public sealed class HybridGpuAdvisor
 
         try
         {
-            _adapters = GpuInventory.ListAdapters();
-            _displayAdapter = GpuInventory.FindPrimaryDisplayAdapter();
+            /*
+             * 适配器清单只读一遍：以前 FindPrimaryDisplayAdapter 内部又调了一次 ListAdapters，
+             * 启动期把注册表 16 次 OpenSubKey（+ 必要时 16 次 EnumDisplayDevices）跑两遍。
+             * 现在把第一遍的结果传进去复用。
+             */
+            var notes = new List<string>();
+            var adapters = GpuInventory.ListAdapters(notes);
+            var display = GpuInventory.FindPrimaryDisplayAdapter(adapters, notes);
+
+            _adapters = adapters;
+            _displayAdapter = display;
+
+            if (notes.Count > 0)
+            {
+                // 每一条都带异常类型与上下文：探测"少了一块卡"时能看出是被 ACL 挡了还是键被改坏。
+                _logger.Warn($"显卡探测降级（已尽量返回可用信息）：{string.Join("；", notes)}");
+            }
         }
         catch (Exception ex)
         {
             // 探测失败 = 清单为空，后续判定会走"≤1 块 → 一致"，不会写注册表。
-            _logger.Warn($"显卡探测失败（不影响其他功能）：{ex.Message}");
+            _logger.Warn($"显卡探测失败（不影响其他功能）：{ex.GetType().Name}：{ex.Message}");
             _adapters = Array.Empty<GpuAdapterInfo>();
             _displayAdapter = null;
         }
