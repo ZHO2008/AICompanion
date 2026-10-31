@@ -898,6 +898,18 @@
                                     <TextBlock Grid.Column="0" Style="{StaticResource RowLabel}" Text="显存" />
                                     <TextBlock x:Name="GpuText" Grid.Column="1" Style="{StaticResource ValueText}" MaxWidth="520" Text="—" />
                                 </Grid>
+                                <!--
+                                    混合显卡一致性（只读）：GL 落在哪块显卡、主显示器在哪块、
+                                    判定结论与自动修复状态。全部由 HybridGpuAdvisor 生成，这里不写字面量。
+                                -->
+                                <Grid Margin="0,6" Tag="row">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Style="{StaticResource RowLabel}" Text="显卡（GL / 显示）" />
+                                    <TextBlock x:Name="GpuAdapterText" Grid.Column="1" Style="{StaticResource ValueText}" MaxWidth="520" Text="—" />
+                                </Grid>
                                 <Grid Margin="0,6" Tag="row">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />

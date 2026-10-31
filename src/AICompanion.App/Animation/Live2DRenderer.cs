@@ -153,6 +153,13 @@ public sealed class Live2DRenderer : IDisposable
     /// <summary>模型名（模型文件基名）。</summary>
     public string ModelName { get; private init; } = string.Empty;
 
+    /// <summary>
+    /// GL 环境回填回调（可为 null）。在渲染线程的第一次 <see cref="OnRender"/> 里调用一次，
+    /// 参数是 GL_VENDOR / GL_RENDERER —— 混合显卡判定就靠这两个字符串，
+    /// 这里不再自己写一遍"是不是 NVIDIA"的判断（见 HybridGpuAdvisor）。
+    /// </summary>
+    private Action<string, string>? GlReporter { get; init; }
+
     /// <summary>可用的动作组（运行时真实列表，形如 "Idle_0"…）。</summary>
     public IReadOnlyList<string> Motions => _model.Motions;
 
@@ -237,7 +244,16 @@ public sealed class Live2DRenderer : IDisposable
     /// <summary>
     /// 尝试创建渲染器。**不抛异常**：失败返回 null，调用方继续走静态图。
     /// </summary>
-    public static Live2DRenderer? TryCreate(string modelPath, double horizontalOffset, IAppLogger logger)
+    /// <param name="glReporter">
+    /// GL 上下文就绪后把 GL_VENDOR / GL_RENDERER 交出去（由 HybridGpuAdvisor 做混合显卡判定）。
+    /// 用委托而不是直接引用 HybridGpuAdvisor：渲染层不该知道服务层的存在，
+    /// 这里只负责"把实测到的 GL 适配器告诉关心它的人"。
+    /// </param>
+    public static Live2DRenderer? TryCreate(
+        string modelPath,
+        double horizontalOffset,
+        IAppLogger logger,
+        Action<string, string>? glReporter = null)
     {
         /*
          * 这三个对象的生命周期必须在这里显式管起来：一旦创建成功又中途失败，
@@ -357,6 +373,7 @@ public sealed class Live2DRenderer : IDisposable
             var renderer = new Live2DRenderer(logger, control, lapp, model, "ParamMouthOpenY", horizontalOffset)
             {
                 ModelName = name,
+                GlReporter = glReporter,
             };
 
             logger.Info(
@@ -798,41 +815,41 @@ public sealed class Live2DRenderer : IDisposable
 
 
     /// <summary>
-    /// 打印 OpenGL 环境信息。
+    /// 打印 OpenGL 环境信息，并把 GL 适配器回填给 <see cref="GlReporter"/>。
     ///
-    /// 这条日志很关键：如果 Renderer 显示的是 GDI Generic / llvmpipe 之类的**软件实现**，
-    /// 那 Live2D 会烧掉一个核的 CPU —— 与"限帧无效、静态图仅 0.5%"的实测现象吻合。
+    /// 这条日志很关键，有两个用处：
+    ///   1. Renderer 若是 GDI Generic / llvmpipe 之类的**软件实现**，Live2D 会烧掉一个核的 CPU
+    ///      —— 与"限帧无效、静态图仅 0.5%"的实测现象吻合；
+    ///   2. GL 落在哪块显卡上，是混合显卡机器上"角色看不见"的唯一可靠证据
+    ///      （混合显卡的判定与自动修复见 HybridGpuAdvisor）。
     /// </summary>
     private void LogGlInfo()
     {
         try
         {
             var vendor = GL.GetString(StringName.Vendor) ?? "(未知)";
-
-            /*
-             * 混合显卡机器上的坑：GL 上下文与 WPF/DWM 的合成器不在同一块显卡时，
-             * GLWpfControl 的共享纹理跨适配器共享会**静默失败** ——
-             * 渲染器已就绪、帧数在涨、FBO 探针也能读到像素，但窗口里什么都没有。
-             *
-             * 实测（本机）：GL 落在 AMD 780M、合并在 NVIDIA 5060 → 角色区 0.31%；
-             * 给 exe 设「高性能（NVIDIA）」后 GL 变成 NVIDIA → 角色区 13.8%，正常显示。
-             *
-             * 这里只在"确实有 NVIDIA 卡、但 GL 却落在别的厂商"时提示一句，
-             * 不去改用户的注册表（那是系统级偏好，应由用户决定）。
-             */
-            if (!vendor.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) &&
-                File.Exists(Path.Combine(Environment.SystemDirectory, "nvidia-smi.exe")))
-            {
-                _logger.Warn(
-                    $"Live2D 的 OpenGL 上下文在 {vendor} 上，但本机装有 NVIDIA 显卡 —— " +
-                    "若模型不显示，通常是 GL 与 Windows 合成器不在同一块显卡导致的（跨适配器共享纹理失败）。" +
-                    "解决办法：设置 → 系统 → 屏幕 → 显示卡 → 图形设置，为本程序选择「高性能」，然后重启程序；" +
-                    "或把程序固定在集成显卡上运行，使两者一致。");
-            }
             var renderer = GL.GetString(StringName.Renderer) ?? "(未知)";
             var version = GL.GetString(StringName.Version) ?? "(未知)";
 
             _logger.Info($"OpenGL 环境：Vendor={vendor}，Renderer={renderer}，Version={version}");
+
+            /*
+             * 把 GL 适配器交出去，由 HybridGpuAdvisor 统一做"混合显卡一致性判定 → 自动写显卡偏好 → 提示"。
+             *
+             * 这里**不再自己判断**"是不是 NVIDIA"：以前这里有一条 WRN，说的是同一件事，
+             * 但只在有 nvidia-smi.exe 时成立、也不修任何东西，与 GpuAdvisor 的结论容易两套说法。
+             * 判定规则、注册表写入、气泡文案现在只在 HybridGpuAdvisor 里维护一份。
+             *
+             * 回调在渲染线程上执行：GpuAdvisor 内部加锁，并且绝不抛异常（抛了也不能把渲染带崩）。
+             */
+            try
+            {
+                GlReporter?.Invoke(vendor, renderer);
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"回填 GL 适配器信息失败（不影响渲染）：{ex.Message}");
+            }
 
             if (renderer.Contains("GDI", StringComparison.OrdinalIgnoreCase) ||
                 renderer.Contains("llvmpipe", StringComparison.OrdinalIgnoreCase) ||

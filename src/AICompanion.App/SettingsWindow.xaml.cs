@@ -1690,6 +1690,13 @@ public partial class SettingsWindow : Window
 
             // 显存查询是异步的，这里只更新已有文本，避免阻塞 UI 线程（准则 1）。
             _ = UpdateGpuTextAsync();
+
+            /*
+             * 混合显卡一致性（只读）：GL 落在哪块显卡 / 主显示器在哪块 / 是否已自动修复。
+             * 判定本身在启动期完成（Live2D 第一帧回填 GL 信息），这里只是把结论显示出来，
+             * 不做任何写入 —— 文案由 HybridGpuAdvisor 生成，界面不维护第二套说法。
+             */
+            GpuAdapterText.Text = _host.GpuAdvisor.StatusLine;
         }
         catch (Exception ex)
         {

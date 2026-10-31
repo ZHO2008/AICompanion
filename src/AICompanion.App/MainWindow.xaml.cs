@@ -347,7 +347,14 @@ public partial class MainWindow : Window
             // 用户滑块优先；没设过就用角色包里的默认值（都为空 → 自动居中）
             _defaultHorizontalOffset = profile.HorizontalOffset;
             var initialOffset = AppearanceStore.LoadHorizontalOffset() ?? _defaultHorizontalOffset;
-            _live2d = Live2DRenderer.TryCreate(modelInfo.ModelPath, initialOffset, _host.Logger);
+
+            // GL 适配器回填给混合显卡自检：GL 落在哪块显卡上只有渲染线程知道，
+            // 判定与"写高性能显卡偏好"都在 HybridGpuAdvisor 里（这里只递字符串）。
+            _live2d = Live2DRenderer.TryCreate(
+                modelInfo.ModelPath,
+                initialOffset,
+                _host.Logger,
+                _host.GpuAdvisor.ReportGlAdapter);
 
             if (_live2d is not null)
             {

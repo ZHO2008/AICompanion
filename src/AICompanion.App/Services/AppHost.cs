@@ -96,6 +96,9 @@ public sealed class AppHost : IAsyncDisposable
          */
         BootstrapSink = sharedSink ?? new LogSink(LogRoot.AppLogDirectory());
         Logger = new FileLogger(BootstrapSink, "Bootstrap");
+
+        // 显卡自检要跟着 Logger 改绑（SetLogger），所以先在这里用引导日志器建出来。
+        GpuAdvisor = new HybridGpuAdvisor(Logger, _bubbles);
     }
 
     /// <summary>引导日志（配置加载前的日志都写这里）。</summary>
@@ -117,6 +120,15 @@ public sealed class AppHost : IAsyncDisposable
     public GPUMemoryManager Gpu { get; private set; } = null!;
 
     public NvidiaSmi NvidiaSmi { get; private set; } = null!;
+
+    /// <summary>
+    /// 混合显卡自检与自动修复。
+    ///
+    /// 在构造函数里就建好（先用引导日志器），因为 MainWindow 的 LoadAvatar 早于
+    /// <see cref="StartAsync"/> 就可能创建 Live2D 渲染器 —— 那时要能把 GL_VENDOR 回填进来。
+    /// 配置解析完、日志目录切换后由 StartAsync 调 <see cref="HybridGpuAdvisor.SetLogger"/> 改绑。
+    /// </summary>
+    public HybridGpuAdvisor GpuAdvisor { get; }
 
     public LlamaServerController Llama { get; private set; } = null!;
 
@@ -241,6 +253,15 @@ public sealed class AppHost : IAsyncDisposable
         Logger.Info("================ AI 伴侣启动 ================");
         Logger.Info($"配置：{Config.ConfigFilePath}");
         Logger.Info($"运行目录：{AppPaths.Root}");
+
+        // ---------- 2.5 混合显卡自检 ----------
+        /*
+         * 只做"适配器清单 + 主显示适配器"这一半：GL 落在哪块显卡上要等 Live2D 画出第一帧，
+         * 由 Live2DRenderer 回调 GpuAdvisor.ReportGlAdapter 补齐（那里才有 GL_VENDOR/GL_RENDERER）。
+         * 放在这里是为了让日志顺序如实：先有本机显卡清单，后有一致性结论。
+         */
+        GpuAdvisor.SetLogger(Logger);
+        GpuAdvisor.Start();
 
         if (load.ConfigFileGenerated)
         {
