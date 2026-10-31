@@ -193,7 +193,7 @@
         </Setter>
     </Style>
 
-    <!-- ==================== 导航（顶部 8 个标签 / 左侧分组） ==================== -->
+    <!-- ==================== 导航（顶部 8 个标签） ==================== -->
 
     <Style TargetType="ListBox">
         <Setter Property="Background" Value="Transparent" />
@@ -238,12 +238,6 @@
         <Setter Property="Padding" Value="16,7" />
         <Setter Property="Margin" Value="2,0" />
         <Setter Property="HorizontalContentAlignment" Value="Center" />
-    </Style>
-
-    <!-- 左侧分组：文字左对齐、紧凑 -->
-    <Style x:Key="GroupItem" TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
-        <Setter Property="Padding" Value="10,7" />
-        <Setter Property="HorizontalContentAlignment" Value="Left" />
     </Style>
 
     <!-- ==================== 输入控件 ==================== -->

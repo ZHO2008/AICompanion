@@ -37,20 +37,6 @@ public partial class SettingsWindow : Window
         About,
     }
 
-    /// <summary>左侧 9 个分组与它们所属的顶部标签（顺序即界面顺序）。</summary>
-    private static readonly (string Group, SettingsPage Page)[] GroupMap =
-    {
-        ("隐藏窗口", SettingsPage.Appearance),
-        ("模型与渲染", SettingsPage.Appearance),
-        ("对话与模型", SettingsPage.Dialog),
-        ("语音与听写", SettingsPage.Voice),
-        ("互动设置", SettingsPage.Interaction),
-        ("桌宠移动", SettingsPage.Behavior),
-        ("行为与游戏", SettingsPage.Behavior),
-        ("数据与诊断", SettingsPage.Diagnostic),
-        ("拓展模块", SettingsPage.Extend),
-    };
-
     private readonly AppHost _host;
     private readonly BubbleNotifier _bubbles;
     private readonly DispatcherTimer _refreshTimer;
@@ -100,7 +86,6 @@ public partial class SettingsWindow : Window
     /// <summary>正在导入模块：防止连点「添加」并发复制同一批文件。</summary>
     private bool _importingModule;
 
-    private string _versionText = "0.0.0";
 
     /// <summary>显存查询是否在飞行中（防止 2 秒定时器叠加 nvidia-smi 子进程）。</summary>
     private bool _gpuQuerying;
@@ -116,10 +101,8 @@ public partial class SettingsWindow : Window
     /// <summary>初始化导航 / 下拉 / 开关期间不响应事件。</summary>
     private bool _loading = true;
 
-    /// <summary>左侧分组选择是程序代选时，不触发滚动逻辑。</summary>
+    /// <summary>标签是程序代选（例如门禁横幅跳「拓展」）时，不重复切页。</summary>
     private bool _navSyncing;
-
-    private SettingsPage _page = SettingsPage.Appearance;
 
     /// <summary>
     /// 外观类的"立即生效"不再走构造参数里的回调，而是统一用
@@ -247,7 +230,6 @@ public partial class SettingsWindow : Window
 
         RefreshStatus();
         RefreshVoiceTab();
-        RefreshMonitorTab();
         RefreshPositionAndRenderInfo();
 
         // 启动过程中打开面板时，日志/候选清单只能先显示"启动中"；
@@ -255,14 +237,13 @@ public partial class SettingsWindow : Window
         RefreshStartupListsOnce();
     }
 
-    // ================================================================== 导航 / 搜索
+    // ================================================================== 导航
 
     private void InitializeNavigation()
     {
         _navReady = false;
 
         NavTabs.SelectedIndex = 0;
-        GroupList.SelectedIndex = 1; // 默认落在「模型与渲染」，与外观页首个内容分组一致
 
         _navReady = true;
         ShowPage(SettingsPage.Appearance);
@@ -291,61 +272,6 @@ public partial class SettingsWindow : Window
         };
 
         ShowPage(page);
-        SyncGroupSelection(page);
-        ApplySearchFilter();
-    }
-
-    private void OnGroupChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_navReady || _loading || _navSyncing || GroupList.SelectedItem is not ListBoxItem item)
-        {
-            return;
-        }
-
-        var group = item.Tag as string;
-        var target = GroupMap.FirstOrDefault(g => g.Group == group);
-        if (target.Group is null)
-        {
-            return;
-        }
-
-        if (_page != target.Page)
-        {
-            SelectTab(target.Page);
-            ShowPage(target.Page);
-        }
-
-        ScrollToGroup(group);
-        ApplySearchFilter();
-    }
-
-    /// <summary>把左侧分组选中项同步成"当前页的第一个分组"；「关于」没有分组，清空选中。</summary>
-    private void SyncGroupSelection(SettingsPage page)
-    {
-        var first = GroupMap.FirstOrDefault(g => g.Page == page);
-
-        _navSyncing = true;
-        try
-        {
-            if (first.Group is null)
-            {
-                GroupList.SelectedIndex = -1;
-                return;
-            }
-
-            for (var i = 0; i < GroupList.Items.Count; i++)
-            {
-                if (GroupList.Items[i] is ListBoxItem gi && Equals(gi.Tag, first.Group))
-                {
-                    GroupList.SelectedIndex = i;
-                    return;
-                }
-            }
-        }
-        finally
-        {
-            _navSyncing = false;
-        }
     }
 
     private void SelectTab(SettingsPage page)
@@ -382,7 +308,6 @@ public partial class SettingsWindow : Window
 
     private void ShowPage(SettingsPage page)
     {
-        _page = page;
 
         PageAppearance.Visibility = page == SettingsPage.Appearance ? Visibility.Visible : Visibility.Collapsed;
         PageDialog.Visibility = page == SettingsPage.Dialog ? Visibility.Visible : Visibility.Collapsed;
@@ -397,225 +322,10 @@ public partial class SettingsWindow : Window
         RefreshPositionAndRenderInfo();
     }
 
-    private StackPanel CurrentPage => _page switch
-    {
-        SettingsPage.Dialog => PageDialog,
-        SettingsPage.Voice => PageVoice,
-        SettingsPage.Interaction => PageInteraction,
-        SettingsPage.Behavior => PageBehavior,
-        SettingsPage.Diagnostic => PageDiagnostic,
-        SettingsPage.Extend => PageExtend,
-        SettingsPage.About => PageAbout,
-        _ => PageAppearance,
-    };
-
-    private Border? SectionOf(string? group) => group switch
-    {
-        "隐藏窗口" => SectionHiddenWindow,
-        "模型与渲染" => SectionModelRender,
-        "对话与模型" => SectionDialog,
-        "语音与听写" => SectionVoice,
-        "互动设置" => SectionInteraction,
-        "桌宠移动" => SectionPetMove,
-        "行为与游戏" => SectionBehavior,
-        "数据与诊断" => SectionDataDiag,
-        "拓展模块" => SectionModules,
-        _ => null,
-    };
-
-    private void ScrollToGroup(string? group)
-    {
-        var section = SectionOf(group);
-        if (section is null || section.Visibility != Visibility.Visible)
-        {
-            return;
-        }
-
-        try
-        {
-            section.BringIntoView();
-        }
-        catch
-        {
-            // 尚未完成布局时 BringIntoView 可能失败，忽略即可。
-        }
-    }
-
     private void OnGoToExtend(object sender, RoutedEventArgs e)
     {
         SelectTab(SettingsPage.Extend);
         ShowPage(SettingsPage.Extend);
-        SyncGroupSelection(SettingsPage.Extend);
-        ApplySearchFilter();
-    }
-
-    // ------------------------------------------------------------------ 搜索过滤
-
-    private void OnSearchChanged(object sender, TextChangedEventArgs e)
-    {
-        if (_loading || _closed)
-        {
-            return;
-        }
-
-        ApplySearchFilter();
-    }
-
-    /// <summary>
-    /// 搜索词归一化：去空白、折叠成小写、全角折成半角。
-    ///
-    /// 为什么必须折全角：中文输入法下搜 "ｃｕｄａ"（全角）原先一个都匹配不到，
-    /// 用户只会以为"没有这一项"。折叠规则只处理可逆的 ASCII 映射，
-    /// 不走 <see cref="string.Normalize(NormalizationForm)"/>（遇到孤立代理项会抛异常）。
-    /// </summary>
-    private static string NormalizeQuery(string? text)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return string.Empty;
-        }
-
-        var sb = new StringBuilder(text.Length);
-        foreach (var ch in text)
-        {
-            if (char.IsWhiteSpace(ch) || ch == '\u3000')
-            {
-                continue;
-            }
-
-            sb.Append(char.ToLowerInvariant(FoldFullWidth(ch)));
-        }
-
-        return sb.ToString();
-    }
-
-    /// <summary>全角 ASCII（U+FF01–U+FF5E）折成半角；其余字符原样返回。</summary>
-    private static char FoldFullWidth(char ch)
-        => ch is >= '\uFF01' and <= '\uFF5E' ? (char)(ch - 0xFEE0) : ch;
-
-    /// <summary>
-    /// 按标签片段过滤当前页的设置项：大小写不敏感、空白不敏感。
-    /// 命中判断用整行（标签 + 说明 + 控件内容）的文本，行内任一文本含片段即显示。
-    /// </summary>
-    private void ApplySearchFilter()
-    {
-        var query = NormalizeQuery(SearchBox.Text);
-        var page = CurrentPage;
-
-        var rows = new List<FrameworkElement>();
-        CollectByTag(page, "row", rows);
-
-        var anyRow = false;
-        foreach (var row in rows)
-        {
-            var match = query.Length == 0 || NormalizeQuery(RowText(row)).Contains(query);
-            row.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-            anyRow |= match;
-        }
-
-        var anyCard = false;
-
-        var cards = new List<FrameworkElement>();
-        CollectByTag(page, "card", cards);
-
-        foreach (var card in cards)
-        {
-            if (query.Length == 0)
-            {
-                card.Visibility = Visibility.Visible;
-                continue;
-            }
-
-            var cardRows = new List<FrameworkElement>();
-            CollectByTag(card, "row", cardRows);
-
-            var cardVisible = cardRows.Count == 0
-                ? NormalizeQuery(RowText(card)).Contains(query)
-                : cardRows.Any(r => r.Visibility == Visibility.Visible);
-
-            // 卡片里的动态内容（模块卡片、日志清单）也算命中依据。
-            if (!cardVisible && cardRows.Count > 0)
-            {
-                cardVisible = NormalizeQuery(RowText(card)).Contains(query);
-            }
-
-            card.Visibility = cardVisible ? Visibility.Visible : Visibility.Collapsed;
-            anyCard |= cardVisible;
-        }
-
-        SearchEmptyText.Visibility = query.Length > 0 && !anyRow && !anyCard
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-
-        // 搜索时把命中的卡片滚到可见位置，省得用户以为没结果。
-        if (query.Length > 0 && anyRow)
-        {
-            var first = rows.FirstOrDefault(r => r.Visibility == Visibility.Visible);
-            first?.BringIntoView();
-        }
-    }
-
-    private static void CollectByTag(DependencyObject root, string tag, List<FrameworkElement> into)
-    {
-        if (root is FrameworkElement fe && Equals(fe.Tag, tag))
-        {
-            into.Add(fe);
-        }
-
-        var count = VisualTreeHelper.GetChildrenCount(root);
-        for (var i = 0; i < count; i++)
-        {
-            CollectByTag(VisualTreeHelper.GetChild(root, i), tag, into);
-        }
-    }
-
-    private static string RowText(DependencyObject node)
-    {
-        var sb = new StringBuilder();
-        CollectText(node, sb);
-        return sb.ToString();
-    }
-
-    private static void CollectText(DependencyObject node, StringBuilder sb)
-    {
-        switch (node)
-        {
-            case TextBlock tb:
-                sb.Append(tb.Text).Append(' ');
-                break;
-            case TextBox box:
-                sb.Append(box.Text).Append(' ');
-                break;
-            case ComboBox combo:
-                foreach (var item in combo.Items)
-                {
-                    sb.Append(item switch
-                    {
-                        ComboBoxItem ci => ci.Content?.ToString(),
-                        _ => item?.ToString(),
-                    }).Append(' ');
-                }
-
-                break;
-            case ContentControl cc when cc.Content is string content:
-                sb.Append(content).Append(' ');
-                break;
-            case System.Windows.Documents.Run run:
-                sb.Append(run.Text).Append(' ');
-                break;
-        }
-
-        foreach (var child in LogicalTreeHelper.GetChildren(node))
-        {
-            if (child is DependencyObject d)
-            {
-                CollectText(d, sb);
-            }
-            else if (child is string s)
-            {
-                sb.Append(s).Append(' ');
-            }
-        }
     }
 
     // ================================================================== 静态信息 / 下拉初始化
@@ -627,18 +337,13 @@ public partial class SettingsWindow : Window
         VersionText.Text = version is null
             ? "未知"
             : $"{version.Major}.{version.Minor}.{version.Build}";
-        _versionText = VersionText.Text;
-        AutoSaveText.Text = $"自动保存 · v{_versionText}";
+        AutoSaveText.Text = "自动保存";
 
         RepoText.Text = "https://github.com/ZHO2008/AICompanion";
-        StorePathText.Text = AppearanceStore.StorePath;
-        ModulesPathText.Text = ModuleRegistry.ModulesRoot;
-        AlwaysOnTopText.Text = _host.Config.Ui.AlwaysOnTop ? "开启（config.yaml）" : "关闭（config.yaml）";
 
-        ShortcutText.Text =
-            $"按住 {_host.Config.Asr.PushToTalkKey}（{(_host.Config.Asr.PushToTalk ? "已启用" : "已关闭")}）" +
-            Environment.NewLine +
-            $"悬停 {_host.Config.Ui.TransparentHoverDelayMs} ms · {_host.Config.Ui.TransparentAutoRevertSeconds} s 回透明";
+        // 快捷键与悬停时序改挂在两条已有设置的 ToolTip 上，不再单独占一行只读文字。
+        PushToTalkHintText.ToolTip =
+            $"按住 {_host.Config.Asr.PushToTalkKey} 说话，松开后整段识别（下次启动生效）";
     }
 
     private void LoadAppearanceTab()
@@ -960,40 +665,59 @@ public partial class SettingsWindow : Window
             StartXBox.Text = p.X.ToString("F0");
             StartYBox.Text = p.Y.ToString("F0");
         }
-        else if (PetWindow is { } pet)
+        else if (CurrentPetPosition() is { } here)
         {
             // 没设过启动位置时，把"当前位置"填进输入框（只是显示，不会落盘）。
-            StartXBox.Text = pet.Left.ToString("F0");
-            StartYBox.Text = pet.Top.ToString("F0");
+            StartXBox.Text = here.X.ToString("F0");
+            StartYBox.Text = here.Y.ToString("F0");
         }
 
         RefreshPositionAndRenderInfo();
     }
 
-    private void RefreshPositionAndRenderInfo()
+    /// <summary>
+    /// 桌宠窗口当前所在的 DIP 左上角。
+    ///
+    /// **必须读 Win32 物理矩形**，不能读 <see cref="Window.Left"/>/<see cref="Window.Top"/>：
+    /// 主窗口的位置是用 SetWindowPos 摆的（见 MonitorGeometry.MoveToPhysical），WPF 的
+    /// Left/Top 不会跟着更新；窗口隐藏再显示一次之后它们甚至回到 0,0 ——
+    /// 于是「当前位置」显示 0, 0、「取当前位置」把 0, 0 存成启动位置（下次启动角色跑到屏幕左上角）。
+    /// </summary>
+    private (double X, double Y)? CurrentPetPosition()
     {
         var pet = PetWindow;
-
         if (pet is null)
         {
-            CurrentPositionText.Text = "未找到桌宠窗口";
-            RenderResolutionText.Text = "—";
-            return;
+            return null;
         }
-
-        CurrentPositionText.Text = $"{pet.Left:F0}, {pet.Top:F0}";
 
         try
         {
+            var rect = MonitorGeometry.GetPhysicalRect(pet);
             var dpi = VisualTreeHelper.GetDpi(pet);
-            var width = Math.Round(pet.ActualWidth * dpi.DpiScaleX);
-            var height = Math.Round(pet.ActualHeight * dpi.DpiScaleY);
-            RenderResolutionText.Text = $"约 {width:F0} × {height:F0} px";
+            return (Math.Round(rect.Left / dpi.DpiScaleX), Math.Round(rect.Top / dpi.DpiScaleY));
         }
         catch
         {
-            RenderResolutionText.Text = "—";
+            return null;
         }
+    }
+
+    /// <summary>
+    /// 刷新「行为 → 启动位置」里的只读一行。
+    ///
+    /// 早先这里还顺带算过一次「渲染分辨率（约 607×821 px）」：那是窗口尺寸乘 DPI 的派生值，
+    /// 没有任何配置项与之对应（ToolTip 里自己都写着"没有独立的分辨率配置项"），已删除。
+    /// </summary>
+    private void RefreshPositionAndRenderInfo()
+    {
+        if (CurrentPetPosition() is not { } here)
+        {
+            CurrentPositionText.Text = "当前位置 未找到桌宠窗口";
+            return;
+        }
+
+        CurrentPositionText.Text = $"当前位置 {here.X:F0}, {here.Y:F0} DIP";
     }
 
     private MainWindow? PetWindow =>
@@ -1219,7 +943,14 @@ public partial class SettingsWindow : Window
         ScheduleApply(AppearanceChange.Preferences);
     }
 
-    private void OnHidePet(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// 「显示 / 隐藏」：与托盘菜单「显示/隐藏角色」走同一个动作。
+    ///
+    /// 原来这里是两个按钮（隐藏桌宠 / 显示桌宠），但「隐藏桌宠」调的也是
+    /// <see cref="MainWindow.ToggleVisibility"/>—— 桌宠已经隐藏时点它反而会把角色显示出来，
+    /// 与按钮文字相反。合并成一个开关按钮，语义与实现才一致。
+    /// </summary>
+    private void OnTogglePetVisibility(object sender, RoutedEventArgs e)
     {
         try
         {
@@ -1227,26 +958,7 @@ public partial class SettingsWindow : Window
         }
         catch (Exception ex)
         {
-            _host.Logger.Warn($"隐藏桌宠窗口失败：{ex.Message}");
-        }
-    }
-
-    private void OnShowPet(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var pet = PetWindow;
-            if (pet is null)
-            {
-                return;
-            }
-
-            pet.ShowPet();
-            pet.Activate();
-        }
-        catch (Exception ex)
-        {
-            _host.Logger.Warn($"显示桌宠窗口失败：{ex.Message}");
+            _host.Logger.Warn($"切换桌宠窗口显示状态失败：{ex.Message}");
         }
     }
 
@@ -1262,7 +974,7 @@ public partial class SettingsWindow : Window
         var llm = LlmEnabledCheck.IsChecked == true;
         var saved = AppearanceStore.SaveAiToggles(llm, TtsEnabledCheck.IsChecked, AsrEnabledCheck.IsChecked);
 
-        AiToggleHintText.Text = saved
+        DialogHintText.Text = saved
             ? $"对话已{(llm ? "开启" : "关闭")} · 重启后生效"
             : "保存失败，详见日志";
     }
@@ -1277,7 +989,7 @@ public partial class SettingsWindow : Window
         var tts = TtsEnabledCheck.IsChecked == true;
         var saved = AppearanceStore.SaveAiToggles(LlmEnabledCheck.IsChecked, tts, AsrEnabledCheck.IsChecked);
 
-        AiToggleHintText.Text = saved
+        DialogHintText.Text = saved
             ? $"语音输出已{(tts ? "开启" : "关闭")} · 重启后生效"
             : "保存失败，详见日志";
     }
@@ -1292,7 +1004,7 @@ public partial class SettingsWindow : Window
         var asr = AsrEnabledCheck.IsChecked == true;
         var saved = AppearanceStore.SaveAiToggles(LlmEnabledCheck.IsChecked, TtsEnabledCheck.IsChecked, asr);
 
-        AiToggleHintText.Text = saved
+        DialogHintText.Text = saved
             ? $"语音输入已{(asr ? "开启" : "关闭")} · 重启后生效"
             : "保存失败，详见日志";
     }
@@ -1402,8 +1114,7 @@ public partial class SettingsWindow : Window
             _host.Config.Tts.DefaultVoice = voice;
         }
 
-        TtsVoiceText.Text = _host.Config.Tts.DefaultVoice;
-        TtsVoiceText.ToolTip = "界面覆盖 · config.yaml 未改动";
+        // 原来这里还把值抄到「全局默认音色」只读行上：同一页两处显示同一个值，已删。
         ScheduleSave("ttsVoice", () => AppearanceStore.SaveTtsVoice(TtsVoiceBox.Text.Trim()));
     }
 
@@ -1543,8 +1254,8 @@ public partial class SettingsWindow : Window
 
     private void OnReadCurrentPosition(object sender, RoutedEventArgs e)
     {
-        var pet = PetWindow;
-        if (pet is null)
+        // 位置必须以 Win32 物理矩形为准，否则会把陈旧的 Left/Top（隐藏再显示后是 0,0）存下去。
+        if (CurrentPetPosition() is not { } here)
         {
             return;
         }
@@ -1552,15 +1263,15 @@ public partial class SettingsWindow : Window
         _loading = true;
         try
         {
-            StartXBox.Text = pet.Left.ToString("F0");
-            StartYBox.Text = pet.Top.ToString("F0");
+            StartXBox.Text = here.X.ToString("F0");
+            StartYBox.Text = here.Y.ToString("F0");
         }
         finally
         {
             _loading = false;
         }
 
-        AppearanceStore.SaveStartPosition(pet.Left, pet.Top);
+        AppearanceStore.SaveStartPosition(here.X, here.Y);
         RefreshPositionAndRenderInfo();
     }
 
@@ -1589,10 +1300,9 @@ public partial class SettingsWindow : Window
         {
             RefreshStatus();
             RefreshVoiceTab();
-            RefreshMonitorTab();
             OnRefreshLogs(this, new RoutedEventArgs());
             await RefreshEnvironmentAndModulesAsync();
-            _host.Logger.Info("设置面板触发重新检测（运行状态 / 语音 / 游戏检测 / 日志 / 模块）。");
+            _host.Logger.Info("设置面板触发重新检测（运行状态 / 语音 / 日志 / 模块）。");
         }
         catch (Exception ex)
         {
@@ -1754,6 +1464,16 @@ public partial class SettingsWindow : Window
 
     // ================================================================== 状态 / 语音 / 游戏检测刷新
 
+    /// <summary>
+    /// 诊断页顶部的只读状态：每行一个主题，同一信息只在这里出现一次。
+    ///
+    /// 早先这里 9 行，其中「运行模式」带 ngl=28/28 与空闲显存、「LLM」又带 ngl、
+    /// 「显存」再报一次已用量 —— 同一份数据三处重复。现在：
+    ///   - 运行模式只说 GPU/CPU，ngl 与显存明细进 ToolTip 和「显存」行；
+    ///   - TTS 与 ASR 合并成「语音」一行；
+    ///   - 「知识库」与「待审核候选」合并成一行；
+    ///   - 「启动问题」从独立的清单改成一个可换行的值（0 项时就是"无"）。
+    /// </summary>
     private void RefreshStatus()
     {
         // 启动尚未完成时，核心组件还没构造出来，此时访问会 NRE。
@@ -1766,47 +1486,63 @@ public partial class SettingsWindow : Window
 
         try
         {
-            ModeText.Text = _host.RuntimeMode.Describe();
+            var mode = _host.RuntimeMode.Current;
+
+            ModeText.Text = mode.IsGpu ? "GPU 模式" : "CPU 模式";
+            ModeText.ToolTip = _host.RuntimeMode.Describe();
 
             LlmText.Text = _host.LlmReady
                 ? $"已就绪 · ngl {_host.Llama.CurrentNgl}"
                 : "未就绪";
 
-            TtsText.Text = $"{_host.Tts.ConfiguredEngine} → {_host.Tts.CurrentEngineName}" +
-                           (_host.Tts.IsDegraded ? "（降级）" : string.Empty);
-
             // PTT 模式下空闲态就是 Stopped，直接显示状态会让人以为语音坏了。
-            AsrText.Text = _host.Config.Asr.PushToTalk
+            var asr = _host.Config.Asr.PushToTalk
                 ? $"按住 {_host.Config.Asr.PushToTalkKey}" +
                   (_host.Asr.State == AsrState.Running ? " · 录音中" : string.Empty)
                 : $"{_host.Asr.State}" +
                   (_host.Asr.State == AsrState.Faulted ? $"（{_host.Asr.FaultReason}）" : string.Empty);
 
-            KnowledgeText.Text = $"{_host.Knowledge.Count} 条";
+            VoiceText.Text = $"合成 {_host.Tts.ConfiguredEngine} → {_host.Tts.CurrentEngineName}" +
+                             (_host.Tts.IsDegraded ? "（降级）" : string.Empty) +
+                             $" · 识别 {asr}";
+
+            KnowledgeText.Text = $"{_host.Knowledge.Count} 条 · 待审核 {_host.Knowledge.Pending.CountCandidates()} 条";
             KnowledgeText.ToolTip = _host.Knowledge.DirectoryPath;
-            PendingText.Text = $"{_host.Knowledge.Pending.CountCandidates()} 条";
 
             MonitorText.Text = (_host.Monitor.IsClientConnected ? "已连接" : "未连接") +
-                (_host.GameMode.IsYielded ? " · 已让出显存" : string.Empty);
+                (_host.GameMode.IsYielded ? " · 已让出显存" : string.Empty) +
+                $" · 冷却 {_host.Config.Monitor.CooldownMinutes:N0} 分钟";
+            MonitorText.ToolTip = $"端口 {_host.Config.Monitor.Host}:{_host.Config.Monitor.Port}" +
+                                  $" · 列表 {Path.GetFileName(Core.Configuration.AppPaths.Resolve(_host.Config.Monitor.GameListFile))}";
 
-            ProblemList.ItemsSource = _host.StartupProblems.Count > 0
-                ? _host.StartupProblems
-                : new[] { "无" };
+            ProblemText.Text = _host.StartupProblems.Count == 0
+                ? "无"
+                : string.Join("；", _host.StartupProblems);
 
-            BubbleList.ItemsSource = _bubbles.Current
-                .Select(b => $"[{b.Level}] {b.Message}")
-                .ToList();
+            // 服务健康 / 状态栏标记 / 告警气泡三个来源合成一张清单：
+            // 它们原本是三个各自固定高度的空清单，占掉了整页一半的竖向空间。
+            var lines = new List<string>();
 
-            // HealthMonitor 的结果之前只写日志、界面上看不到（Describe() 因此成了零调用死代码）。
-            HealthList.ItemsSource = _host.Health is null
-                ? new[] { "尚未开始探测" }
-                : _host.Health.Snapshots.Select(s => s.Describe()).ToList();
+            if (_host.Health is null)
+            {
+                lines.Add("尚未开始探测");
+            }
+            else
+            {
+                lines.AddRange(_host.Health.Snapshots.Select(s => s.Describe()));
+            }
 
-            // 状态栏标记：TTS 降级、游戏模式让出显存等都会写进来，之前写进去没人看。
-            var statuses = _bubbles.Statuses;
-            StatusList.ItemsSource = statuses.Count == 0
-                ? new[] { "无" }
-                : statuses.Select(kv => $"{kv.Key}：{kv.Value}").ToList();
+            foreach (var kv in _bubbles.Statuses)
+            {
+                lines.Add($"{kv.Key}：{kv.Value}");
+            }
+
+            foreach (var bubble in _bubbles.Current)
+            {
+                lines.Add($"[{bubble.Level}] {bubble.Message}");
+            }
+
+            HealthList.ItemsSource = lines;
 
             // 显存查询是异步 + 节流的，这里只发起，不阻塞 UI 线程（准则 1）。
             _ = UpdateGpuTextAsync();
@@ -1848,7 +1584,10 @@ public partial class SettingsWindow : Window
             var text = await _host.Gpu.DescribeCurrentMemoryAsync().ConfigureAwait(true);
             if (!_closed)
             {
-                GpuText.Text = text;
+                // 空闲显存以前另外写在「运行模式」里，现在并到这一行：
+                // 已用与空闲是同一份数据的两个方向，放在一起才读得懂。
+                var free = _host.RuntimeMode.Current.FreeVramMb;
+                GpuText.Text = free > 0 ? $"{text} · 空闲 {free} MB" : text;
             }
         }
         catch
@@ -1881,32 +1620,23 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        TtsEngineText.Text = AppearanceStore.LoadTtsEngine() is null
-            ? $"{_host.Tts.ConfiguredEngine} · 出厂默认"
-            : $"{_host.Tts.ConfiguredEngine} · 界面覆盖";
-        TtsVoiceText.Text = _host.Config.Tts.DefaultVoice;
-        TtsVoiceText.ToolTip = string.IsNullOrWhiteSpace(_host.Config.Tts.DefaultVoice)
-            ? $"为空时回退硬编码音色 {Core.Tts.TTSManager.HardcodedFallbackVoice}"
-            : null;
-        TtsPiperText.Text = _host.Tts.IsDegraded
-            ? $"{_host.Tts.CurrentEngineName}（降级）"
-            : _host.Tts.CurrentEngineName;
+        // 语音页只保留"能改的东西"：当前引擎 / 运行中的引擎 / 识别状态 / 模型路径 / VAD /
+        // 最近一次识别这 6 行都是只读展示，且与同页的可操作项重复或互相矛盾
+        // （「当前引擎 gpt_sovits」对「运行中的引擎 sapi（降级）」）。
+        // 运行态统一由诊断页「语音」一行给出。
+        var ptt = _host.Config.Asr.PushToTalk;
 
-        AsrStateText.Text = _host.Config.Asr.PushToTalk
-            ? $"按住 {_host.Config.Asr.PushToTalkKey}" +
-              (_host.Asr.State == AsrState.Running ? " · 录音中" : string.Empty)
-            : $"{_host.Asr.State}";
-        AsrModelText.Text = Core.Configuration.AppPaths.Resolve(_host.Config.Asr.ModelPath);
-        AsrVadText.Text = $"{_host.Asr.VadName} · 要求 {_host.Config.Asr.VadMode}";
-
-        AsrLastText.Text = _host.Asr.LastRecognition is { } last
-            ? $"\"{last.Text}\" · {last.Elapsed.TotalMilliseconds:N0} ms" +
-              $"（{last.AudioDuration.TotalSeconds:N1}s · RTF {last.RealTimeFactor:N2}）"
-            : "暂无";
+        // 按住说话模式下没有"常开监听"可切换：按钮置灰并说明原因，
+        // 否则用户点了只会在日志里留一行，界面上毫无反应。
+        ListenButton.IsEnabled = !ptt;
+        ListenHintText.Text = ptt
+            ? $"按住 {_host.Config.Asr.PushToTalkKey} 说话，监听由按键触发"
+            : "常开监听模式下手动开关";
+        PushToTalkHintText.Text = $"按住 {_host.Config.Asr.PushToTalkKey} 说话 · 下次启动生效";
 
         // 文案精简：界面上只说结论（不可用 + 下一步），原因写日志。
         AsrHintText.Text = _host.Asr.State == AsrState.Faulted
-            ? "语音输入不可用 · 改用文本输入"
+            ? "语音输入不可用 · 改用文本输入（诊断页可重置 ASR）"
             : string.Empty;
 
         if (_host.Asr.State == AsrState.Faulted)
@@ -1977,33 +1707,16 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void RefreshMonitorTab()
-    {
-        if (!_host.IsStarted)
-        {
-            return;
-        }
-
-        var last = _host.Monitor.LastMessageUtc;
-        MonitorStateText.Text = _host.Monitor.IsClientConnected
-            ? $"已连接 · {(last == DateTime.MinValue ? "—" : last.ToLocalTime().ToString("HH:mm:ss"))}"
-            : "未连接";
-
-        var cooldowns = _host.Cooldown.Snapshot();
-        MonitorCooldownText.Text = cooldowns.Count == 0
-            ? "无"
-            : string.Join("；", cooldowns.Select(kv => $"{kv.Key} 至 {kv.Value.ToLocalTime():HH:mm:ss}"));
-
-        GameListText.Text = $"端口 {_host.Config.Monitor.Host}:{_host.Config.Monitor.Port} · 冷却 {_host.Config.Monitor.CooldownMinutes:N0} 分钟";
-        GameListText.ToolTip = $"列表文件：{Core.Configuration.AppPaths.Resolve(_host.Config.Monitor.GameListFile)}";
-    }
+    // 「行为 → 游戏检测」整块（状态 + 冷却期 + 端口 + 重连）已移到诊断页：
+    // 那是只读运行态与排障动作，和行为页"游戏/空闲/启动位置"这个主题无关。
+    // 所以这里不再有 RefreshMonitorTab，游戏检测的状态由 RefreshStatus 统一写 MonitorText。
 
     private async void OnReconnectMonitor(object sender, RoutedEventArgs e)
     {
         try
         {
             await _host.Monitor.ReconnectAsync();
-            RefreshMonitorTab();
+            RefreshStatus();
         }
         catch (Exception ex)
         {
@@ -2013,14 +1726,20 @@ public partial class SettingsWindow : Window
 
     // ================================================================== 日志
 
+    /// <summary>
+    /// 日志清单。
+    ///
+    /// 原来「应用日志目录 / 应用日志占用 / 聊天日志占用」是三个独立只读行：
+    /// 目录是一个用户不会改的绝对路径（现在只放在占用行的 ToolTip 里），
+    /// 三个数字合成一行反而更好读。
+    /// </summary>
     private void OnRefreshLogs(object sender, RoutedEventArgs e)
     {
         // 同上：_host.Context / LogSink 在启动阶段还不存在。
         if (!_host.IsStarted)
         {
-            LogPathText.Text = _host.BootstrapSink.DirectoryPath;
             LogSizeText.Text = "启动中…";
-            ChatLogSizeText.Text = "启动中…";
+            LogSizeText.ToolTip = _host.BootstrapSink.DirectoryPath;
             LogList.ItemsSource = new List<string> { "启动中，稍候…" };
             return;
         }
@@ -2029,13 +1748,13 @@ public partial class SettingsWindow : Window
         {
             // LogSink 在配置加载后才有；启动早期回退到引导日志。
             var sink = _host.LogSink ?? _host.BootstrapSink;
-            LogPathText.Text = sink?.DirectoryPath ?? "（未初始化）";
+            double? appMb = sink is null ? null : sink.GetDirectorySizeBytes() / 1024.0 / 1024.0;
+
             LogSizeText.Text = sink is null
                 ? "—"
-                : $"{sink.GetDirectorySizeBytes() / 1024.0 / 1024.0:N2} MB · 保留 {_host.Config.Logging.MaxLogDays} 天";
-
-            ChatLogSizeText.Text = $"{_host.Context.GetChatLogSizeBytes() / 1024.0 / 1024.0:N2} MB";
-            ChatLogSizeText.ToolTip = $"归档：{Path.GetFileName(_host.Context.ArchivePath)}";
+                : $"应用 {appMb:N2} MB · 聊天 {_host.Context.GetChatLogSizeBytes() / 1024.0 / 1024.0:N2} MB" +
+                  $" · 保留 {_host.Config.Logging.MaxLogDays} 天";
+            LogSizeText.ToolTip = sink?.DirectoryPath;
 
             LogList.ItemsSource = sink?.RecentSnapshot(LogTailLines) ?? new List<string> { "（日志未初始化）" };
             _startupListsLoaded = true;
@@ -2115,7 +1834,7 @@ public partial class SettingsWindow : Window
         AsrEnabledCheck.IsChecked = toggle.Asr ?? _host.Config.Asr.Enabled;
 
         var fromStore = toggle.Llm is not null || toggle.Tts is not null || toggle.Asr is not null;
-        AiToggleHintText.Text = fromStore
+        DialogHintText.Text = fromStore
             ? "界面偏好 · 重启后生效"
             : "当前跟随 config.yaml";
     }
@@ -2208,10 +1927,6 @@ public partial class SettingsWindow : Window
         try
         {
             EnvHintText.Text = "识别中…";
-            EnvGpuText.Text = "检测中…";
-            EnvVulkanText.Text = "检测中…";
-            EnvCpuText.Text = "检测中…";
-            EnvMicText.Text = "检测中…";
 
             /*
              * 环境识别（nvidia-smi / vulkaninfo 子进程）与模块扫描（磁盘遍历 + 解析 module.json +
@@ -2244,11 +1959,9 @@ public partial class SettingsWindow : Window
             _enabledNames = EnabledModuleNames.Load();
             _moduleRenderSignature = null;
 
-            EnvGpuText.Text = environment.GpuText;
-            EnvVulkanText.Text = environment.VulkanText;
-            EnvCpuText.Text = environment.CpuText;
-            EnvMicText.Text = environment.MicrophoneText;
-
+            // GPU / Vulkan / CPU / 麦克风 四行只读环境信息已从本页删除：
+            // 它们与"增删模块"无关（GPU 与显存在诊断页、麦克风在语音页）。
+            // 探针仍然要跑 —— ModuleRegistry.Scan 要用它的结论判断模块可用性。
             UpdateMicDeviceText();
 
             EnvHintText.Text =
@@ -2368,7 +2081,8 @@ public partial class SettingsWindow : Window
         {
             container.Children.Add(new TextBlock
             {
-                Text = $"未发现{ModuleRegistry.KindLabel(kind)}模块 · kind={ModuleRegistry.KindKey(kind)}",
+                // 只留一句人话；"kind=tts" 这类字段名是给开发者看的，已删除。
+                Text = $"未发现{ModuleRegistry.KindLabel(kind)}模块",
                 Style = (Style)FindResource("RowHint"),
                 Margin = new Thickness(0, 2, 0, 6),
             });
@@ -2425,25 +2139,18 @@ public partial class SettingsWindow : Window
 
         texts.Children.Add(new TextBlock
         {
-            Text = module.Summary,
+            // 目录 + 体积 + 可用性合成一行（都在回答"这个模块有多大、能不能用"）。
+            // 原先拆成两行，一张卡片三行文字，三个分类叠起来把整页撑得必须滚动。
+            Text = $"{module.Summary} · {module.StatusText}",
             FontSize = 11,
             Foreground = secondary,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 2, 0, 0),
         });
 
-        texts.Children.Add(new TextBlock
-        {
-            Text = module.StatusText,
-            FontSize = 11.5,
-            Foreground = module.IsUsable ? accent : secondary,
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 2, 0, 0),
-        });
-
         Grid.SetColumn(texts, 1);
 
-        // 文案精简：卡片上只留「名称 / 目录+体积 / 已识别结论」三行，
+        // 文案精简：卡片上只留「名称 / 目录+体积+已识别结论」两行，
         // 为什么不可用（缺哪个文件、entry 指向目录…）放进 ToolTip。
         var explanation = module.EntryNote ?? module.DirectoryPath;
 
@@ -2512,8 +2219,7 @@ public partial class SettingsWindow : Window
     /// 现在的规则：
     ///   1. 内置实现也算一条可用路径。TTS 恒有 SAPI；ASR 只要 ai_asr.dll 存在即可用；
     ///   2. 语音页的通用配置项按"模块可用 || 内置可用"决定是否禁用，正常情况下恒可用；
-    ///   3. 模块缺失只用 <see cref="VoiceBuiltinHint"/> 做中性提示（可点进「拓展」，不拦操作）；
-    ///   4. 「拓展」页的模块卡片按钮/状态仍按模块自身的 <see cref="ModuleInfo.IsUsable"/>
+    ///   3. 「拓展」页的模块卡片按钮/状态仍按模块自身的 <see cref="ModuleInfo.IsUsable"/>
     ///      单独门禁 —— 那才是真正的"模块专属"控件。
     ///
     /// 幂等：只做赋值，重复调用结果完全相同（含 Content —— 不可见时不再改写它，
@@ -2569,17 +2275,9 @@ public partial class SettingsWindow : Window
                 : $"「{asr.DisplayName}」{asr.StatusText} · 去「拓展」查看";
         }
 
-        // 顶部中性提示：只要有一类在用内置路径就提示，点了去「拓展」，不阻断任何操作。
-        var ttsOnBuiltin = ttsBuiltin && !ttsUsable;
-        var asrOnBuiltin = asrBuiltin && !asrUsable;
-        VoiceBuiltinHint.Visibility = ttsOnBuiltin || asrOnBuiltin ? Visibility.Visible : Visibility.Collapsed;
-
-        if (VoiceBuiltinHint.Visibility == Visibility.Visible)
-        {
-            VoiceBuiltinHint.Content = ttsOnBuiltin
-                ? "内置引擎 · 可在「拓展」添加模块"
-                : "内置识别 · 可在「拓展」添加模块";
-        }
+        // 顶部那条"内置引擎 · 可在「拓展」添加模块"的中性提示已删除：
+        // 它既不拦任何操作，也不提供任何信息（语音页每一行都可用），
+        // 而"要不要加模块"在「拓展」页本来就有完整的清单和按钮。真门禁横幅仍然保留。
     }
 
     /// <summary>
@@ -2842,7 +2540,8 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        AutoSaveText.Text = $"已保存 {DateTime.Now:HH:mm:ss} · v{_versionText}";
+        // 版本号只在「关于」页出现一次；底栏只报保存时间。
+        AutoSaveText.Text = $"已保存 {DateTime.Now:HH:mm:ss}";
     }
 
     // ================================================================== 恢复默认
