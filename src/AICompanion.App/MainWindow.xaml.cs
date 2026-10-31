@@ -399,8 +399,10 @@ public partial class MainWindow : Window
                 _lipSync?.Start(wav);
             }
         };
-        _host.ObservableAudio.PlaybackStarted += onPlaybackStarted;
-        _unsubscribe.Add(() => _host.ObservableAudio.PlaybackStarted -= onPlaybackStarted);
+            // 音频回调发生在后台线程，统一封送回 UI 线程再碰 _live2d/_lipSync/_asrPausedForPlayback。
+            EventHandler<byte[]> onPlaybackStartedOnUi = (s, wav) => Dispatcher.BeginInvoke(new Action(() => onPlaybackStarted(s, wav)));
+            _host.ObservableAudio.PlaybackStarted += onPlaybackStartedOnUi;
+            _unsubscribe.Add(() => _host.ObservableAudio.PlaybackStarted -= onPlaybackStartedOnUi);
 
         // 播放结束/被打断 → 嘴立刻归零 + 回到 Idle + 恢复 ASR
         EventHandler onPlaybackStopped = (_, _) =>
@@ -409,13 +411,15 @@ public partial class MainWindow : Window
             _animations.ResetToIdle("playback-stopped");
             ScheduleAsrResume();
         };
-        _host.ObservableAudio.PlaybackStopped += onPlaybackStopped;
-        _unsubscribe.Add(() => _host.ObservableAudio.PlaybackStopped -= onPlaybackStopped);
+            EventHandler onPlaybackStoppedOnUi = (s, e) => Dispatcher.BeginInvoke(new Action(() => onPlaybackStopped(s, e)));
+            _host.ObservableAudio.PlaybackStopped += onPlaybackStoppedOnUi;
+            _unsubscribe.Add(() => _host.ObservableAudio.PlaybackStopped -= onPlaybackStoppedOnUi);
 
         // TTS 引擎崩溃降级 → Confused（Critical，强行打断）
         EventHandler<string> onTtsEngineFellBack = (_, engine) =>
             _animations.Request(AnimationType.Confused, AnimationPriority.Critical, $"TTS→{engine}");
-        _host.Tts.EngineFellBack += onTtsEngineFellBack;
+        EventHandler<string> onTtsEngineFellBackOnUi = (s, engine) => Dispatcher.BeginInvoke(new Action(() => onTtsEngineFellBack(s, engine)));
+            _host.Tts.EngineFellBack += onTtsEngineFellBackOnUi;
         _unsubscribe.Add(() => _host.Tts.EngineFellBack -= onTtsEngineFellBack);
 
         // config.yaml 已加载，AppPaths 现在指向真实根目录：

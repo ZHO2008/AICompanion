@@ -216,6 +216,19 @@ public sealed class ASRManager : IDisposable
 
                 _capture.Start(_config.Asr.SampleRate);
 
+                /*
+                 * 采集失败时捕获器**不抛异常**，而是同步回调 CaptureError -> OnCaptureError
+                 * -> 把状态置成 Faulted。如果这里继续往下走并 SetState(Running)，
+                 * 就把 Faulted 覆盖掉：状态机非法迁移、两条线程拿着已取消的 token 立刻退出、
+                 * 而 TryRecoverFromDeviceError 因为 state != Faulted 永远不触发（自愈彻底失效）。
+                 * 所以启动后必须回头校验一次。
+                 */
+                if (!_capture.IsCapturing)
+                {
+                    _logger.Warn("采集器未进入捕获状态，放弃本次启动（保持 Faulted，等待自愈重试）。");
+                    return;
+                }
+
                 // 手册要求的高优先级音频线程。
                 _audioThread = new Thread(AudioLoop)
                 {
@@ -399,6 +412,19 @@ public sealed class ASRManager : IDisposable
                 _pttActive = true;
                 _pttWatch.Restart();
                 _capture.Start(_config.Asr.SampleRate);
+
+                /*
+                 * 采集失败时捕获器**不抛异常**，而是同步回调 CaptureError -> OnCaptureError
+                 * -> 把状态置成 Faulted。如果这里继续往下走并 SetState(Running)，
+                 * 就把 Faulted 覆盖掉：状态机非法迁移、两条线程拿着已取消的 token 立刻退出、
+                 * 而 TryRecoverFromDeviceError 因为 state != Faulted 永远不触发（自愈彻底失效）。
+                 * 所以启动后必须回头校验一次。
+                 */
+                if (!_capture.IsCapturing)
+                {
+                    _logger.Warn("采集器未进入捕获状态，放弃本次启动（保持 Faulted，等待自愈重试）。");
+                    return;
+                }
                 SetState(AsrState.Running);
                 _logger.Info("PTT 按下：开始录音。");
             }
