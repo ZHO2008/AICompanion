@@ -53,8 +53,14 @@ public sealed class PiperEngine : ITTSEngine
 
     public string Name => "piper";
 
-    /// <summary>手册要求：通过检查模型文件是否存在来判断可用性。</summary>
-    public bool IsAvailable => File.Exists(_configuredModelPath);
+    /// <summary>
+    /// 可用 = **模型文件在 且 piper.exe 在**。
+    ///
+    /// 只判模型文件曾导致一个真实故障：机器上有 onnx 但没有 piper.exe，
+    /// IsAvailable 报 true → 上层不再降级到 SAPI → 合成时空等 → 无声。
+    /// 因此这里必须两项都满足；exe 缺失时由 TTSManager 继续降级。
+    /// </summary>
+    public bool IsAvailable => File.Exists(_configuredModelPath) && File.Exists(_executablePath);
 
     /// <summary>进程外 piper.exe 是否就绪。</summary>
     public bool IsExecutableAvailable => File.Exists(_executablePath);

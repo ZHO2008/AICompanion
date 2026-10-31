@@ -239,6 +239,19 @@ public sealed class LlamaServerController : IAsyncDisposable
          * 与模型文件在不在是两件互相独立的事，显存查询本身不受影响。
          * 因此先算模式，再按手册 §6 的顺序做"致命缺失"校验。
          */
+        /*
+         * 顺序：**先定模型路径与上下文长度，再算 ngl**。
+         *
+         * 之前是反的：CalculateNglAsync 用旧的 ContextLength（4096）算 KV 预留，
+         * 长上下文模型首启时 KV 被低估 -> ngl 偏高 -> 直接 OOM。
+         * 模型路径解析本身不依赖显存，提前做不影响"模型缺失也要有运行模式"的初衷。
+         */
+        var modelPathEarly = AppPaths.Resolve(_config.Llm.ModelPath);
+        if (File.Exists(modelPathEarly))
+        {
+            ApplyModelContextLength(modelPathEarly);
+        }
+
         var plan = await _gpu.CalculateNglAsync(cancellationToken).ConfigureAwait(false);
 
         // ---- 手册 §6：模型文件缺失属"致命缺失"，必须阻断并清晰提示 ----
@@ -251,8 +264,6 @@ public sealed class LlamaServerController : IAsyncDisposable
             return new LlamaStartResult(LlamaStartOutcome.ModelFileMissing, 0, message, plan);
         }
 
-        // 上下文长度适配：config 写 0 时按 GGUF 元数据自动（含架构与训练上限）
-        ApplyModelContextLength(modelPath);
 
         var exePath = AppPaths.Resolve(_config.Llm.ServerExecutablePath);
         if (!File.Exists(exePath))
