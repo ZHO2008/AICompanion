@@ -1,0 +1,7 @@
+{
+  "name": "llm-vulkan",
+  "kind": "llm",
+  "display": "Vulkan 版对话模块",
+  "requires": "vulkan",
+  "entry": "llama-server.exe"
+}

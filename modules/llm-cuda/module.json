@@ -1,0 +1,7 @@
+{
+  "name": "llm-cuda",
+  "kind": "llm",
+  "display": "CUDA 版对话模块",
+  "requires": "nvidia",
+  "entry": "llama-server.exe"
+}

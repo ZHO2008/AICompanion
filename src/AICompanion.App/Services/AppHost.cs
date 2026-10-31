@@ -232,6 +232,7 @@ public sealed class AppHost : IAsyncDisposable
         // ---------- 3. 核心组件（构造顺序按依赖关系） ----------
         ApplyTtsEnginePreference();
         ApplyAiTogglePreference();
+        ApplySettingsPanelPreferences();
 
         NvidiaSmi = new NvidiaSmi(Logger);
         RuntimeMode = new RuntimeModeState();
@@ -494,6 +495,133 @@ public sealed class AppHost : IAsyncDisposable
             set(preferred.Value);
             Logger.Info(
                 $"按界面偏好把 {name}.enabled 由 config.yaml 的 {fromConfig} 覆盖为 {preferred.Value}" +
+                "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+        }
+    }
+
+    /// <summary>
+    /// 应用设置面板保存的其余偏好（都存在 Assets\appearance.json）。
+    ///
+    /// 这里只改内存里的 Config，绝不回写 config.yaml（准则 9）。
+    /// 必须赶在 NvidiaSmi / Llama / Tts / Asr 构造之前调用：
+    /// 模型路径、上下文长度、采集源、Live2D 开关都会被这些组件在构造时读取。
+    /// </summary>
+    private void ApplySettingsPanelPreferences()
+    {
+        try
+        {
+            ApplyText("llm.model_path", AppearanceStore.LoadLlmModelPath(), Config.Llm.ModelPath,
+                value => Config.Llm.ModelPath = value);
+
+            if (AppearanceStore.LoadLlmContextLength() is { } contextLength &&
+                contextLength != Config.Llm.ContextLength)
+            {
+                Logger.Info(
+                    $"按界面偏好把 llm.context_length 由 {Config.Llm.ContextLength} 覆盖为 {contextLength}" +
+                    "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+                Config.Llm.ContextLength = contextLength;
+            }
+
+            if (AppearanceStore.LoadGpuReservedMb() is { } reservedMb && reservedMb != Config.Gpu.ReservedMb)
+            {
+                Logger.Info(
+                    $"按界面偏好把 gpu.reserved_mb 由 {Config.Gpu.ReservedMb} 覆盖为 {reservedMb}" +
+                    "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+                Config.Gpu.ReservedMb = reservedMb;
+            }
+
+            ApplyText("tts.default_voice", AppearanceStore.LoadTtsVoice(), Config.Tts.DefaultVoice,
+                value => Config.Tts.DefaultVoice = value);
+
+            if (AppearanceStore.LoadTtsSpeed() is { } speed &&
+                Math.Abs(speed - Config.Tts.GptSoVits.SpeedFactor) > 0.001)
+            {
+                Logger.Info(
+                    $"按界面偏好把 tts.gpt_sovits.speed_factor 由 {Config.Tts.GptSoVits.SpeedFactor:F2} 覆盖为 {speed:F2}" +
+                    "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+                Config.Tts.GptSoVits.SpeedFactor = speed;
+            }
+
+            ApplyText("asr.capture", AppearanceStore.LoadAsrCapture(), Config.Asr.Capture,
+                value => Config.Asr.Capture = value);
+
+            ApplyFlag("ui.transparent_hover_switch", AppearanceStore.LoadHoverSwitch(),
+                Config.Ui.TransparentHoverSwitch, value => Config.Ui.TransparentHoverSwitch = value);
+
+            ApplyFlag("ui.click_through", AppearanceStore.LoadClickThrough(),
+                Config.Ui.ClickThrough, value => Config.Ui.ClickThrough = value);
+
+            ApplyFlag("asr.push_to_talk", AppearanceStore.LoadPushToTalk(),
+                Config.Asr.PushToTalk, value => Config.Asr.PushToTalk = value);
+
+            if (AppearanceStore.LoadIdleMinutes() is { } idleMinutes &&
+                Math.Abs(idleMinutes - Config.Idle.IdleMinutes) > 0.001)
+            {
+                Logger.Info($"按界面偏好把 idle.idle_minutes 由 {Config.Idle.IdleMinutes:N0} 覆盖为 {idleMinutes:N0} 分钟。");
+                Config.Idle.IdleMinutes = idleMinutes;
+            }
+
+            if (AppearanceStore.LoadMaintenanceCooldownMinutes() is { } cooldown &&
+                Math.Abs(cooldown - Config.Idle.MaintenanceCooldownMinutes) > 0.001)
+            {
+                Logger.Info(
+                    $"按界面偏好把 idle.maintenance_cooldown_minutes 由 " +
+                    $"{Config.Idle.MaintenanceCooldownMinutes:N0} 覆盖为 {cooldown:N0} 分钟。");
+                Config.Idle.MaintenanceCooldownMinutes = cooldown;
+            }
+
+            // Live2D 开关：关掉就把模型路径清空，MainWindow 会按既有降级链落到静态立绘。
+            if (AppearanceStore.LoadLive2dEnabled() is false)
+            {
+                Logger.Info("按界面偏好关闭 Live2D 渲染（下次启动使用静态立绘）。");
+                Config.Live2d.DefaultModelPath = string.Empty;
+            }
+            else
+            {
+                ApplyText("live2d.default_model_path", AppearanceStore.LoadLive2dModelPath(),
+                    Config.Live2d.DefaultModelPath, value => Config.Live2d.DefaultModelPath = value);
+            }
+
+            // 启用中的对话模块：入口可执行文件替换 config.yaml 的 llm.server_executable_path。
+            var moduleEntry = ModuleRegistry.ResolveEnabledEntryRelative(ModuleKind.Llm);
+            if (!string.IsNullOrWhiteSpace(moduleEntry) &&
+                !string.Equals(moduleEntry, Config.Llm.ServerExecutablePath, StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.Info(
+                    $"按界面偏好把 llm.server_executable_path 覆盖为 {moduleEntry}" +
+                    "（来源 Assets\\appearance.json 里启用的模块，未改动 config.yaml）。");
+                Config.Llm.ServerExecutablePath = moduleEntry;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"读取设置面板偏好失败（不影响启动，按 config.yaml 运行）：{ex.Message}");
+        }
+
+        void ApplyText(string name, string? preferred, string current, Action<string> set)
+        {
+            if (string.IsNullOrWhiteSpace(preferred) ||
+                string.Equals(preferred, current, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            set(preferred);
+            Logger.Info(
+                $"按界面偏好把 {name} 由 \"{current}\" 覆盖为 \"{preferred}\"" +
+                "（来源 Assets\\appearance.json，未改动 config.yaml）。");
+        }
+
+        void ApplyFlag(string name, bool? preferred, bool current, Action<bool> set)
+        {
+            if (preferred is null || preferred.Value == current)
+            {
+                return;
+            }
+
+            set(preferred.Value);
+            Logger.Info(
+                $"按界面偏好把 {name} 由 {current} 覆盖为 {preferred.Value}" +
                 "（来源 Assets\\appearance.json，未改动 config.yaml）。");
         }
     }

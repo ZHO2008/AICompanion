@@ -64,6 +64,48 @@ public static class AppearanceStore
 
         public bool? AsrEnabled { get; set; }
 
+        /// <summary>设置面板「对话」页选的 GGUF 路径（相对仓库根）；null 表示跟随 config.yaml。</summary>
+        public string? LlmModelPath { get; set; }
+
+        /// <summary>上下文长度；0 = 自动（按 GGUF 元数据），null 表示跟随 config.yaml。</summary>
+        public int? LlmContextLength { get; set; }
+
+        /// <summary>系统预留显存（MB）；0 = 按显存档位自动，null 表示跟随 config.yaml。</summary>
+        public int? GpuReservedMb { get; set; }
+
+        public string? TtsVoice { get; set; }
+
+        public double? TtsSpeed { get; set; }
+
+        /// <summary>ASR 采集源：microphone / loopback。</summary>
+        public string? AsrCapture { get; set; }
+
+        public bool? HoverSwitch { get; set; }
+
+        public bool? ClickThrough { get; set; }
+
+        public bool? PushToTalk { get; set; }
+
+        public double? IdleMinutes { get; set; }
+
+        public double? MaintenanceCooldownMinutes { get; set; }
+
+        /// <summary>桌宠窗口启动位置（DIP，屏幕坐标）。</summary>
+        public double? StartX { get; set; }
+
+        public double? StartY { get; set; }
+
+        public bool? Live2dEnabled { get; set; }
+
+        /// <summary>设置面板选中的 Live2D 模型（相对仓库根）；null 表示跟随 config.yaml。</summary>
+        public string? Live2dModelPath { get; set; }
+
+        /// <summary>三类模块各自启用中的目录名；null 表示未指定（取第一个可用模块）。</summary>
+        public string? LlmModule { get; set; }
+
+        public string? TtsModule { get; set; }
+
+        public string? AsrModule { get; set; }
     }
 
     private static Model LoadModel()
@@ -97,7 +139,28 @@ public static class AppearanceStore
                 model.BubbleSeconds is null &&
                 model.TransparentOpacity is null &&
                 model.HorizontalOffset is null &&
-                string.IsNullOrWhiteSpace(model.TtsEngine))
+                string.IsNullOrWhiteSpace(model.TtsEngine) &&
+                model.LlmEnabled is null &&
+                model.TtsEnabled is null &&
+                model.AsrEnabled is null &&
+                string.IsNullOrWhiteSpace(model.LlmModelPath) &&
+                model.LlmContextLength is null &&
+                model.GpuReservedMb is null &&
+                string.IsNullOrWhiteSpace(model.TtsVoice) &&
+                model.TtsSpeed is null &&
+                string.IsNullOrWhiteSpace(model.AsrCapture) &&
+                model.HoverSwitch is null &&
+                model.ClickThrough is null &&
+                model.PushToTalk is null &&
+                model.IdleMinutes is null &&
+                model.MaintenanceCooldownMinutes is null &&
+                model.StartX is null &&
+                model.StartY is null &&
+                model.Live2dEnabled is null &&
+                string.IsNullOrWhiteSpace(model.Live2dModelPath) &&
+                string.IsNullOrWhiteSpace(model.LlmModule) &&
+                string.IsNullOrWhiteSpace(model.TtsModule) &&
+                string.IsNullOrWhiteSpace(model.AsrModule))
             {
                 if (File.Exists(path))
                 {
@@ -235,5 +298,240 @@ public static class AppearanceStore
         model.TtsEnabled = tts;
         model.AsrEnabled = asr;
         return SaveModel(model);
+    }
+
+    // ------------------------------------------------------------------ 设置面板新增字段
+    //
+    // 说明：这些字段都是"设置面板改了就想记住"的运行时偏好。
+    // 仍然只写 Assets\appearance.json，config.yaml 一个字都不动（准则 9）。
+
+    /// <summary>对话页：用户选的 GGUF（相对仓库根）。</summary>
+    public static string? LoadLlmModelPath() => LoadModel().LlmModelPath;
+
+    public static bool SaveLlmModelPath(string? relativePath)
+    {
+        var model = LoadModel();
+        model.LlmModelPath = string.IsNullOrWhiteSpace(relativePath) ? null : relativePath.Trim();
+        return SaveModel(model);
+    }
+
+    /// <summary>对话页：上下文长度；0 = 自动。</summary>
+    public static int? LoadLlmContextLength()
+    {
+        var value = LoadModel().LlmContextLength;
+        return value is >= 0 and <= 262144 ? value : null;
+    }
+
+    public static bool SaveLlmContextLength(int? value)
+    {
+        var model = LoadModel();
+        model.LlmContextLength = value is >= 0 and <= 262144 ? value : null;
+        return SaveModel(model);
+    }
+
+    /// <summary>对话页：系统预留显存（MB）；0 = 按显存档位自动。</summary>
+    public static int? LoadGpuReservedMb()
+    {
+        var value = LoadModel().GpuReservedMb;
+        return value is >= 0 and <= 262144 ? value : null;
+    }
+
+    public static bool SaveGpuReservedMb(int? value)
+    {
+        var model = LoadModel();
+        model.GpuReservedMb = value is >= 0 and <= 262144 ? value : null;
+        return SaveModel(model);
+    }
+
+    /// <summary>语音页：全局默认音色。</summary>
+    public static string? LoadTtsVoice()
+    {
+        var voice = LoadModel().TtsVoice;
+        return string.IsNullOrWhiteSpace(voice) ? null : voice.Trim();
+    }
+
+    public static bool SaveTtsVoice(string? voice)
+    {
+        var model = LoadModel();
+        model.TtsVoice = string.IsNullOrWhiteSpace(voice) ? null : voice.Trim();
+        return SaveModel(model);
+    }
+
+    /// <summary>语音页：语速系数。</summary>
+    public static double? LoadTtsSpeed()
+    {
+        var speed = LoadModel().TtsSpeed;
+        return speed is >= 0.5 and <= 2.0 ? speed : null;
+    }
+
+    public static bool SaveTtsSpeed(double? speed)
+    {
+        var model = LoadModel();
+        model.TtsSpeed = speed is >= 0.5 and <= 2.0 ? speed : null;
+        return SaveModel(model);
+    }
+
+    /// <summary>语音页：采集源（microphone / loopback）。</summary>
+    public static string? LoadAsrCapture()
+    {
+        var capture = LoadModel().AsrCapture;
+        return string.IsNullOrWhiteSpace(capture) ? null : capture.Trim().ToLowerInvariant();
+    }
+
+    public static bool SaveAsrCapture(string? capture)
+    {
+        var model = LoadModel();
+        model.AsrCapture = string.IsNullOrWhiteSpace(capture) ? null : capture.Trim().ToLowerInvariant();
+        return SaveModel(model);
+    }
+
+    public static bool? LoadHoverSwitch() => LoadModel().HoverSwitch;
+
+    public static bool SaveHoverSwitch(bool? enabled)
+    {
+        var model = LoadModel();
+        model.HoverSwitch = enabled;
+        return SaveModel(model);
+    }
+
+    public static bool? LoadClickThrough() => LoadModel().ClickThrough;
+
+    public static bool SaveClickThrough(bool? enabled)
+    {
+        var model = LoadModel();
+        model.ClickThrough = enabled;
+        return SaveModel(model);
+    }
+
+    public static bool? LoadPushToTalk() => LoadModel().PushToTalk;
+
+    public static bool SavePushToTalk(bool? enabled)
+    {
+        var model = LoadModel();
+        model.PushToTalk = enabled;
+        return SaveModel(model);
+    }
+
+    public static double? LoadIdleMinutes()
+    {
+        var value = LoadModel().IdleMinutes;
+        return value is >= 1 and <= 120 ? value : null;
+    }
+
+    public static bool SaveIdleMinutes(double? minutes)
+    {
+        var model = LoadModel();
+        model.IdleMinutes = minutes is >= 1 and <= 120 ? minutes : null;
+        return SaveModel(model);
+    }
+
+    public static double? LoadMaintenanceCooldownMinutes()
+    {
+        var value = LoadModel().MaintenanceCooldownMinutes;
+        return value is >= 1 and <= 240 ? value : null;
+    }
+
+    public static bool SaveMaintenanceCooldownMinutes(double? minutes)
+    {
+        var model = LoadModel();
+        model.MaintenanceCooldownMinutes = minutes is >= 1 and <= 240 ? minutes : null;
+        return SaveModel(model);
+    }
+
+    /// <summary>桌宠窗口的启动位置（DIP）。</summary>
+    public sealed record StartPosition(double X, double Y);
+
+    public static StartPosition? LoadStartPosition()
+    {
+        var model = LoadModel();
+        return model.StartX is { } x && model.StartY is { } y
+            ? new StartPosition(x, y)
+            : null;
+    }
+
+    public static bool SaveStartPosition(double? x, double? y)
+    {
+        var model = LoadModel();
+        model.StartX = x;
+        model.StartY = y;
+        return SaveModel(model);
+    }
+
+    public static bool? LoadLive2dEnabled() => LoadModel().Live2dEnabled;
+
+    public static bool SaveLive2dEnabled(bool? enabled)
+    {
+        var model = LoadModel();
+        model.Live2dEnabled = enabled;
+        return SaveModel(model);
+    }
+
+    public static string? LoadLive2dModelPath() => LoadModel().Live2dModelPath;
+
+    public static bool SaveLive2dModelPath(string? relativePath)
+    {
+        var model = LoadModel();
+        model.Live2dModelPath = string.IsNullOrWhiteSpace(relativePath) ? null : relativePath.Trim();
+        return SaveModel(model);
+    }
+
+    /// <summary>读取某一类（llm / tts / asr）启用中的模块目录名。</summary>
+    public static string? LoadEnabledModule(string kind)
+    {
+        var model = LoadModel();
+
+        return kind.ToLowerInvariant() switch
+        {
+            "llm" => string.IsNullOrWhiteSpace(model.LlmModule) ? null : model.LlmModule,
+            "tts" => string.IsNullOrWhiteSpace(model.TtsModule) ? null : model.TtsModule,
+            "asr" => string.IsNullOrWhiteSpace(model.AsrModule) ? null : model.AsrModule,
+            _ => null,
+        };
+    }
+
+    /// <summary>保存某一类启用中的模块目录名；传 null 表示回到"第一个可用模块"。</summary>
+    public static bool SaveEnabledModule(string kind, string? directoryName)
+    {
+        var model = LoadModel();
+        var value = string.IsNullOrWhiteSpace(directoryName) ? null : directoryName.Trim();
+
+        switch (kind.ToLowerInvariant())
+        {
+            case "llm":
+                model.LlmModule = value;
+                break;
+            case "tts":
+                model.TtsModule = value;
+                break;
+            case "asr":
+                model.AsrModule = value;
+                break;
+            default:
+                return false;
+        }
+
+        return SaveModel(model);
+    }
+
+    /// <summary>
+    /// 清除全部界面覆盖（「恢复默认（清除覆盖）」按钮）：删掉 appearance.json。
+    /// config.yaml 始终只读，所以删文件就等于回到出厂默认。
+    /// </summary>
+    public static bool ClearAll()
+    {
+        try
+        {
+            var path = StorePath;
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

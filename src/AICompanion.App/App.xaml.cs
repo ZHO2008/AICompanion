@@ -158,6 +158,22 @@ public partial class App : Application
             _mainWindow.OnHostReady();
             _tray.OnHostReady();
 
+            // 设置面板「行为 → 启动位置」保存的坐标：只在用户明确设过时覆盖自动贴底居中。
+            // 仍然存在 Assets\appearance.json，config.yaml 不动。
+            if (Services.AppearanceStore.LoadStartPosition() is { } startPosition)
+            {
+                var maxLeft = SystemParameters.VirtualScreenLeft +
+                              Math.Max(0, SystemParameters.VirtualScreenWidth - 80);
+                var maxTop = SystemParameters.VirtualScreenTop +
+                             Math.Max(0, SystemParameters.VirtualScreenHeight - 80);
+
+                _mainWindow.Left = Math.Clamp(startPosition.X, SystemParameters.VirtualScreenLeft, maxLeft);
+                _mainWindow.Top = Math.Clamp(startPosition.Y, SystemParameters.VirtualScreenTop, maxTop);
+
+                _host.Logger.Info(
+                    $"按界面偏好把桌宠窗口放到启动位置 {_mainWindow.Left:F0}, {_mainWindow.Top:F0}（DIP）。");
+            }
+
             // 用户再次双击图标时，把窗口显示出来（并置前），而不是让第二份程序跑起来。
             var window = _mainWindow;
             SingleInstance.StartListener(() => Dispatcher.BeginInvoke(new Action(() =>
