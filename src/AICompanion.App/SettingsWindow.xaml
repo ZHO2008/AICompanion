@@ -834,7 +834,7 @@
                         <StackPanel>
                             <TextBlock Style="{StaticResource SectionTitle}" Text="对话模块" />
                             <StackPanel x:Name="LlmModuleList" />
-                            <Button Content="＋ 添加对话模块" Style="{StaticResource LinkButton}" Click="OnAddLlmModule" />
+                            <!-- 模块以压缩包分发：解压到 modules/ 后点「刷新」即可识别，不再提供"添加"入口 -->
                         </StackPanel>
                     </Border>
 
@@ -842,7 +842,7 @@
                         <StackPanel>
                             <TextBlock Style="{StaticResource SectionTitle}" Text="语音合成模块" />
                             <StackPanel x:Name="TtsModuleList" />
-                            <Button Content="＋ 添加语音模块" Style="{StaticResource LinkButton}" Click="OnAddTtsModule" />
+                            
                         </StackPanel>
                     </Border>
 
@@ -850,7 +850,7 @@
                         <StackPanel>
                             <TextBlock Style="{StaticResource SectionTitle}" Text="识别模块" />
                             <StackPanel x:Name="AsrModuleList" />
-                            <Button Content="＋ 添加识别模块" Style="{StaticResource LinkButton}" Click="OnAddAsrModule" />
+                            
                         </StackPanel>
                     </Border>
                 </StackPanel>

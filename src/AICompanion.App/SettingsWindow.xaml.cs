@@ -425,6 +425,39 @@ public partial class SettingsWindow : Window
 
     private sealed record AppearanceAssetOption(string? Live2dPath, string? ImagePath);
 
+    /// <summary>
+    /// 立绘/模型枚举时的排除规则。除构建产物外，还把源码、分发目录、临时/调试目录
+    /// （尤其是 .dsh-pilot 这种调试截图目录）一并排除，避免把无关图片当成"立绘"。
+    /// </summary>
+    private static bool IsExcludedAssetPath(string relative)
+    {
+        string[] excludedPrefixes =
+        {
+            "bin/", "obj/", "logs/", "models/", "third_party/", "pack/", "dist/",
+            "artifacts/", "src/", "tools/", "docs/", ".git/", ".dsh-pilot/", ".vs/",
+            "node_modules/", "temp/", "tmp/",
+        };
+
+        foreach (var prefix in excludedPrefixes)
+        {
+            if (relative.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        // 路径里任何一层是隐藏目录（以 . 开头）都不该被当成素材。
+        foreach (var segment in relative.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment.StartsWith(".", StringComparison.Ordinal) && segment.Length > 1)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>只枚举仓库根下的指定扩展名，跳过 bin/obj/logs/models 这些大目录。</summary>
     private static IEnumerable<string> SafeEnumerate(string pattern, int limit)
     {
@@ -435,12 +468,14 @@ public partial class SettingsWindow : Window
             foreach (var file in Directory.EnumerateFiles(AppPaths.Root, pattern, SearchOption.AllDirectories))
             {
                 var relative = RelativeToRoot(file);
-                if (relative.StartsWith("bin/", StringComparison.OrdinalIgnoreCase) ||
-                    relative.StartsWith("obj/", StringComparison.OrdinalIgnoreCase) ||
-                    relative.StartsWith("logs/", StringComparison.OrdinalIgnoreCase) ||
-                    relative.StartsWith("models/", StringComparison.OrdinalIgnoreCase) ||
-                    relative.StartsWith("third_party/", StringComparison.OrdinalIgnoreCase) ||
-                    relative.StartsWith("pack/", StringComparison.OrdinalIgnoreCase))
+                /*
+                 * 必须是白名单式的排除，而不是"看起来没关系就放进来"。
+                 *
+                 * 踩过的坑：把调试截图放在仓库根的 .dsh-pilot/ 下，立绘下拉里就冒出
+                 * 一整串 "立绘 · .dsh-pilot/screen-*.png" —— 用户看到的是我的调试垃圾。
+                 * 所以除了构建产物，把源码、素材缓存、分发目录、临时目录也一并排除。
+                 */
+                if (IsExcludedAssetPath(relative))
                 {
                     continue;
                 }
@@ -885,6 +920,18 @@ public partial class SettingsWindow : Window
         ScheduleApply(AppearanceChange.Avatar);
     }
 
+    /// <summary>把一个外观变更立刻交给主窗口（不等待防抖落盘），用于拖滑块时的实时反馈。</summary>
+    private void ApplyScaleImmediately()
+    {
+        try
+        {
+            _host.RequestAppearanceChange(AppearanceChange.Scale);
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Debug($"实时应用缩放失败（下次启动仍会生效）：{ex.Message}");
+        }
+    }
     private void OnScaleChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (!_appearanceInitialized)
@@ -894,6 +941,10 @@ public partial class SettingsWindow : Window
 
         UpdateAppearanceLabels();
         AppearanceHintText.Text = $"缩放 {ScaleSlider.Value:P0} 已应用";
+
+        // 拖动过程中就应用：先立即请求，再对"落盘"做防抖。
+        // 不这样做的话，用户拖着滑块看不到窗口变化，只能松手后才知道大小。
+        ApplyScaleImmediately();
         ScheduleSave("scale", () => AppearanceStore.SaveScale(Math.Round(ScaleSlider.Value, 2)));
         ScheduleApply(AppearanceChange.Scale);
     }

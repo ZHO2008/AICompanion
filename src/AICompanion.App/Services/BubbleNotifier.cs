@@ -95,8 +95,22 @@ public sealed class BubbleNotifier : IBubbleNotifier
     /// </summary>
     public TimeSpan DefaultDuration { get; set; } = TimeSpan.FromSeconds(5);
 
+    /*
+     * 只有"错误"才弹气泡。
+     *
+     * 反馈很明确：待审核知识、GPU 降级、模块接入情况这类提示一直在弹，用户觉得吵。
+     * 现在 Info/Warning 一律只写日志（排障时仍可查），界面上只保留真正的错误。
+     * 需要临时放开时把 SilenceNonErrorBubbles 置 false。
+     */
+    private static bool SilenceNonErrorBubbles => true;
+
     public void Show(string key, string message, BubbleLevel level = BubbleLevel.Info, TimeSpan? duration = null)
     {
+        if (SilenceNonErrorBubbles && level != BubbleLevel.Error)
+        {
+            _logger.Debug($"[气泡已静音/{level}] {key}: {message}");
+            return;
+        }
         if (string.IsNullOrWhiteSpace(key))
         {
             key = "bubble-" + Guid.NewGuid().ToString("N");
