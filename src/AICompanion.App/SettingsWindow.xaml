@@ -87,12 +87,12 @@
                     <TextBox x:Name="SearchBox"
                              Grid.Row="0"
                              TextChanged="OnSearchChanged"
-                             ToolTip="输入中文标签片段，立即过滤当前标签页里的设置项（大小写与空白不敏感）" />
+                             ToolTip="按标签过滤当前页（大小写、全角、空白都不敏感）" />
 
                     <TextBlock Grid.Row="1"
                                Style="{StaticResource RowHint}"
                                Margin="2,6,0,8"
-                               Text="搜索范围：当前标签页" />
+                               Text="仅当前页" />
 
                     <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
                         <StackPanel>
@@ -111,7 +111,7 @@
                                        Style="{StaticResource RowHint}"
                                        Margin="4,10,0,0"
                                        Visibility="Collapsed"
-                                       Text="当前页没有匹配的设置项。" />
+                                       Text="没有匹配项" />
                         </StackPanel>
                     </ScrollViewer>
                 </Grid>
@@ -139,7 +139,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="桌宠窗口" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="只是隐藏窗口，进程与语音服务继续运行" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="隐藏不退出进程" ToolTip="只是隐藏窗口，进程与语音服务继续运行" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Button Content="隐藏桌宠" Click="OnHidePet" Style="{StaticResource GhostButton}" />
@@ -160,7 +160,7 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Grid.Column="0" Style="{StaticResource RowLabel}" Text="托盘图标" />
-                                    <TextBlock Grid.Column="1" Style="{StaticResource ValueText}" Text="常驻（关闭窗口后仍可唤出）" />
+                                    <TextBlock Grid.Column="1" Style="{StaticResource ValueText}" Text="常驻" ToolTip="关闭窗口后仍可唤出" />
                                 </Grid>
                             </StackPanel>
                         </Border>
@@ -176,7 +176,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="模型 / 立绘" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="Live2D 模型优先于静态立绘；换模型需重启，立绘与开关即时生效" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="换模型需重启" ToolTip="Live2D 优先于静态立绘；立绘与开关即时生效，换模型需重启" />
                                     </StackPanel>
                                     <ComboBox x:Name="AppearanceAssetCombo"
                                               Grid.Column="1"
@@ -191,7 +191,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="Live2D 渲染" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="关闭后立刻切回静态立绘" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="关闭即切回立绘" />
                                     </StackPanel>
                                     <CheckBox x:Name="Live2dCheck"
                                               Grid.Column="1"
@@ -207,7 +207,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="缩放等级" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="角色整体大小，拖动即刻生效" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="整体大小 · 即时生效" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="ScaleSlider"
@@ -228,7 +228,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="渲染分辨率" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="由角色大小与屏幕 DPI 决定，没有独立的分辨率配置项" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="按屏幕 DPI 换算" ToolTip="由角色大小与屏幕 DPI 决定，没有独立的分辨率配置项" />
                                     </StackPanel>
                                     <TextBlock x:Name="RenderResolutionText" Grid.Column="1" Style="{StaticResource ValueText}" Text="—" />
                                 </Grid>
@@ -240,7 +240,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="透明态不透明度" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="覆盖态恒为不透明；透明态按此比例变淡" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="仅透明态生效" ToolTip="覆盖态恒为不透明；透明态按此比例变淡" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="OpacitySlider"
@@ -261,7 +261,6 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="气泡时长" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="提示气泡显示多少秒后自动隐藏" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="BubbleSecondsSlider"
@@ -282,7 +281,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="模型水平微调" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="Live2D 自带画布偏移时用来微调，0 = 自动居中" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="0 = 自动居中" ToolTip="Live2D 自带画布偏移时用来微调" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="HorizontalOffsetSlider"
@@ -304,7 +303,7 @@
                                 <TextBlock x:Name="AppearanceHintText"
                                            Style="{StaticResource AccentText}"
                                            Margin="0,6,0,0"
-                                           Text="改动即时生效，并自动保存到 Assets\appearance.json（不改 config.yaml）" />
+                                           Text="自动保存 · 不改 config.yaml" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -317,7 +316,7 @@
                                 Style="{StaticResource GateBanner}"
                                 Visibility="Collapsed"
                                 Click="OnGoToExtend"
-                                Content="尚未启用对话模块 → 去「拓展」添加" />
+                                Content="尚未启用对话模块 · 去「拓展」添加" />
 
                         <Border x:Name="SectionDialog" Style="{StaticResource Card}" Tag="card">
                             <StackPanel>
@@ -331,7 +330,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="对话（本地大模型）" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="关闭后不加载 GGUF、不启动 llama-server（下次启动生效）" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="关闭后不加载模型" ToolTip="不加载 GGUF、不启动 llama-server（下次启动生效）" />
                                         </StackPanel>
                                         <CheckBox x:Name="LlmEnabledCheck"
                                                   Grid.Column="1"
@@ -347,7 +346,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="模型路径" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="models/llm/**/*.gguf（下次启动生效）" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="models/llm/**/*.gguf" />
                                         </StackPanel>
                                         <ComboBox x:Name="LlmModelCombo"
                                                   Grid.Column="1"
@@ -362,7 +361,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="上下文长度" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="自动 = 按 GGUF 元数据取 min(模型上限, 8192)" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="自动 = 按模型上限" ToolTip="按 GGUF 元数据取 min(模型上限, 8192)" />
                                         </StackPanel>
                                         <ComboBox x:Name="LlmContextCombo"
                                                   Grid.Column="1"
@@ -377,7 +376,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="显存策略" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="系统预留显存；自动 = 按显存档位估算（下次启动生效）" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="系统预留显存；自动 = 按显存档位估算" />
                                         </StackPanel>
                                         <ComboBox x:Name="GpuStrategyCombo"
                                                   Grid.Column="1"
@@ -392,7 +391,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="后端选择" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="对应 modules/ 下已识别的对话模块（下次启动生效）" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="对应 modules/ 下已识别的对话模块" />
                                         </StackPanel>
                                         <ComboBox x:Name="LlmBackendCombo"
                                                   Grid.Column="1"
@@ -404,11 +403,11 @@
                                 <TextBlock x:Name="AiToggleHintText"
                                            Style="{StaticResource AccentText}"
                                            Margin="0,8,0,0"
-                                           Text="当前跟随 config.yaml" />
+                                           Text="跟随 config.yaml" />
                                 <TextBlock x:Name="DialogHintText"
                                            Style="{StaticResource RowHint}"
                                            Margin="0,4,0,0"
-                                           Text="开关类改动在下次启动生效：组件是在启动阶段按开关创建的。" />
+                                           Text="开关类改动下次启动生效" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -426,19 +425,19 @@
                                 Style="{StaticResource GateBanner}"
                                 Visibility="Collapsed"
                                 Click="OnGoToExtend"
-                                Content="当前使用内置语音引擎；如需其他实现，可到「拓展」添加模块" />
+                                Content="内置引擎 · 可在「拓展」添加模块" />
 
                         <!-- 真门禁：某一类"既无模块、也无内置实现"时才出现（见 ApplyGates）。 -->
                         <Button x:Name="TtsGateBanner"
                                 Style="{StaticResource GateBanner}"
                                 Visibility="Collapsed"
                                 Click="OnGoToExtend"
-                                Content="语音合成暂无可用实现（既没有模块，也没有内置 SAPI）→ 去「拓展」添加" />
+                                Content="语音合成不可用 · 去「拓展」添加模块" />
                         <Button x:Name="AsrGateBanner"
                                 Style="{StaticResource GateBanner}"
                                 Visibility="Collapsed"
                                 Click="OnGoToExtend"
-                                Content="语音识别暂无可用实现（既没有模块，也没有 ai_asr.dll 桥接）→ 去「拓展」添加" />
+                                Content="语音识别不可用 · 去「拓展」添加模块" />
 
                         <Border x:Name="SectionVoice" Style="{StaticResource Card}" Tag="card">
                             <StackPanel>
@@ -451,7 +450,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="语音输出（TTS）" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="关闭后只显示文字气泡、不出声（下次启动生效）" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="关闭后只显示文字气泡、不出声" />
                                         </StackPanel>
                                         <CheckBox x:Name="TtsEnabledCheck"
                                                   Grid.Column="1"
@@ -482,7 +481,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="音色" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="全局默认音色；角色缺失配置时使用" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="角色缺省时使用" />
                                         </StackPanel>
                                         <TextBox x:Name="TtsVoiceBox"
                                                  Grid.Column="1"
@@ -497,7 +496,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="语速" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="与角色自身的语速相乘" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="与角色语速相乘" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                             <Slider x:Name="TtsSpeedSlider"
@@ -557,7 +556,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="语音输入（ASR）" />
-                                            <TextBlock Style="{StaticResource RowHint}" Text="关闭后不加载识别模型、不打开麦克风（下次启动生效）" />
+                                            <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="不加载识别模型、不打开麦克风" />
                                         </StackPanel>
                                         <CheckBox x:Name="AsrEnabledCheck"
                                                   Grid.Column="1"
@@ -573,7 +572,7 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                             <TextBlock Style="{StaticResource RowLabel}" Text="麦克风 / 采集源" />
-                                            <TextBlock x:Name="MicDeviceText" Style="{StaticResource RowHint}" Text="正在识别麦克风设备…" />
+                                            <TextBlock x:Name="MicDeviceText" Style="{StaticResource RowHint}" Text="识别中…" />
                                         </StackPanel>
                                         <ComboBox x:Name="AsrCaptureCombo"
                                                   Grid.Column="1"
@@ -648,7 +647,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="悬停自动切换" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="透明态下鼠标悬停到角色身上时自动切回可交互" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="悬停即恢复交互" />
                                     </StackPanel>
                                     <CheckBox x:Name="HoverSwitchCheck"
                                               Grid.Column="1"
@@ -664,7 +663,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="鼠标穿透（透明模式）" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="开启后点击落到桌面，角色窗口不拦截鼠标" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="点击穿透到桌面" />
                                     </StackPanel>
                                     <CheckBox x:Name="ClickThroughCheck"
                                               Grid.Column="1"
@@ -680,7 +679,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="按住说话" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="按住热键才录音，松开后整段识别（下次启动生效）" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="按住热键才录音，松开后整段识别" />
                                     </StackPanel>
                                     <CheckBox x:Name="PushToTalkCheck"
                                               Grid.Column="1"
@@ -750,7 +749,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="空闲维护间隔" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="闲置多久才允许触发知识整理等维护任务" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="空闲多久可触发维护" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="IdleMinutesSlider"
@@ -771,7 +770,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="维护冷却" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="一轮维护结束后，隔多久才允许下一轮" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="两轮维护的间隔" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <Slider x:Name="IdleCooldownSlider"
@@ -822,7 +821,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
                                         <TextBlock Style="{StaticResource RowLabel}" Text="当前位置" />
-                                        <TextBlock Style="{StaticResource RowHint}" Text="保存到 Assets\appearance.json，下次启动由程序读取" />
+                                        <TextBlock Style="{StaticResource RowHint}" Text="下次启动生效" ToolTip="保存到 Assets\appearance.json" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                         <TextBlock x:Name="CurrentPositionText" Style="{StaticResource ValueText}" Width="128" />
@@ -927,18 +926,18 @@
 
                         <Border Style="{StaticResource Card}" Tag="card">
                             <StackPanel>
-                                <TextBlock Style="{StaticResource SectionTitle}" Text="配置兜底与启动问题" />
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="启动问题" />
                                 <ListBox x:Name="ProblemList" Style="{StaticResource PlainList}" Height="100" />
                             </StackPanel>
                         </Border>
 
                         <Border Style="{StaticResource Card}" Tag="card">
                             <StackPanel>
-                                <TextBlock Style="{StaticResource SectionTitle}" Text="服务健康（HealthMonitor）" />
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="服务健康" />
                                 <ListBox x:Name="HealthList" Style="{StaticResource PlainList}" Height="90" />
                                 <TextBlock Style="{StaticResource SectionTitle}" Text="状态栏标记" Margin="0,10,0,6" />
                                 <ListBox x:Name="StatusList" Style="{StaticResource PlainList}" Height="70" />
-                                <TextBlock Style="{StaticResource SectionTitle}" Text="当前告警气泡" Margin="0,10,0,6" />
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="告警气泡" Margin="0,10,0,6" />
                                 <ListBox x:Name="BubbleList" Style="{StaticResource PlainList}" Height="80" />
                             </StackPanel>
                         </Border>
@@ -946,7 +945,7 @@
                         <Border Style="{StaticResource Card}" Tag="card">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource SectionTitle}" Text="待审核知识" />
-                                <TextBlock Style="{StaticResource RowHint}" Text="模型在空闲时整理出的候选记忆。确认后才会进入正式知识库（程序绝不自动写入）。" />
+                                <TextBlock Style="{StaticResource RowHint}" Text="确认后才入库" ToolTip="模型空闲时整理出的候选记忆；程序绝不自动写入" />
                                 <ListBox x:Name="CandidateList"
                                          Style="{StaticResource PlainList}"
                                          Height="150"
@@ -1048,8 +1047,8 @@
 
                                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                     <Button Content="重新识别" Click="OnRedetectEnvironment" />
-                                    <Button Content="打开 modules 目录" Click="OnOpenModulesFolder" Style="{StaticResource GhostButton}" />
-                                    <TextBlock x:Name="EnvHintText" Style="{StaticResource ValueText}" Margin="8,0,0,0" Text="只显示识别结果，不显示任何性能数字。" />
+                                    <Button Content="打开 modules" Click="OnOpenModulesFolder" Style="{StaticResource GhostButton}" />
+                                    <TextBlock x:Name="EnvHintText" Style="{StaticResource ValueText}" Margin="8,0,0,0" Text="" />
                                 </StackPanel>
                                 <TextBlock x:Name="ModuleHintText"
                                            Style="{StaticResource AccentText}"
@@ -1086,7 +1085,7 @@
                             <StackPanel>
                                 <TextBlock Style="{StaticResource SectionTitle}" Text="module.json 约定" />
                                 <TextBlock Style="{StaticResource RowHint}"
-                                           Text="modules/&lt;名称&gt;/module.json，kind ∈ llm / tts / asr，requires ∈ nvidia / vulkan / mic / none，entry 为模块目录内的可执行文件名。缺字段时按目录名前缀推断、requires 视为 none。" />
+                                           Text="modules/&lt;名称&gt;/module.json · kind=llm/tts/asr" ToolTip="entry 为模块目录内的可执行文件名；缺字段时按目录名前缀推断，requires 视为 none" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -1137,7 +1136,7 @@
                             <StackPanel>
                                 <TextBlock Style="{StaticResource SectionTitle}" Text="config.yaml 说明" />
                                 <TextBlock Style="{StaticResource RowHint}"
-                                           Text="config.yaml 是用户的配置文件，程序只读、绝不回写。界面上显示为「出厂默认」的项即来自它；所有界面改动写入 Assets\appearance.json 覆盖层，删除该文件即恢复出厂默认。" />
+                                           Text="只读 · 界面改动写入 Assets\appearance.json" ToolTip="config.yaml 是用户的配置文件，程序只读、绝不回写；界面改动写入 Assets\appearance.json 覆盖层，删除该文件即恢复出厂默认" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -1156,13 +1155,13 @@
 
             <Button Grid.Column="0"
                     Style="{StaticResource LinkButton}"
-                    Content="恢复默认（清除覆盖）"
+                    Content="恢复默认"
                     Click="OnRestoreDefaults" />
 
             <TextBlock Grid.Column="2"
                        x:Name="AutoSaveText"
                        Style="{StaticResource ValueText}"
-                       Text="设置会自动保存" />
+                       Text="自动保存" />
         </Grid>
     </Grid>
 </Window>

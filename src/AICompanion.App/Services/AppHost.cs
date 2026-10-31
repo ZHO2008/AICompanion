@@ -711,6 +711,18 @@ public sealed class AppHost : IAsyncDisposable
         {
             if (AppearanceStore.LoadLive2dEnabled() is false)
             {
+                /*
+                 * 关掉之前先把 config.yaml 的原值记下来。
+                 *
+                 * 正常路径下 ApplySettingsPanelPreferences 已经记过了；但设置面板可以在启动完成前
+                 * 从托盘打开（那时这行还没跑），用户先关一次 Live2D 就会让 _configuredLive2dModelPath
+                 * 停在空串上 —— 之后再打开 Live2D，路径就恢复不回来，只能重启。
+                 */
+                if (string.IsNullOrEmpty(_configuredLive2dModelPath))
+                {
+                    _configuredLive2dModelPath = Config.Live2d.DefaultModelPath;
+                }
+
                 if (!string.IsNullOrEmpty(Config.Live2d.DefaultModelPath))
                 {
                     Logger.Info("按界面偏好关闭 Live2D 渲染，改用静态立绘（仅改内存，config.yaml 未改动）。");

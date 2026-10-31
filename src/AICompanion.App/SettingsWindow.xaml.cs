@@ -55,6 +55,14 @@ public partial class SettingsWindow : Window
     private readonly BubbleNotifier _bubbles;
     private readonly DispatcherTimer _refreshTimer;
 
+    /// <summary>诊断页「日志」清单显示的行数：只作为最近现场的窗口，不是全量日志。</summary>
+    private const int LogTailLines = 300;
+
+    /// <summary>外观下拉里最多列出多少个素材/模型：仓库里可能堆了成百上千个 png。</summary>
+    private const int AssetScanLimit = 40;
+
+    private const int ModelScanLimit = 60;
+
     /// <summary>滑块的自动保存防抖：拖动时每个像素都写一次 appearance.json 没有必要。</summary>
     private readonly DispatcherTimer _saveTimer;
 
@@ -79,6 +87,18 @@ public partial class SettingsWindow : Window
 
     /// <summary>待应用的变更（多次改动合并成一次）。</summary>
     private AppearanceChange? _pendingApply;
+
+    /// <summary>窗口已关闭：之后到的异步收尾 / 定时器回调一律不再碰界面。</summary>
+    private bool _closed;
+
+    /// <summary>日志与待审核候选这两张清单是否已经按"启动已完成"刷过一次。</summary>
+    private bool _startupListsLoaded;
+
+    /// <summary>GPU 查询节流：2 秒定时器不该每次都起两个 nvidia-smi 子进程。</summary>
+    private DateTime _lastGpuQueryUtc = DateTime.MinValue;
+
+    /// <summary>正在导入模块：防止连点「添加」并发复制同一批文件。</summary>
+    private bool _importingModule;
 
     private string _versionText = "0.0.0";
 
@@ -123,13 +143,7 @@ public partial class SettingsWindow : Window
         {
             Interval = TimeSpan.FromSeconds(2),
         };
-        _refreshTimer.Tick += (_, _) =>
-        {
-            RefreshStatus();
-            RefreshVoiceTab();
-            RefreshMonitorTab();
-            RefreshPositionAndRenderInfo();
-        };
+        _refreshTimer.Tick += OnRefreshTick;
         _refreshTimer.Start();
 
         _saveTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
@@ -155,23 +169,8 @@ public partial class SettingsWindow : Window
         };
         _applyTimer.Tick += (_, _) => FlushPendingApply();
 
-        Loaded += async (_, _) =>
-        {
-            RefreshStatus();
-            await RefreshCandidatesAsync();
-            OnRefreshLogs(this, new RoutedEventArgs());
-            await RefreshEnvironmentAndModulesAsync();
-        };
-
-        Closed += (_, _) =>
-        {
-            // 关闭前先把这次拖动的结果落盘、再应用一次，避免"拖完立刻关面板"丢掉效果。
-            FlushPendingSave();
-            FlushPendingApply();
-            _refreshTimer.Stop();
-            _saveTimer.Stop();
-            _applyTimer.Stop();
-        };
+        Loaded += OnLoaded;
+        Closed += OnClosed;
 
         LoadStaticInfo();
         LoadAppearanceTab();
@@ -185,6 +184,75 @@ public partial class SettingsWindow : Window
         InitializeNavigation();
 
         _loading = false;
+    }
+
+    /// <summary>
+    /// 首次显示后的一次性加载。
+    ///
+    /// 必须是"包了 try/catch 的具名方法"，不能是 <c>async void</c> 匿名 lambda：
+    /// 里面每一条都会在 await 之后继续碰控件，任何一条漏出来的异常都会变成
+    /// "界面线程未处理异常"（程序能活，但用户看到一句内部错误，且后续初始化全部中断）。
+    /// </summary>
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnLoaded;
+
+        try
+        {
+            RefreshStatus();
+            await RefreshCandidatesAsync();
+            OnRefreshLogs(this, new RoutedEventArgs());
+            await RefreshEnvironmentAndModulesAsync();
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Error($"设置面板首次加载失败：{ex.Message}", ex);
+            AppearanceHintText.Text = "部分信息加载失败，详见日志";
+        }
+    }
+
+    /// <summary>
+    /// 关窗收尾（必须可重入：FlushPendingApply 内部还会再调一次 FlushPendingSave）。
+    ///
+    /// 顺序：先落盘再应用（主窗口是从 appearance.json 读值的），最后停三个定时器。
+    /// 之后任何迟到的异步回调看到 <see cref="_closed"/> 就直接返回，不会往已关闭的窗口写东西。
+    /// </summary>
+    private void OnClosed(object? sender, EventArgs e)
+    {
+        if (_closed)
+        {
+            return;
+        }
+
+        _closed = true;
+
+        FlushPendingSave();
+        FlushPendingApply();
+
+        _refreshTimer.Stop();
+        _saveTimer.Stop();
+        _applyTimer.Stop();
+
+        _pendingApply = null;
+        _pendingSaves.Clear();
+    }
+
+    private void OnRefreshTick(object? sender, EventArgs e)
+    {
+        if (_closed)
+        {
+            _refreshTimer.Stop();
+            return;
+        }
+
+        RefreshStatus();
+        RefreshVoiceTab();
+        RefreshMonitorTab();
+        RefreshPositionAndRenderInfo();
+
+        // 启动过程中打开面板时，日志/候选清单只能先显示"启动中"；
+        // 启动完成后在这里补一次，否则面板会一直停在提示上。
+        RefreshStartupListsOnce();
     }
 
     // ================================================================== 导航 / 搜索
@@ -385,7 +453,7 @@ public partial class SettingsWindow : Window
 
     private void OnSearchChanged(object sender, TextChangedEventArgs e)
     {
-        if (_loading)
+        if (_loading || _closed)
         {
             return;
         }
@@ -393,6 +461,13 @@ public partial class SettingsWindow : Window
         ApplySearchFilter();
     }
 
+    /// <summary>
+    /// 搜索词归一化：去空白、折叠成小写、全角折成半角。
+    ///
+    /// 为什么必须折全角：中文输入法下搜 "ｃｕｄａ"（全角）原先一个都匹配不到，
+    /// 用户只会以为"没有这一项"。折叠规则只处理可逆的 ASCII 映射，
+    /// 不走 <see cref="string.Normalize(NormalizationForm)"/>（遇到孤立代理项会抛异常）。
+    /// </summary>
     private static string NormalizeQuery(string? text)
     {
         if (string.IsNullOrEmpty(text))
@@ -403,14 +478,20 @@ public partial class SettingsWindow : Window
         var sb = new StringBuilder(text.Length);
         foreach (var ch in text)
         {
-            if (!char.IsWhiteSpace(ch))
+            if (char.IsWhiteSpace(ch) || ch == '\u3000')
             {
-                sb.Append(char.ToLowerInvariant(ch));
+                continue;
             }
+
+            sb.Append(char.ToLowerInvariant(FoldFullWidth(ch)));
         }
 
         return sb.ToString();
     }
+
+    /// <summary>全角 ASCII（U+FF01–U+FF5E）折成半角；其余字符原样返回。</summary>
+    private static char FoldFullWidth(char ch)
+        => ch is >= '\uFF01' and <= '\uFF5E' ? (char)(ch - 0xFEE0) : ch;
 
     /// <summary>
     /// 按标签片段过滤当前页的设置项：大小写不敏感、空白不敏感。
@@ -547,17 +628,17 @@ public partial class SettingsWindow : Window
             ? "未知"
             : $"{version.Major}.{version.Minor}.{version.Build}";
         _versionText = VersionText.Text;
-        AutoSaveText.Text = $"设置会自动保存 · v{_versionText}";
+        AutoSaveText.Text = $"自动保存 · v{_versionText}";
 
         RepoText.Text = "https://github.com/ZHO2008/AICompanion";
         StorePathText.Text = AppearanceStore.StorePath;
-        ModulesPathText.Text = Path.Combine(AppPaths.Root, "modules");
-        AlwaysOnTopText.Text = _host.Config.Ui.AlwaysOnTop ? "开启（config.yaml 出厂默认）" : "关闭（config.yaml 出厂默认）";
+        ModulesPathText.Text = ModuleRegistry.ModulesRoot;
+        AlwaysOnTopText.Text = _host.Config.Ui.AlwaysOnTop ? "开启（config.yaml）" : "关闭（config.yaml）";
 
         ShortcutText.Text =
-            $"按住说话：{_host.Config.Asr.PushToTalkKey}（{( _host.Config.Asr.PushToTalk ? "已启用" : "当前关闭")}）" +
+            $"按住 {_host.Config.Asr.PushToTalkKey}（{(_host.Config.Asr.PushToTalk ? "已启用" : "已关闭")}）" +
             Environment.NewLine +
-            $"悬停切换延迟：{_host.Config.Ui.TransparentHoverDelayMs} ms，离开后 {_host.Config.Ui.TransparentAutoRevertSeconds} 秒自动退回透明";
+            $"悬停 {_host.Config.Ui.TransparentHoverDelayMs} ms · {_host.Config.Ui.TransparentAutoRevertSeconds} s 回透明";
     }
 
     private void LoadAppearanceTab()
@@ -756,40 +837,43 @@ public partial class SettingsWindow : Window
 
     private void LoadLlmContext()
     {
-        LlmContextCombo.Items.Clear();
-
-        foreach (var value in new[] { 0, 2048, 4096, 8192, 16384, 32768 })
-        {
-            LlmContextCombo.Items.Add(new ComboBoxItem
-            {
-                Content = value == 0 ? "自动（按 GGUF 元数据）" : value.ToString(),
-                Tag = new IntOption(value),
-            });
-        }
-
         var saved = AppearanceStore.LoadLlmContextLength() ?? _host.Config.Llm.ContextLength;
-        LlmContextCombo.SelectedItem = LlmContextCombo.Items.OfType<ComboBoxItem>()
-                                            .FirstOrDefault(i => i.Tag is IntOption o && o.Value == saved)
-                                        ?? LlmContextCombo.Items[0];
+
+        FillIntCombo(
+            LlmContextCombo,
+            new[] { 0, 2048, 4096, 8192, 16384, 32768 },
+            value => value == 0 ? "自动 · 按模型上限" : value.ToString(),
+            saved);
     }
 
     private void LoadGpuStrategy()
     {
-        GpuStrategyCombo.Items.Clear();
+        var saved = AppearanceStore.LoadGpuReservedMb() ?? _host.Config.Gpu.ReservedMb;
 
-        foreach (var value in new[] { 0, 2048, 4096, 6144, 8192 })
+        FillIntCombo(
+            GpuStrategyCombo,
+            new[] { 0, 2048, 4096, 6144, 8192 },
+            value => value == 0 ? "自动 · 按显存档位" : $"预留 {value} MB",
+            saved);
+    }
+
+    /// <summary>把"一串整数选项"填进下拉框并选中与保存值相同的一项（两个下拉原本是逐字重复的两份代码）。</summary>
+    private static void FillIntCombo(ComboBox combo, int[] values, Func<int, string> label, int selected)
+    {
+        combo.Items.Clear();
+
+        foreach (var value in values)
         {
-            GpuStrategyCombo.Items.Add(new ComboBoxItem
+            combo.Items.Add(new ComboBoxItem
             {
-                Content = value == 0 ? "自动（按显存档位）" : $"预留 {value} MB 给系统",
+                Content = label(value),
                 Tag = new IntOption(value),
             });
         }
 
-        var saved = AppearanceStore.LoadGpuReservedMb() ?? _host.Config.Gpu.ReservedMb;
-        GpuStrategyCombo.SelectedItem = GpuStrategyCombo.Items.OfType<ComboBoxItem>()
-                                            .FirstOrDefault(i => i.Tag is IntOption o && o.Value == saved)
-                                        ?? GpuStrategyCombo.Items[0];
+        combo.SelectedItem = combo.Items.OfType<ComboBoxItem>()
+                                  .FirstOrDefault(i => i.Tag is IntOption o && o.Value == selected)
+                              ?? combo.Items[0];
     }
 
     private void LoadLlmBackends()
@@ -802,7 +886,7 @@ public partial class SettingsWindow : Window
             LlmBackendCombo.Items.Clear();
             LlmBackendCombo.Items.Add(new ComboBoxItem
             {
-                Content = $"跟随 config.yaml（{_host.Config.Llm.ServerExecutablePath}）",
+                Content = $"跟随 config.yaml · {Path.GetFileName(_host.Config.Llm.ServerExecutablePath)}",
                 Tag = null,
             });
 
@@ -810,12 +894,12 @@ public partial class SettingsWindow : Window
             {
                 LlmBackendCombo.Items.Add(new ComboBoxItem
                 {
-                    Content = $"{module.DisplayName}（{module.RequiresText} · {module.StatusText.Replace("已识别：", string.Empty)}）",
+                    Content = $"{module.DisplayName} · {module.RequiresText} · {StatusWithoutPrefix(module)}",
                     Tag = module,
                 });
             }
 
-            var effective = ModuleRegistry.EffectiveModule(ModuleKind.Llm, _llmModules);
+            var effective = ModuleRegistry.EffectiveModule(ModuleKind.Llm, _llmModules, _enabledNames.Llm);
             var selected = effective is null
                 ? null
                 : LlmBackendCombo.Items.OfType<ComboBoxItem>()
@@ -828,6 +912,10 @@ public partial class SettingsWindow : Window
             _refreshingModules = wasRefreshing;
         }
     }
+
+    /// <summary>状态文案去掉「已识别：」前缀（下拉框里重复出现这个前缀很吵）。</summary>
+    private static string StatusWithoutPrefix(ModuleInfo module)
+        => module.StatusText.Replace("已识别：", string.Empty, StringComparison.Ordinal);
 
     private void LoadVoiceCombos()
     {
@@ -976,10 +1064,10 @@ public partial class SettingsWindow : Window
 
         TtsEngineHintText.Text = item.Tag switch
         {
-            Core.Tts.TTSEngineFactory.Piper => "本地 CPU，无需外部服务",
-            Core.Tts.TTSEngineFactory.GptSoVits => "需先起 api_v2.py（9880）",
-            Core.Tts.TTSEngineFactory.CosyVoice => "需先起 server.py（50000）",
-            Core.Tts.TTSEngineFactory.Chatterbox => "需先起 HTTP 服务",
+            Core.Tts.TTSEngineFactory.Piper => "本地 CPU",
+            Core.Tts.TTSEngineFactory.GptSoVits => "需 api_v2.py:9880",
+            Core.Tts.TTSEngineFactory.CosyVoice => "需 server.py:50000",
+            Core.Tts.TTSEngineFactory.Chatterbox => "需 HTTP 服务",
             _ => string.Empty,
         };
     }
@@ -1043,10 +1131,10 @@ public partial class SettingsWindow : Window
         AppearanceStore.SaveImagePath(option.ImagePath);
 
         AppearanceHintText.Text = option.Live2dPath is not null
-            ? $"已选择 Live2D：{option.Live2dPath}（换模型需重启后加载）"
+            ? "已选 Live2D · 换模型需重启"
             : option.ImagePath is not null
-                ? $"已选择立绘：{option.ImagePath}（关闭 Live2D 后由它接管显示）"
-                : "已恢复为 config.yaml 里的外观，正在应用到桌宠…";
+                ? "已选立绘 · 关掉 Live2D 后生效"
+                : "已跟随 config.yaml · 正在应用";
 
         _host.Logger.Info($"设置面板选择外观资源：{option.Live2dPath ?? option.ImagePath ?? "跟随 config.yaml"}。");
 
@@ -1065,8 +1153,8 @@ public partial class SettingsWindow : Window
         AppearanceStore.SaveLive2dEnabled(enabled);
 
         AppearanceHintText.Text = enabled
-            ? "Live2D 已启用，正在应用到桌宠…"
-            : "Live2D 已关闭，正在切换为静态立绘…";
+            ? "Live2D 已启用"
+            : "已切回静态立绘";
 
         _host.Logger.Info($"设置面板{(enabled ? "启用" : "关闭")} Live2D。");
 
@@ -1081,7 +1169,7 @@ public partial class SettingsWindow : Window
         }
 
         UpdateAppearanceLabels();
-        AppearanceHintText.Text = $"缩放 {ScaleSlider.Value:P0}，正在应用到桌宠…";
+        AppearanceHintText.Text = $"缩放 {ScaleSlider.Value:P0} 已应用";
         ScheduleSave("scale", () => AppearanceStore.SaveScale(Math.Round(ScaleSlider.Value, 2)));
         ScheduleApply(AppearanceChange.Scale);
     }
@@ -1092,7 +1180,7 @@ public partial class SettingsWindow : Window
         {
             UpdateAppearanceLabels();
             _bubbles.DefaultDuration = TimeSpan.FromSeconds(Math.Max(1, BubbleSecondsSlider.Value));
-            AppearanceHintText.Text = "气泡时长已即时生效，正在自动保存…";
+            AppearanceHintText.Text = "气泡时长已应用";
             ScheduleSave("bubbleSeconds", () => AppearanceStore.SaveBubbleSeconds(Math.Round(BubbleSecondsSlider.Value)));
             ScheduleApply(AppearanceChange.Preferences);
         }
@@ -1103,7 +1191,7 @@ public partial class SettingsWindow : Window
         if (_appearanceInitialized)
         {
             UpdateAppearanceLabels();
-            AppearanceHintText.Text = "不透明度正在应用…";
+            AppearanceHintText.Text = "不透明度已应用";
             ScheduleSave("transparentOpacity", () => AppearanceStore.SaveTransparentOpacity(Math.Round(OpacitySlider.Value, 2)));
             ScheduleApply(AppearanceChange.Preferences);
         }
@@ -1114,7 +1202,7 @@ public partial class SettingsWindow : Window
         if (_appearanceInitialized)
         {
             UpdateAppearanceLabels();
-            AppearanceHintText.Text = "模型水平微调正在应用…";
+            AppearanceHintText.Text = "水平微调已应用";
             ScheduleSave("horizontalOffset", () => AppearanceStore.SaveHorizontalOffset(Math.Round(HorizontalOffsetSlider.Value, 3)));
             ScheduleApply(AppearanceChange.Preferences);
         }
@@ -1175,7 +1263,7 @@ public partial class SettingsWindow : Window
         var saved = AppearanceStore.SaveAiToggles(llm, TtsEnabledCheck.IsChecked, AsrEnabledCheck.IsChecked);
 
         AiToggleHintText.Text = saved
-            ? $"对话已{(llm ? "开启" : "关闭")}，重启程序后生效（已保存到 Assets\\appearance.json）"
+            ? $"对话已{(llm ? "开启" : "关闭")} · 重启后生效"
             : "保存失败，详见日志";
     }
 
@@ -1190,7 +1278,7 @@ public partial class SettingsWindow : Window
         var saved = AppearanceStore.SaveAiToggles(LlmEnabledCheck.IsChecked, tts, AsrEnabledCheck.IsChecked);
 
         AiToggleHintText.Text = saved
-            ? $"语音输出已{(tts ? "开启" : "关闭")}，重启程序后生效（已保存到 Assets\\appearance.json）"
+            ? $"语音输出已{(tts ? "开启" : "关闭")} · 重启后生效"
             : "保存失败，详见日志";
     }
 
@@ -1205,7 +1293,7 @@ public partial class SettingsWindow : Window
         var saved = AppearanceStore.SaveAiToggles(LlmEnabledCheck.IsChecked, TtsEnabledCheck.IsChecked, asr);
 
         AiToggleHintText.Text = saved
-            ? $"语音输入已{(asr ? "开启" : "关闭")}，重启程序后生效（已保存到 Assets\\appearance.json）"
+            ? $"语音输入已{(asr ? "开启" : "关闭")} · 重启后生效"
             : "保存失败，详见日志";
     }
 
@@ -1223,8 +1311,8 @@ public partial class SettingsWindow : Window
 
         AppearanceStore.SaveLlmModelPath(option.RelativePath);
         DialogHintText.Text = option.RelativePath is null
-            ? "模型路径已恢复为 config.yaml（下次启动生效）"
-            : $"模型已保存：{option.RelativePath}（下次启动生效）";
+            ? "已跟随 config.yaml · 下次启动生效"
+            : "已保存 · 下次启动生效";
     }
 
     private void OnLlmContextChanged(object sender, SelectionChangedEventArgs e)
@@ -1241,8 +1329,8 @@ public partial class SettingsWindow : Window
 
         AppearanceStore.SaveLlmContextLength(option.Value);
         DialogHintText.Text = option.Value == 0
-            ? "上下文长度已改为自动（下次启动生效）"
-            : $"上下文长度已保存：{option.Value}（下次启动生效）";
+            ? "自动 · 下次启动生效"
+            : $"{option.Value} · 下次启动生效";
     }
 
     private void OnGpuStrategyChanged(object sender, SelectionChangedEventArgs e)
@@ -1259,8 +1347,8 @@ public partial class SettingsWindow : Window
 
         AppearanceStore.SaveGpuReservedMb(option.Value);
         DialogHintText.Text = option.Value == 0
-            ? "显存策略已改为自动（下次启动生效）"
-            : $"系统预留显存已保存：{option.Value} MB（下次启动生效）";
+            ? "自动 · 下次启动生效"
+            : $"预留 {option.Value} MB · 下次启动生效";
     }
 
     private void OnLlmBackendChanged(object sender, SelectionChangedEventArgs e)
@@ -1277,16 +1365,22 @@ public partial class SettingsWindow : Window
 
         if (item.Tag is ModuleInfo module)
         {
-            AppearanceStore.SaveEnabledModule(ModuleRegistry.KindKey(ModuleKind.Llm), module.DirectoryName);
-            DialogHintText.Text = $"后端已选：{module.DisplayName}（{module.StatusText}；下次启动生效）";
+            var saved = AppearanceStore.SaveEnabledModule(ModuleRegistry.KindKey(ModuleKind.Llm), module.DirectoryName);
+            _enabledNames.Set(ModuleKind.Llm, saved ? module.DirectoryName : _enabledNames.Llm);
+            DialogHintText.Text = saved
+                ? $"后端：{module.DisplayName} · 下次启动生效"
+                : "保存失败，详见日志";
 
             RenderModules();
             ApplyGates();
             return;
         }
 
-        AppearanceStore.SaveEnabledModule(ModuleRegistry.KindKey(ModuleKind.Llm), null);
-        DialogHintText.Text = "后端已恢复为 config.yaml 里的配置（下次启动生效）";
+        var cleared = AppearanceStore.SaveEnabledModule(ModuleRegistry.KindKey(ModuleKind.Llm), null);
+        _enabledNames.Set(ModuleKind.Llm, cleared ? null : _enabledNames.Llm);
+        DialogHintText.Text = cleared
+            ? "后端跟随 config.yaml · 下次启动生效"
+            : "保存失败，详见日志";
 
         RenderModules();
         ApplyGates();
@@ -1308,7 +1402,8 @@ public partial class SettingsWindow : Window
             _host.Config.Tts.DefaultVoice = voice;
         }
 
-        TtsVoiceText.Text = $"全局默认音色：{_host.Config.Tts.DefaultVoice}（界面覆盖层，config.yaml 未改动）";
+        TtsVoiceText.Text = _host.Config.Tts.DefaultVoice;
+        TtsVoiceText.ToolTip = "界面覆盖 · config.yaml 未改动";
         ScheduleSave("ttsVoice", () => AppearanceStore.SaveTtsVoice(TtsVoiceBox.Text.Trim()));
     }
 
@@ -1490,18 +1585,33 @@ public partial class SettingsWindow : Window
 
     private async void OnRedetectAll(object sender, RoutedEventArgs e)
     {
-        RefreshStatus();
-        RefreshVoiceTab();
-        RefreshMonitorTab();
-        OnRefreshLogs(this, new RoutedEventArgs());
-        await RefreshEnvironmentAndModulesAsync();
-        _host.Logger.Info("设置面板触发重新检测（运行状态 / 语音 / 游戏检测 / 日志 / 模块）。");
+        try
+        {
+            RefreshStatus();
+            RefreshVoiceTab();
+            RefreshMonitorTab();
+            OnRefreshLogs(this, new RoutedEventArgs());
+            await RefreshEnvironmentAndModulesAsync();
+            _host.Logger.Info("设置面板触发重新检测（运行状态 / 语音 / 游戏检测 / 日志 / 模块）。");
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.Warn($"设置面板重新检测失败：{ex.Message}");
+        }
     }
 
     private void OnRefreshCandidates(object sender, RoutedEventArgs e) => _ = RefreshCandidatesAsync();
 
     private async Task RefreshCandidatesAsync()
     {
+        // 启动没完成时 Knowledge 还没构造出来：以前这里直接 NRE，
+        // 界面上显示"读取失败：Object reference not set…"，用户完全看不懂。
+        if (!_host.IsStarted)
+        {
+            CandidateStatusText.Text = "启动中，稍候…";
+            return;
+        }
+
         try
         {
             _candidates = await _host.Knowledge.Pending.ListCandidatesAsync();
@@ -1518,7 +1628,7 @@ public partial class SettingsWindow : Window
     {
         if (CandidateList.SelectedItem is not PendingCandidate candidate)
         {
-            CandidateStatusText.Text = "请先选中一条候选。";
+            CandidateStatusText.Text = "未选中候选";
             return;
         }
 
@@ -1539,7 +1649,7 @@ public partial class SettingsWindow : Window
     {
         if (CandidateList.SelectedItem is not PendingCandidate candidate)
         {
-            CandidateStatusText.Text = "请先选中一条候选。";
+            CandidateStatusText.Text = "未选中候选";
             return;
         }
 
@@ -1566,7 +1676,7 @@ public partial class SettingsWindow : Window
     {
         if (!_host.IsStarted)
         {
-            CandidateStatusText.Text = "启动未完成，稍后再试。";
+            CandidateStatusText.Text = "启动中，稍候…";
             return;
         }
 
@@ -1589,6 +1699,15 @@ public partial class SettingsWindow : Window
 
         var packDirectory = dialog.FolderName;
 
+        if (string.IsNullOrWhiteSpace(packDirectory) || !Directory.Exists(packDirectory))
+        {
+            // 选完目录后立刻被删 / 移动（或权限不足看不到）也要给一句人话，别让它走到导入器里去炸。
+            CandidateStatusText.Text = "目录不存在或无权限";
+
+            _host.Logger.Warn($"角色包导入被取消：选中的目录不可用（{packDirectory}）。");
+            return;
+        }
+
         try
         {
             CandidateStatusText.Text = "正在导入…";
@@ -1608,7 +1727,7 @@ public partial class SettingsWindow : Window
                     $"角色包导入完成（{result.Strategy}）：新增 {result.Added} 条，更新 {result.Updated} 条，" +
                     $"跳过 {result.Skipped} 条，来源 {packDirectory}");
 
-                CandidateStatusText.Text = $"导入完成：新增 {result.Added} 条，跳过 {result.Skipped} 条。";
+                CandidateStatusText.Text = $"新增 {result.Added} · 跳过 {result.Skipped}";
 
                 _bubbles.Show(
                     "knowledge-import",
@@ -1641,37 +1760,38 @@ public partial class SettingsWindow : Window
         // 用户完全可能在启动过程中就打开设置面板，因此必须挡在这里。
         if (!_host.IsStarted)
         {
-            ModeText.Text = "启动中，请稍候…";
+            ModeText.Text = "启动中…";
             return;
         }
 
         try
         {
-            ModeText.Text = $"运行模式：{_host.RuntimeMode.Describe()}";
+            ModeText.Text = _host.RuntimeMode.Describe();
 
             LlmText.Text = _host.LlmReady
-                ? $"已就绪（ngl={_host.Llama.CurrentNgl}）"
-                : "未就绪（详见下方问题列表与日志）";
+                ? $"已就绪 · ngl {_host.Llama.CurrentNgl}"
+                : "未就绪";
 
-            TtsText.Text = $"配置={_host.Tts.ConfiguredEngine}，实际={_host.Tts.CurrentEngineName}" +
-                           (_host.Tts.IsDegraded ? "（已降级）" : string.Empty);
+            TtsText.Text = $"{_host.Tts.ConfiguredEngine} → {_host.Tts.CurrentEngineName}" +
+                           (_host.Tts.IsDegraded ? "（降级）" : string.Empty);
 
             // PTT 模式下空闲态就是 Stopped，直接显示状态会让人以为语音坏了。
             AsrText.Text = _host.Config.Asr.PushToTalk
-                ? $"按住说话（{_host.Config.Asr.PushToTalkKey}）" +
-                  (_host.Asr.State == AsrState.Running ? "，录音中…" : string.Empty)
+                ? $"按住 {_host.Config.Asr.PushToTalkKey}" +
+                  (_host.Asr.State == AsrState.Running ? " · 录音中" : string.Empty)
                 : $"{_host.Asr.State}" +
                   (_host.Asr.State == AsrState.Faulted ? $"（{_host.Asr.FaultReason}）" : string.Empty);
 
-            KnowledgeText.Text = $"{_host.Knowledge.Count} 条（{_host.Knowledge.DirectoryPath}）";
+            KnowledgeText.Text = $"{_host.Knowledge.Count} 条";
+            KnowledgeText.ToolTip = _host.Knowledge.DirectoryPath;
             PendingText.Text = $"{_host.Knowledge.Pending.CountCandidates()} 条";
 
             MonitorText.Text = (_host.Monitor.IsClientConnected ? "已连接" : "未连接") +
-                (_host.GameMode.IsYielded ? "，当前处于让出显存状态" : string.Empty);
+                (_host.GameMode.IsYielded ? " · 已让出显存" : string.Empty);
 
             ProblemList.ItemsSource = _host.StartupProblems.Count > 0
                 ? _host.StartupProblems
-                : new[] { "无（配置与依赖均正常）" };
+                : new[] { "无" };
 
             BubbleList.ItemsSource = _bubbles.Current
                 .Select(b => $"[{b.Level}] {b.Message}")
@@ -1688,7 +1808,7 @@ public partial class SettingsWindow : Window
                 ? new[] { "无" }
                 : statuses.Select(kv => $"{kv.Key}：{kv.Value}").ToList();
 
-            // 显存查询是异步的，这里只更新已有文本，避免阻塞 UI 线程（准则 1）。
+            // 显存查询是异步 + 节流的，这里只发起，不阻塞 UI 线程（准则 1）。
             _ = UpdateGpuTextAsync();
 
             /*
@@ -1713,22 +1833,46 @@ public partial class SettingsWindow : Window
             return;
         }
 
+        // 节流：开着设置面板时每 2 秒起两个 nvidia-smi 没有意义（显存数字不会那么快变），
+        // 反而让 GPU 驱动多出一次设备枚举。每 10 秒最多查一次。
+        if (!IsGpuQueryDue(_lastGpuQueryUtc, DateTime.UtcNow, GpuQueryMinInterval))
+        {
+            return;
+        }
+
+        _lastGpuQueryUtc = DateTime.UtcNow;
         _gpuQuerying = true;
 
         try
         {
             var text = await _host.Gpu.DescribeCurrentMemoryAsync().ConfigureAwait(true);
-            GpuText.Text = text + "（只读展示，程序不做任何自动调整）";
+            if (!_closed)
+            {
+                GpuText.Text = text;
+            }
         }
         catch
         {
-            GpuText.Text = "显存：不可用";
+            if (!_closed)
+            {
+                GpuText.Text = "显存：不可用";
+            }
         }
         finally
         {
             _gpuQuerying = false;
         }
     }
+
+    /// <summary>显存查询的最小间隔（2 秒定时器 → 实际每 10 秒查一次）。</summary>
+    private static readonly TimeSpan GpuQueryMinInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// 到点该不该查显存。抽成纯函数是为了能单独验证节流逻辑（见审查脚本），
+    /// 否则要起真实 GPU 才能看出来。
+    /// </summary>
+    private static bool IsGpuQueryDue(DateTime lastQueryUtc, DateTime nowUtc, TimeSpan minInterval)
+        => lastQueryUtc == DateTime.MinValue || nowUtc - lastQueryUtc >= minInterval;
 
     private void RefreshVoiceTab()
     {
@@ -1738,32 +1882,41 @@ public partial class SettingsWindow : Window
         }
 
         TtsEngineText.Text = AppearanceStore.LoadTtsEngine() is null
-            ? $"配置引擎：{_host.Tts.ConfiguredEngine}（config.yaml 出厂默认）"
-            : $"配置引擎：{_host.Tts.ConfiguredEngine}（Assets\\appearance.json 覆盖）";
-        TtsVoiceText.Text = $"全局默认音色：{_host.Config.Tts.DefaultVoice}（为空时回退硬编码 " +
-                            $"\"{Core.Tts.TTSManager.HardcodedFallbackVoice}\"）";
+            ? $"{_host.Tts.ConfiguredEngine} · 出厂默认"
+            : $"{_host.Tts.ConfiguredEngine} · 界面覆盖";
+        TtsVoiceText.Text = _host.Config.Tts.DefaultVoice;
+        TtsVoiceText.ToolTip = string.IsNullOrWhiteSpace(_host.Config.Tts.DefaultVoice)
+            ? $"为空时回退硬编码音色 {Core.Tts.TTSManager.HardcodedFallbackVoice}"
+            : null;
         TtsPiperText.Text = _host.Tts.IsDegraded
             ? $"{_host.Tts.CurrentEngineName}（降级）"
             : _host.Tts.CurrentEngineName;
 
         AsrStateText.Text = _host.Config.Asr.PushToTalk
-            ? $"按住说话（按住 {_host.Config.Asr.PushToTalkKey} 录音，松开识别）" +
-              (_host.Asr.State == AsrState.Running ? "｜录音中…" : string.Empty)
+            ? $"按住 {_host.Config.Asr.PushToTalkKey}" +
+              (_host.Asr.State == AsrState.Running ? " · 录音中" : string.Empty)
             : $"{_host.Asr.State}";
         AsrModelText.Text = Core.Configuration.AppPaths.Resolve(_host.Config.Asr.ModelPath);
-        AsrVadText.Text = $"{_host.Asr.VadName}（配置要求 {_host.Config.Asr.VadMode}）";
+        AsrVadText.Text = $"{_host.Asr.VadName} · 要求 {_host.Config.Asr.VadMode}";
 
         AsrLastText.Text = _host.Asr.LastRecognition is { } last
-            ? $"\"{last.Text}\"（音频 {last.AudioDuration.TotalSeconds:N1}s，" +
-              $"耗时 {last.Elapsed.TotalMilliseconds:N0} ms，RTF {last.RealTimeFactor:N2}）"
+            ? $"\"{last.Text}\" · {last.Elapsed.TotalMilliseconds:N0} ms" +
+              $"（{last.AudioDuration.TotalSeconds:N1}s · RTF {last.RealTimeFactor:N2}）"
             : "暂无";
 
+        // 文案精简：界面上只说结论（不可用 + 下一步），原因写日志。
         AsrHintText.Text = _host.Asr.State == AsrState.Faulted
-            ? "语音输入当前不可用，请使用主窗口的文本框输入文字。" +
-              (_host.Asr.FaultReason == AsrFaultReason.ModelMissing
-                  ? "可在 config.yaml 的 asr.model_path 指定新的模型路径，然后点\"重置 ASR\"。"
-                  : "可点\"重启语音服务\"或\"重置 ASR\"重试。")
+            ? "语音输入不可用 · 改用文本输入"
             : string.Empty;
+
+        if (_host.Asr.State == AsrState.Faulted)
+        {
+            _host.Logger.Debug(
+                $"ASR 处于不可用状态（{_host.Asr.FaultReason}）：" +
+                (_host.Asr.FaultReason == AsrFaultReason.ModelMissing
+                    ? $"模型缺失，可在 config.yaml 的 asr.model_path 指定新路径后点「重置 ASR」（当前 {Core.Configuration.AppPaths.Resolve(_host.Config.Asr.ModelPath)}）。"
+                    : "可点「重启语音服务」或「重置 ASR」重试。"));
+        }
     }
 
     private async void OnRestartVoice(object sender, RoutedEventArgs e)
@@ -1833,17 +1986,16 @@ public partial class SettingsWindow : Window
 
         var last = _host.Monitor.LastMessageUtc;
         MonitorStateText.Text = _host.Monitor.IsClientConnected
-            ? $"已连接（最后消息：{(last == DateTime.MinValue ? "—" : last.ToLocalTime().ToString("HH:mm:ss"))}）"
-            : "未连接。GameMonitor.exe 未运行或已断开。";
+            ? $"已连接 · {(last == DateTime.MinValue ? "—" : last.ToLocalTime().ToString("HH:mm:ss"))}"
+            : "未连接";
 
         var cooldowns = _host.Cooldown.Snapshot();
         MonitorCooldownText.Text = cooldowns.Count == 0
             ? "无"
             : string.Join("；", cooldowns.Select(kv => $"{kv.Key} 至 {kv.Value.ToLocalTime():HH:mm:ss}"));
 
-        GameListText.Text = $"列表 {Core.Configuration.AppPaths.Resolve(_host.Config.Monitor.GameListFile)}" +
-                            Environment.NewLine +
-                            $"端口 {_host.Config.Monitor.Host}:{_host.Config.Monitor.Port}，冷却 {_host.Config.Monitor.CooldownMinutes:N0} 分钟";
+        GameListText.Text = $"端口 {_host.Config.Monitor.Host}:{_host.Config.Monitor.Port} · 冷却 {_host.Config.Monitor.CooldownMinutes:N0} 分钟";
+        GameListText.ToolTip = $"列表文件：{Core.Configuration.AppPaths.Resolve(_host.Config.Monitor.GameListFile)}";
     }
 
     private async void OnReconnectMonitor(object sender, RoutedEventArgs e)
@@ -1863,6 +2015,16 @@ public partial class SettingsWindow : Window
 
     private void OnRefreshLogs(object sender, RoutedEventArgs e)
     {
+        // 同上：_host.Context / LogSink 在启动阶段还不存在。
+        if (!_host.IsStarted)
+        {
+            LogPathText.Text = _host.BootstrapSink.DirectoryPath;
+            LogSizeText.Text = "启动中…";
+            ChatLogSizeText.Text = "启动中…";
+            LogList.ItemsSource = new List<string> { "启动中，稍候…" };
+            return;
+        }
+
         try
         {
             // LogSink 在配置加载后才有；启动早期回退到引导日志。
@@ -1870,17 +2032,30 @@ public partial class SettingsWindow : Window
             LogPathText.Text = sink?.DirectoryPath ?? "（未初始化）";
             LogSizeText.Text = sink is null
                 ? "—"
-                : $"{sink.GetDirectorySizeBytes() / 1024.0 / 1024.0:N2} MB（保留 {_host.Config.Logging.MaxLogDays} 天）";
+                : $"{sink.GetDirectorySizeBytes() / 1024.0 / 1024.0:N2} MB · 保留 {_host.Config.Logging.MaxLogDays} 天";
 
-            ChatLogSizeText.Text = $"{_host.Context.GetChatLogSizeBytes() / 1024.0 / 1024.0:N2} MB" +
-                                   $"（归档 {Path.GetFileName(_host.Context.ArchivePath)}）";
+            ChatLogSizeText.Text = $"{_host.Context.GetChatLogSizeBytes() / 1024.0 / 1024.0:N2} MB";
+            ChatLogSizeText.ToolTip = $"归档：{Path.GetFileName(_host.Context.ArchivePath)}";
 
-            LogList.ItemsSource = sink?.RecentSnapshot(300) ?? new List<string> { "（日志未初始化）" };
+            LogList.ItemsSource = sink?.RecentSnapshot(LogTailLines) ?? new List<string> { "（日志未初始化）" };
+            _startupListsLoaded = true;
         }
         catch (Exception ex)
         {
             LogList.ItemsSource = new List<string> { $"读取日志失败：{ex.Message}" };
         }
+    }
+
+    /// <summary>启动完成后补刷一次"启动阶段打不开"的清单（日志 / 待审核候选）。</summary>
+    private void RefreshStartupListsOnce()
+    {
+        if (_startupListsLoaded || !_host.IsStarted)
+        {
+            return;
+        }
+
+        OnRefreshLogs(this, new RoutedEventArgs());
+        _ = RefreshCandidatesAsync();
     }
 
     private void OnPurgeAppLogs(object sender, RoutedEventArgs e)
@@ -1918,13 +2093,7 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            var path = _host.LogSink?.DirectoryPath;
-            if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
-            {
-                return;
-            }
-
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+            OpenInExplorer(_host.LogSink?.DirectoryPath ?? _host.BootstrapSink.DirectoryPath);
         }
         catch (Exception ex)
         {
@@ -1947,7 +2116,7 @@ public partial class SettingsWindow : Window
 
         var fromStore = toggle.Llm is not null || toggle.Tts is not null || toggle.Asr is not null;
         AiToggleHintText.Text = fromStore
-            ? "当前显示的是 Assets\\appearance.json 里的偏好（重启程序后生效）"
+            ? "界面偏好 · 重启后生效"
             : "当前跟随 config.yaml";
     }
 
@@ -1957,6 +2126,57 @@ public partial class SettingsWindow : Window
     private IReadOnlyList<ModuleInfo> _llmModules = Array.Empty<ModuleInfo>();
     private IReadOnlyList<ModuleInfo> _ttsModules = Array.Empty<ModuleInfo>();
     private IReadOnlyList<ModuleInfo> _asrModules = Array.Empty<ModuleInfo>();
+
+    /// <summary>
+    /// 三类"启用中的模块目录名"的本地快照。
+    ///
+    /// 为什么要缓存：<see cref="ModuleRegistry.EffectiveModule(ModuleKind, IReadOnlyList{ModuleInfo})"/>
+    /// 每问一次都要把 appearance.json 读一遍并反序列化，而一次刷新要问 7 次
+    /// （渲染 3 + 门禁 3 + 后端下拉 1）。这里一次读好、本窗口负责在写入后同步。
+    /// </summary>
+    private EnabledModuleNames _enabledNames = EnabledModuleNames.Load();
+
+    private sealed class EnabledModuleNames
+    {
+        public string? Llm { get; set; }
+
+        public string? Tts { get; set; }
+
+        public string? Asr { get; set; }
+
+        public static EnabledModuleNames Load() => new()
+        {
+            Llm = AppearanceStore.LoadEnabledModule(ModuleRegistry.KindKey(ModuleKind.Llm)),
+            Tts = AppearanceStore.LoadEnabledModule(ModuleRegistry.KindKey(ModuleKind.Tts)),
+            Asr = AppearanceStore.LoadEnabledModule(ModuleRegistry.KindKey(ModuleKind.Asr)),
+        };
+
+        public string? For(ModuleKind kind) => kind switch
+        {
+            ModuleKind.Llm => Llm,
+            ModuleKind.Tts => Tts,
+            _ => Asr,
+        };
+
+        public void Set(ModuleKind kind, string? directoryName)
+        {
+            switch (kind)
+            {
+                case ModuleKind.Llm:
+                    Llm = directoryName;
+                    break;
+                case ModuleKind.Tts:
+                    Tts = directoryName;
+                    break;
+                default:
+                    Asr = directoryName;
+                    break;
+            }
+        }
+    }
+
+    /// <summary>上一次真正重建模块卡片时的输入签名；一样就跳过重建（控件不重建就没有闪烁与布局开销）。</summary>
+    private string? _moduleRenderSignature;
 
     /// <summary>正在刷新模块列表：此期间下拉框的 SelectionChanged 是程序代选，不算用户操作。</summary>
     private bool _refreshingModules;
@@ -1977,7 +2197,7 @@ public partial class SettingsWindow : Window
     {
         if (_envRefreshing)
         {
-            ModuleHintText.Text = "正在识别运行环境，请稍候…（完成后会自动刷新模块列表）";
+            ModuleHintText.Text = "识别中，稍候…";
             _host.Logger.Debug("设置面板重新识别请求被忽略：上一次环境识别还没结束。");
             return;
         }
@@ -1987,28 +2207,54 @@ public partial class SettingsWindow : Window
 
         try
         {
-            EnvHintText.Text = "正在识别运行环境…";
+            EnvHintText.Text = "识别中…";
             EnvGpuText.Text = "检测中…";
             EnvVulkanText.Text = "检测中…";
             EnvCpuText.Text = "检测中…";
             EnvMicText.Text = "检测中…";
 
-            _environment = await ModuleRegistry.ProbeAsync(_host.Logger);
+            /*
+             * 环境识别（nvidia-smi / vulkaninfo 子进程）与模块扫描（磁盘遍历 + 解析 module.json +
+             * 统计每个模块的体积）全部放到线程池：以前这些都在 UI 线程上跑，
+             * 模块目录大一点（llama.cpp 一套就是几百 MB、上万文件）面板会明显卡住。
+             */
+            var (environment, llmModules, ttsModules, asrModules, issues) = await Task.Run(async () =>
+            {
+                var env = await ModuleRegistry.ProbeAsync(_host.Logger).ConfigureAwait(false);
+                var skipped = new List<string>();
 
-            _llmModules = ModuleRegistry.Scan(ModuleKind.Llm, _environment);
-            _ttsModules = ModuleRegistry.Scan(ModuleKind.Tts, _environment);
-            _asrModules = ModuleRegistry.Scan(ModuleKind.Asr, _environment);
+                var llm = ModuleRegistry.Scan(ModuleKind.Llm, env, skipped);
+                var tts = ModuleRegistry.Scan(ModuleKind.Tts, env, skipped);
+                var asr = ModuleRegistry.Scan(ModuleKind.Asr, env, skipped);
 
-            EnvGpuText.Text = _environment.GpuText;
-            EnvVulkanText.Text = _environment.VulkanText;
-            EnvCpuText.Text = _environment.CpuText;
-            EnvMicText.Text = _environment.MicrophoneText;
+                return (env, llm, tts, asr, skipped);
+            }).ConfigureAwait(true);
+
+            if (_closed)
+            {
+                return;
+            }
+
+            _environment = environment;
+            _llmModules = llmModules;
+            _ttsModules = ttsModules;
+            _asrModules = asrModules;
+
+            // 扫描完再读一次启用状态：用户可能刚在别的窗口改过 appearance.json。
+            _enabledNames = EnabledModuleNames.Load();
+            _moduleRenderSignature = null;
+
+            EnvGpuText.Text = environment.GpuText;
+            EnvVulkanText.Text = environment.VulkanText;
+            EnvCpuText.Text = environment.CpuText;
+            EnvMicText.Text = environment.MicrophoneText;
 
             UpdateMicDeviceText();
 
             EnvHintText.Text =
-                $"已识别模块：对话 {_llmModules.Count} / 语音合成 {_ttsModules.Count} / 识别 {_asrModules.Count}。" +
-                "只显示识别结果，不显示性能数字。";
+                $"模块 对话 {llmModules.Count} · 语音 {ttsModules.Count} · 识别 {asrModules.Count}";
+
+            ReportSkippedModules(issues);
 
             LoadLlmBackends();
             RenderModules();
@@ -2018,7 +2264,11 @@ public partial class SettingsWindow : Window
         }
         catch (Exception ex)
         {
-            EnvHintText.Text = $"环境识别失败：{ex.Message}";
+            if (!_closed)
+            {
+                EnvHintText.Text = $"识别失败：{ex.Message}";
+            }
+
             _host.Logger.Warn($"设置面板环境识别失败：{ex.Message}");
         }
         finally
@@ -2028,18 +2278,86 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>
+    /// 把被跳过的 modules 子目录原因逐条写日志；界面上只留"跳过 N 个"，详情进 ToolTip。
+    ///
+    /// 以前这些原因是静默丢弃的：用户把 module.json 写坏了，界面只显示"未发现模块"，
+    /// 既不知道是哪个目录，也不知道错在哪。
+    ///
+    /// 去重是必要的：三类扫描各跑一遍，同一个坏目录会被三份扫描各报一次。
+    /// </summary>
+    private void ReportSkippedModules(List<string> issues)
+    {
+        if (issues.Count == 0)
+        {
+            return;
+        }
+
+        var unique = issues.Distinct(StringComparer.Ordinal).ToList();
+
+        foreach (var issue in unique)
+        {
+            _host.Logger.Warn($"modules 跳过：{issue}");
+        }
+
+        ModuleHintText.Text = $"跳过 {unique.Count} 个 · 详见日志";
+        ModuleHintText.ToolTip = string.Join(Environment.NewLine, unique.Take(10));
+    }
+
     private void UpdateMicDeviceText()
     {
         MicDeviceText.Text = _environment is null
-            ? "正在识别麦克风设备…"
-            : $"已识别：{_environment.MicrophoneText}（采集源可选麦克风或系统音频回环）";
+            ? "识别中…"
+            : $"已识别：{_environment.MicrophoneText}";
     }
 
+    /// <summary>
+    /// 重建三类模块卡片。
+    ///
+    /// 输入没变就直接返回：以前每次调用都 Children.Clear() 再逐个 new Border/Grid/TextBlock/Button，
+    /// 连点「重新识别」或切换后端下拉会把整页控件重建一遍（含一次完整布局），白白闪烁。
+    /// </summary>
     private void RenderModules()
     {
+        var signature = BuildModuleRenderSignature();
+        if (string.Equals(signature, _moduleRenderSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _moduleRenderSignature = signature;
+
         RenderModuleList(LlmModuleList, ModuleKind.Llm, _llmModules);
         RenderModuleList(TtsModuleList, ModuleKind.Tts, _ttsModules);
         RenderModuleList(AsrModuleList, ModuleKind.Asr, _asrModules);
+    }
+
+    private string BuildModuleRenderSignature()
+    {
+        var sb = new StringBuilder();
+
+        foreach (var (kind, modules) in new[]
+                 {
+                     (ModuleKind.Llm, _llmModules),
+                     (ModuleKind.Tts, _ttsModules),
+                     (ModuleKind.Asr, _asrModules),
+                 })
+        {
+            sb.Append(ModuleRegistry.KindKey(kind)).Append(':')
+              .Append(_enabledNames.For(kind) ?? "-").Append(':');
+
+            foreach (var module in modules)
+            {
+                sb.Append(module.DirectoryName).Append('/')
+                  .Append(module.Availability).Append('/')
+                  .Append(module.SizeBytes).Append('/')
+                  .Append(module.DisplayName).Append(';');
+            }
+
+            sb.Append('|');
+        }
+
+        return sb.ToString();
     }
 
     private void RenderModuleList(StackPanel container, ModuleKind kind, IReadOnlyList<ModuleInfo> modules)
@@ -2050,7 +2368,7 @@ public partial class SettingsWindow : Window
         {
             container.Children.Add(new TextBlock
             {
-                Text = $"未发现{ModuleRegistry.KindLabel(kind)}模块（modules/ 下还没有 kind={ModuleRegistry.KindKey(kind)} 的 module.json）。",
+                Text = $"未发现{ModuleRegistry.KindLabel(kind)}模块 · kind={ModuleRegistry.KindKey(kind)}",
                 Style = (Style)FindResource("RowHint"),
                 Margin = new Thickness(0, 2, 0, 6),
             });
@@ -2058,7 +2376,7 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        var enabled = ModuleRegistry.EffectiveModule(kind, modules);
+        var enabled = ModuleRegistry.EffectiveModule(kind, modules, _enabledNames.For(kind));
 
         foreach (var module in modules)
         {
@@ -2125,6 +2443,10 @@ public partial class SettingsWindow : Window
 
         Grid.SetColumn(texts, 1);
 
+        // 文案精简：卡片上只留「名称 / 目录+体积 / 已识别结论」三行，
+        // 为什么不可用（缺哪个文件、entry 指向目录…）放进 ToolTip。
+        var explanation = module.EntryNote ?? module.DirectoryPath;
+
         var button = new Button
         {
             Content = enabled ? "已启用" : "启用",
@@ -2134,7 +2456,7 @@ public partial class SettingsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Tag = module,
             IsEnabled = module.IsUsable && !enabled,
-            ToolTip = module.IsUsable ? null : "该模块当前识别为不可用，无法启用",
+            ToolTip = module.IsUsable ? explanation : $"{module.StatusText} · {explanation}",
         };
         button.Click += OnEnableModule;
         Grid.SetColumn(button, 2);
@@ -2151,6 +2473,7 @@ public partial class SettingsWindow : Window
             // ApplySearchFilter 只认 "row" / "card" 两种标签，写成 "module" 等于把这张卡片
             // 排除在搜索之外 —— 搜 "cuda" 时别的卡片都藏起来了，模块卡片却还挂在页面上。
             Tag = "card",
+            ToolTip = explanation,
             Child = grid,
         };
     }
@@ -2164,10 +2487,11 @@ public partial class SettingsWindow : Window
         }
 
         var saved = AppearanceStore.SaveEnabledModule(ModuleRegistry.KindKey(module.Kind), module.DirectoryName);
+        _enabledNames.Set(module.Kind, saved ? module.DirectoryName : _enabledNames.For(module.Kind));
 
         ModuleHintText.Text = saved
-            ? $"已启用「{module.DisplayName}」（{module.StatusText}）。同类模块只能启用一个。"
-            : "启用状态保存失败，详见日志。";
+            ? $"已启用「{module.DisplayName}」· {module.StatusText}"
+            : "保存失败，详见日志";
 
         _host.Logger.Info(
             $"设置面板启用{ModuleRegistry.KindLabel(module.Kind)}模块：{module.DirectoryName}（{module.StatusText}）。");
@@ -2191,55 +2515,71 @@ public partial class SettingsWindow : Window
     ///   3. 模块缺失只用 <see cref="VoiceBuiltinHint"/> 做中性提示（可点进「拓展」，不拦操作）；
     ///   4. 「拓展」页的模块卡片按钮/状态仍按模块自身的 <see cref="ModuleInfo.IsUsable"/>
     ///      单独门禁 —— 那才是真正的"模块专属"控件。
+    ///
+    /// 幂等：只做赋值，重复调用结果完全相同（含 Content —— 不可见时不再改写它，
+    /// 否则会留下"不可用：已识别：可用"这种自相矛盾的隐藏文案）。
     /// </summary>
     private void ApplyGates()
     {
-        if (!_gatesReady)
+        if (!_gatesReady || _closed)
         {
             return;
         }
 
         // 对话没有内置实现：模块是唯一路径，保持原来的整块门禁。
-        var llm = ModuleRegistry.EffectiveModule(ModuleKind.Llm, _llmModules);
+        var llm = ModuleRegistry.EffectiveModule(ModuleKind.Llm, _llmModules, _enabledNames.Llm);
         var llmUsable = llm is { IsUsable: true };
         DialogueGateArea.IsEnabled = llmUsable;
         DialogueGateBanner.Visibility = llmUsable ? Visibility.Collapsed : Visibility.Visible;
-        DialogueGateBanner.Content = llm is null
-            ? "尚未启用对话模块 → 去「拓展」添加"
-            : $"对话模块「{llm.DisplayName}」不可用：{llm.StatusText} → 去「拓展」查看";
+
+        if (!llmUsable)
+        {
+            DialogueGateBanner.Content = llm is null
+                ? "尚未启用对话模块 · 去「拓展」添加"
+                : $"「{llm.DisplayName}」{llm.StatusText} · 去「拓展」查看";
+        }
 
         // 语音合成：内置 SAPI 永远是一条可用路径，所以默认包（无模块）也应可配置。
-        var tts = ModuleRegistry.EffectiveModule(ModuleKind.Tts, _ttsModules);
+        var tts = ModuleRegistry.EffectiveModule(ModuleKind.Tts, _ttsModules, _enabledNames.Tts);
         var ttsUsable = tts is { IsUsable: true };
         var ttsBuiltin = HasBuiltinTts();
         var ttsAvailable = ttsUsable || ttsBuiltin;
         VoiceTtsArea.IsEnabled = ttsAvailable;
         TtsGateBanner.Visibility = ttsAvailable ? Visibility.Collapsed : Visibility.Visible;
-        TtsGateBanner.Content = tts is null
-            ? "语音合成暂无可用实现（既没有模块，也没有内置 SAPI）→ 去「拓展」添加模块"
-            : $"语音合成模块「{tts.DisplayName}」不可用：{tts.StatusText}，内置 SAPI 也不可用 → 去「拓展」查看";
+
+        if (!ttsAvailable)
+        {
+            TtsGateBanner.Content = tts is null
+                ? "语音合成不可用 · 去「拓展」添加模块"
+                : $"「{tts.DisplayName}」{tts.StatusText} · 去「拓展」查看";
+        }
 
         // 语音识别：内置实现是 ai_asr.dll 桥接，文件存在即算可用。
-        var asr = ModuleRegistry.EffectiveModule(ModuleKind.Asr, _asrModules);
+        var asr = ModuleRegistry.EffectiveModule(ModuleKind.Asr, _asrModules, _enabledNames.Asr);
         var asrUsable = asr is { IsUsable: true };
         var asrBuiltin = HasBuiltinAsr();
         var asrAvailable = asrUsable || asrBuiltin;
         VoiceAsrArea.IsEnabled = asrAvailable;
         AsrGateBanner.Visibility = asrAvailable ? Visibility.Collapsed : Visibility.Visible;
-        AsrGateBanner.Content = asr is null
-            ? "语音识别暂无可用实现（既没有模块，也没有 ai_asr.dll 桥接）→ 去「拓展」添加模块"
-            : $"语音识别模块「{asr.DisplayName}」不可用：{asr.StatusText}，ai_asr.dll 也不可用 → 去「拓展」查看";
+
+        if (!asrAvailable)
+        {
+            AsrGateBanner.Content = asr is null
+                ? "语音识别不可用 · 去「拓展」添加模块"
+                : $"「{asr.DisplayName}」{asr.StatusText} · 去「拓展」查看";
+        }
 
         // 顶部中性提示：只要有一类在用内置路径就提示，点了去「拓展」，不阻断任何操作。
-        // 两类都没有内置路径时，上面两条真门禁已经说明原因，这里不再重复。
         var ttsOnBuiltin = ttsBuiltin && !ttsUsable;
         var asrOnBuiltin = asrBuiltin && !asrUsable;
         VoiceBuiltinHint.Visibility = ttsOnBuiltin || asrOnBuiltin ? Visibility.Visible : Visibility.Collapsed;
-        VoiceBuiltinHint.Content = ttsOnBuiltin
-            ? "当前使用内置语音引擎；如需其他实现，可到「拓展」添加模块"
-            : asrOnBuiltin
-                ? "当前使用内置语音识别（ai_asr.dll）；如需其他实现，可到「拓展」添加模块"
-                : string.Empty;
+
+        if (VoiceBuiltinHint.Visibility == Visibility.Visible)
+        {
+            VoiceBuiltinHint.Content = ttsOnBuiltin
+                ? "内置引擎 · 可在「拓展」添加模块"
+                : "内置识别 · 可在「拓展」添加模块";
+        }
     }
 
     /// <summary>
@@ -2272,9 +2612,19 @@ public partial class SettingsWindow : Window
 
     private async void OnRedetectEnvironment(object sender, RoutedEventArgs e)
     {
-        ModuleHintText.Text = string.Empty;
-        await RefreshEnvironmentAndModulesAsync();
-        _host.Logger.Info("设置面板重新识别运行环境与模块。");
+        try
+        {
+            ModuleHintText.Text = string.Empty;
+            await RefreshEnvironmentAndModulesAsync();
+            _host.Logger.Info("设置面板重新识别运行环境与模块。");
+        }
+        catch (Exception ex)
+        {
+            // RefreshEnvironmentAndModulesAsync 内部已兜住异常；这里再兜一层，
+            // 避免 async void 把异常甩给界面线程（用户会看到"内部错误"气泡且状态停在"识别中"）。
+            ModuleHintText.Text = $"识别失败：{ex.Message}";
+            _host.Logger.Warn($"设置面板重新识别失败：{ex.Message}");
+        }
     }
 
     private void OnOpenModulesFolder(object sender, RoutedEventArgs e)
@@ -2283,14 +2633,24 @@ public partial class SettingsWindow : Window
         {
             var root = ModuleRegistry.ModulesRoot;
             Directory.CreateDirectory(root);
-
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{root}\"") { UseShellExecute = true });
+            OpenInExplorer(root);
         }
         catch (Exception ex)
         {
-            ModuleHintText.Text = $"打开 modules 目录失败：{ex.Message}";
+            ModuleHintText.Text = $"打开目录失败：{ex.Message}";
             _host.Logger.Warn($"打开 modules 目录失败：{ex.Message}");
         }
+    }
+
+    /// <summary>用资源管理器打开一个目录（两处重复的 Process.Start 收在这里）。</summary>
+    private static void OpenInExplorer(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
     }
 
     private void OnAddLlmModule(object sender, RoutedEventArgs e) => _ = AddModuleAsync(ModuleKind.Llm);
@@ -2305,13 +2665,22 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async Task AddModuleAsync(ModuleKind kind)
     {
+        // 连点两下「添加」会同时复制同一批文件（第二个必然半途失败并回滚），先挡住。
+        if (_importingModule)
+        {
+            ModuleHintText.Text = "正在复制上一个模块…";
+            return;
+        }
+
+        _importingModule = true;
+
         try
         {
             var label = ModuleRegistry.KindLabel(kind);
 
             var dialog = new Microsoft.Win32.OpenFolderDialog
             {
-                Title = $"选择{label}模块目录（该目录里必须有 module.json）",
+                Title = $"选择{label}模块目录（须含 module.json）",
                 Multiselect = false,
             };
 
@@ -2325,12 +2694,27 @@ public partial class SettingsWindow : Window
                 return;
             }
 
-            ModuleHintText.Text = $"正在复制{label}模块…";
-            var environment = _environment ?? await ModuleRegistry.ProbeAsync(_host.Logger);
             var source = dialog.FolderName;
+            if (string.IsNullOrWhiteSpace(source) || !Directory.Exists(source))
+            {
+                ModuleHintText.Text = "选中的目录不存在";
+                return;
+            }
 
-            var result = await Task.Run(() => ModuleRegistry.Import(source, kind, environment, _host.Logger));
+            ModuleHintText.Text = $"正在复制{label}模块…";
 
+            /*
+             * 环境探测（nvidia-smi）与整目录复制都在线程池上做：
+             * 以前环境探测是在 UI 线程 await 的（ProbeAsync 里起子进程），
+             * 复制大模块时面板会卡住不刷新。
+             */
+            var (result, environment) = await Task.Run(async () =>
+            {
+                var env = _environment ?? await ModuleRegistry.ProbeAsync(_host.Logger).ConfigureAwait(false);
+                return (ModuleRegistry.Import(source, kind, env, _host.Logger), env);
+            }).ConfigureAwait(true);
+
+            _environment ??= environment;
             ModuleHintText.Text = result.Message;
 
             if (result.Success)
@@ -2346,8 +2730,12 @@ public partial class SettingsWindow : Window
         }
         catch (Exception ex)
         {
-            ModuleHintText.Text = $"添加模块失败：{ex.Message}";
+            ModuleHintText.Text = $"添加失败：{ex.Message}";
             _host.Logger.Error($"添加模块失败：{ex.Message}", ex);
+        }
+        finally
+        {
+            _importingModule = false;
         }
     }
 
@@ -2434,17 +2822,27 @@ public partial class SettingsWindow : Window
 
         _host.RequestAppearanceChange(change.Value);
 
+        if (_closed)
+        {
+            return;
+        }
+
         // 如实标注：主窗口不在（已关闭 / 未就绪）时说明要等下次启动。
         AppearanceHintText.Text = !_host.HasAppearanceTarget
-            ? "已保存（桌宠窗口当前不可达，下次启动生效）。"
+            ? "已保存 · 桌宠未打开，下次启动生效"
             : change.Value == AppearanceChange.Avatar
-                ? "已保存，并已应用到桌宠（换 Live2D 模型 / 首次启用需重启）。"
-                : "已保存，并已即时应用到桌宠。";
+                ? "已保存并应用 · 换模型需重启"
+                : "已保存并应用";
     }
 
     private void MarkAutoSaved()
     {
-        AutoSaveText.Text = $"设置会自动保存 · 已保存 {DateTime.Now:HH:mm:ss} · v{_versionText}";
+        if (_closed)
+        {
+            return;
+        }
+
+        AutoSaveText.Text = $"已保存 {DateTime.Now:HH:mm:ss} · v{_versionText}";
     }
 
     // ================================================================== 恢复默认
@@ -2498,13 +2896,17 @@ public partial class SettingsWindow : Window
             _pendingApply = null;
             _host.RequestAppearanceChange(AppearanceChange.All);
 
+            // 启用状态缓存也要跟着复位，否则门禁/卡片还会按旧的启用项显示。
+            _enabledNames = EnabledModuleNames.Load();
+            _moduleRenderSignature = null;
+
             // 模块启用状态也在同一个文件里，清掉后重新按"第一个可用模块"识别。
             _ = RefreshEnvironmentAndModulesAsync();
 
             AppearanceHintText.Text = ok
-                ? "已清除覆盖，恢复为 config.yaml 的出厂默认"
+                ? "已恢复出厂默认"
                 : "清除失败，详见日志";
-            ModuleHintText.Text = ok ? "模块启用状态也已恢复默认。" : string.Empty;
+            ModuleHintText.Text = ok ? "模块启用已恢复默认" : string.Empty;
         }
         catch (Exception ex)
         {

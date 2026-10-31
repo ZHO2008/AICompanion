@@ -73,6 +73,14 @@ public sealed class ModuleInfo
 
     public string? EntryPath { get; init; }
 
+    /// <summary>
+    /// entry 的问题描述（缺文件 / 指向目录 / 越出模块目录 / 路径非法）；没问题时为 null。
+    ///
+    /// 为什么要单独一个字段：<see cref="StatusText"/> 是固定的机读结论（如"已识别：缺 exe"），
+    /// 不能塞自由文本；而用户需要知道"为什么缺" —— 这段文字放在卡片 ToolTip 里。
+    /// </summary>
+    public string? EntryNote { get; init; }
+
     public string DisplayName => string.IsNullOrWhiteSpace(Manifest.Display)
         ? DirectoryName
         : Manifest.Display!.Trim();
@@ -104,7 +112,7 @@ public sealed class ModuleInfo
         _ => "已识别：未知",
     };
 
-    public string Summary => $"目录 {DirectoryName} · {SizeText}";
+    public string Summary => $"{DirectoryName} · {SizeText}";
 }
 
 /// <summary>运行环境识别结果：只用于判断模块能不能用，与性能无关。</summary>
@@ -169,8 +177,17 @@ public static class ModuleRegistry
         _ => "语音识别",
     };
 
-    /// <summary>扫描某一类模块；目录不存在时返回空列表（界面显示"未发现模块"）。</summary>
-    public static IReadOnlyList<ModuleInfo> Scan(ModuleKind kind, ModuleEnvironment environment)
+    /// <summary>
+    /// 扫描某一类模块；目录不存在时返回空列表（界面显示"未发现模块"）。
+    ///
+    /// 单个目录出问题（坏 JSON、缺 module.json、manifest 是目录、字段非法、识别过程抛异常）
+    /// 一律只跳过它并把**可读原因**写进 <paramref name="skipped"/>，绝不因为一个坏模块
+    /// 让整次扫描失败 —— 以前是静默 continue，界面上只会看到"未发现模块"，用户无从下手。
+    /// </summary>
+    public static IReadOnlyList<ModuleInfo> Scan(
+        ModuleKind kind,
+        ModuleEnvironment environment,
+        List<string>? skipped = null)
     {
         var result = new List<ModuleInfo>();
 
@@ -178,51 +195,133 @@ public static class ModuleRegistry
         {
             if (!Directory.Exists(ModulesRoot))
             {
+                skipped?.Add("modules 目录不存在");
                 return result;
             }
 
-            foreach (var directory in Directory.EnumerateDirectories(ModulesRoot))
+            foreach (var directory in EnumerateModuleDirectories())
             {
+                var name = Path.GetFileName(directory.TrimEnd(Path.DirectorySeparatorChar)) is { Length: > 0 } n
+                    ? n
+                    : directory;
+
                 var manifestPath = Path.Combine(directory, "module.json");
+
+                if (Directory.Exists(manifestPath))
+                {
+                    skipped?.Add($"{name}：module.json 是个目录");
+                    continue;
+                }
+
                 if (!File.Exists(manifestPath))
                 {
                     // 没有 module.json 的目录不当作模块：无法确定 kind / entry，猜错比不显示更糟。
+                    skipped?.Add($"{name}：没有 module.json");
                     continue;
                 }
 
-                var manifest = ReadManifest(manifestPath);
-                if (manifest is null || InferKind(manifest, directory) != kind)
+                if (!TryReadManifest(manifestPath, out var manifest, out var readError))
                 {
+                    skipped?.Add($"{name}：module.json 读取失败（{readError}）");
                     continue;
                 }
 
-                result.Add(BuildInfo(kind, directory, manifest, environment));
+                var inferred = InferKind(manifest!, directory);
+                if (inferred is null)
+                {
+                    skipped?.Add($"{name}：kind 既没写也推断不出");
+                    continue;
+                }
+
+                if (inferred != kind)
+                {
+                    // 属于别的类：不是问题，由对应类的扫描负责。
+                    continue;
+                }
+
+                try
+                {
+                    result.Add(BuildInfo(kind, directory, manifest!, environment));
+                }
+                catch (Exception ex)
+                {
+                    skipped?.Add($"{name}：识别失败（{ex.Message}）");
+                }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // 目录读取失败按"没有模块"处理，界面会给出去「拓展」添加的提示。
+            skipped?.Add($"modules 目录读取失败（{ex.Message}）");
         }
 
         return result.OrderBy(m => m.DirectoryName, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>
+    /// 枚举 modules 下的"模块候选目录"。
+    ///
+    /// 跳过 reparse point（符号链接 / junction）：模块目录里放一个指回上层的链接，
+    /// 后面的体积统计与导入就会沿着环无限递归 —— 这是用户可写的目录，必须防。
+    /// </summary>
+    private static IEnumerable<string> EnumerateModuleDirectories()
+    {
+        try
+        {
+            return new DirectoryInfo(ModulesRoot)
+                .EnumerateDirectories("*", SafeTopDirectoryOptions)
+                .Select(d => d.FullName);
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>只枚举当前层、跳过隐藏/系统与 reparse point，读不到的目录直接忽略。</summary>
+    private static readonly EnumerationOptions SafeTopDirectoryOptions = new()
+    {
+        RecurseSubdirectories = false,
+        IgnoreInaccessible = true,
+        AttributesToSkip = FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint,
+    };
+
+    /// <summary>递归枚举选项：跳过 reparse point，避免符号链接成环把扫描卡死。</summary>
+    private static readonly EnumerationOptions SafeRecursiveFileOptions = new()
+    {
+        RecurseSubdirectories = true,
+        IgnoreInaccessible = true,
+        AttributesToSkip = FileAttributes.Hidden | FileAttributes.System | FileAttributes.ReparsePoint,
+    };
+
+    /// <summary>
     /// 取某一类"当前启用中"的模块：优先 appearance.json 里保存的目录名；
     /// 没保存过就取第一个可用模块（开箱即用），都不可用则取第一个。
     /// </summary>
     public static ModuleInfo? EffectiveModule(ModuleKind kind, IReadOnlyList<ModuleInfo> modules)
+        => EffectiveModule(kind, modules, AppearanceStore.LoadEnabledModule(KindKey(kind)));
+
+    /// <summary>
+    /// 同上，但启用项由调用方传入。
+    ///
+    /// 为什么要有这个重载：<see cref="AppearanceStore.LoadEnabledModule"/> 每次都把
+    /// appearance.json 整个读一遍并反序列化；设置面板一次刷新要问 7 次（渲染 3 + 门禁 3 + 后端下拉 1），
+    /// 等于同一个文件读 7 遍。调用方读一次传进来即可。
+    /// </summary>
+    public static ModuleInfo? EffectiveModule(
+        ModuleKind kind,
+        IReadOnlyList<ModuleInfo> modules,
+        string? storedDirectoryName)
     {
         if (modules.Count == 0)
         {
             return null;
         }
 
-        var stored = AppearanceStore.LoadEnabledModule(KindKey(kind));
-        if (!string.IsNullOrWhiteSpace(stored))
+        if (!string.IsNullOrWhiteSpace(storedDirectoryName))
         {
             var match = modules.FirstOrDefault(m =>
-                string.Equals(m.DirectoryName, stored, StringComparison.OrdinalIgnoreCase));
+                string.Equals(m.DirectoryName, storedDirectoryName, StringComparison.OrdinalIgnoreCase));
 
             if (match is not null)
             {
@@ -559,7 +658,7 @@ public static class ModuleRegistry
                 return found;
             }
 
-            foreach (var directory in Directory.EnumerateDirectories(ModulesRoot))
+            foreach (var directory in EnumerateModuleDirectories())
             {
                 var exe = Path.Combine(directory, "llama-server.exe");
                 if (File.Exists(exe))
@@ -735,12 +834,29 @@ public static class ModuleRegistry
 
             var destination = Path.Combine(ModulesRoot, directoryName);
 
-            if (string.Equals(
-                    Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar),
-                    Path.GetFullPath(trimmed).TrimEnd(Path.DirectorySeparatorChar),
-                    StringComparison.OrdinalIgnoreCase))
+            var fullSource = Path.GetFullPath(trimmed).TrimEnd(Path.DirectorySeparatorChar);
+            var fullDestination = Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar);
+            var fullModulesRoot = Path.GetFullPath(ModulesRoot).TrimEnd(Path.DirectorySeparatorChar);
+
+            if (string.Equals(fullDestination, fullSource, StringComparison.OrdinalIgnoreCase))
             {
                 return new ModuleImportResult(false, "选中的目录已经在 modules 目录里了。", null);
+            }
+
+            /*
+             * 源目录是 modules/ 本身、或者是 modules/ 的上级目录时必须拒绝。
+             *
+             * 否则目标 modules\<name> 会落在源目录**里面**，CopyDirectory 边创建边枚举，
+             * 把自己刚建出来的目录当成子目录再复制一份 —— 一层层套下去（实测会把磁盘写满、界面卡死）。
+             * 这是用户随手就能选到的路径（文件夹选择器的默认起始目录就是 modules/）。
+             */
+            if (string.Equals(fullSource, fullModulesRoot, StringComparison.OrdinalIgnoreCase) ||
+                fullModulesRoot.StartsWith(fullSource + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                return new ModuleImportResult(
+                    false,
+                    "选中的目录是 modules/ 本身或它的上级目录，不能导入（会自我复制）。请选模块自己的目录。",
+                    null);
             }
 
             if (Directory.Exists(destination))
@@ -749,7 +865,22 @@ public static class ModuleRegistry
             }
 
             Directory.CreateDirectory(ModulesRoot);
-            CopyDirectory(trimmed, destination);
+
+            /*
+             * 复制失败（文件被占用、磁盘满、路径过长、权限不足…）必须回滚：
+             * 留下一个半成品 modules\<name> 不只是垃圾 —— 之后同名的再次导入会被
+             * "已存在"挡掉，而界面上又会多出一张"缺 exe"的坏卡片。
+             */
+            try
+            {
+                CopyDirectory(trimmed, destination, 0);
+            }
+            catch (Exception copyError)
+            {
+                TryDeleteDirectory(destination);
+                logger.Warn($"复制模块失败（已回滚 {destination}）：{copyError.Message}");
+                return new ModuleImportResult(false, $"复制失败，已回滚：{copyError.Message}", null);
+            }
 
             var modules = Scan(expectedKind, environment);
             var imported = modules.FirstOrDefault(m =>
@@ -778,34 +909,118 @@ public static class ModuleRegistry
         }
     }
 
-    private static void CopyDirectory(string source, string destination)
+    /// <summary>导入时允许的最大目录层级：防止符号链接成环导致的无限递归复制。</summary>
+    private const int MaxCopyDepth = 24;
+
+    private static void CopyDirectory(string source, string destination, int depth)
     {
+        if (depth > MaxCopyDepth)
+        {
+            throw new IOException($"目录层级超过 {MaxCopyDepth} 层，已中止（可能是符号链接成环）");
+        }
+
         Directory.CreateDirectory(destination);
 
-        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.TopDirectoryOnly))
+        foreach (var file in Directory.EnumerateFiles(source, "*", SafeTopDirectoryOptions))
         {
             File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: false);
         }
 
-        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.TopDirectoryOnly))
+        foreach (var directory in new DirectoryInfo(source).EnumerateDirectories("*", SafeTopDirectoryOptions))
         {
-            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+            CopyDirectory(directory.FullName, Path.Combine(destination, directory.Name), depth + 1);
+        }
+    }
+
+    /// <summary>回滚用：删掉半成品目录；删不掉也不算失败（至少要如实报给用户）。</summary>
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch
+        {
+            // 有文件仍被占用时删不掉：保留在原处，界面已提示"复制失败，已回滚"，用户可手动删。
         }
     }
 
     // ------------------------------------------------------------------ 解析细节
 
-    public static ModuleManifest? ReadManifest(string path)
+    /// <summary>
+    /// 读并反序列化 module.json；失败时给出**可读原因**（界面要用它告诉用户为什么这个模块被跳过）。
+    ///
+    /// 这里的每一种失败都必须被吞掉并转成原因：坏 JSON、空文件、文件被独占打开、
+    /// 没有读取权限、JSON 是 <c>null</c> / 数组而不是对象 —— 模块是用户/第三方可写的，
+    /// 一个坏文件不能连锁影响整次扫描，更不能让设置面板打不开。
+    /// </summary>
+    public static bool TryReadManifest(string path, out ModuleManifest? manifest, out string reason)
     {
+        manifest = null;
+        reason = string.Empty;
+
         try
         {
+            if (Directory.Exists(path))
+            {
+                reason = "module.json 是个目录";
+                return false;
+            }
+
+            if (!File.Exists(path))
+            {
+                reason = "module.json 不存在";
+                return false;
+            }
+
             var json = File.ReadAllText(path, Encoding.UTF8);
-            return JsonSerializer.Deserialize<ModuleManifest>(json, JsonOptions);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                reason = "module.json 是空文件";
+                return false;
+            }
+
+            manifest = JsonSerializer.Deserialize<ModuleManifest>(json, JsonOptions);
+            if (manifest is null)
+            {
+                reason = "JSON 内容是 null（应为对象）";
+                return false;
+            }
+
+            return true;
         }
-        catch
+        catch (JsonException ex)
         {
-            return null;
+            reason = "JSON 格式错误：" + Shorten(ex.Message);
+            return false;
         }
+        catch (UnauthorizedAccessException)
+        {
+            reason = "没有读取权限（或被系统占用）";
+            return false;
+        }
+        catch (IOException ex)
+        {
+            reason = "文件被占用或读取失败：" + Shorten(ex.Message);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            reason = ex.GetType().Name + "：" + Shorten(ex.Message);
+            return false;
+        }
+    }
+
+    public static ModuleManifest? ReadManifest(string path)
+        => TryReadManifest(path, out var manifest, out _) ? manifest : null;
+
+    private static string Shorten(string? text)
+    {
+        var trimmed = (text ?? string.Empty).Trim().Replace('\r', ' ').Replace('\n', ' ');
+        return trimmed.Length <= 80 ? trimmed : trimmed[..80] + "…";
     }
 
     public static ModuleKind? ParseKind(string? kind) => kind?.Trim().ToLowerInvariant() switch
@@ -863,7 +1078,39 @@ public static class ModuleRegistry
             SizeBytes = ComputeSize(directory),
             Availability = availability,
             EntryPath = entryPath,
+            EntryNote = DescribeEntryProblem(directory, manifest),
         };
+    }
+
+    /// <summary>把"entry 到底哪里不对"翻译成一句人话；entry 没写或正常时返回 null。</summary>
+    private static string? DescribeEntryProblem(string directory, ModuleManifest manifest)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.Entry))
+        {
+            return null;
+        }
+
+        var raw = manifest.Entry!.Trim();
+
+        if (!IsSafeRelativePath(raw))
+        {
+            return $"entry \"{raw}\" 越出模块目录（不允许绝对路径或 ..）";
+        }
+
+        try
+        {
+            var full = Path.Combine(directory, raw.Replace('/', Path.DirectorySeparatorChar));
+
+            return Directory.Exists(full)
+                ? $"entry \"{raw}\" 指向的是目录，不是可执行文件"
+                : File.Exists(full)
+                    ? null
+                    : $"entry \"{raw}\" 指向的文件不存在";
+        }
+        catch (Exception ex)
+        {
+            return $"entry \"{raw}\" 路径非法（{ex.GetType().Name}）";
+        }
     }
 
     private static string? ResolveEntryName(string directory, ModuleManifest manifest)
@@ -999,14 +1246,25 @@ public static class ModuleRegistry
                Directory.EnumerateFiles(directory, pattern, SearchOption.AllDirectories).Any();
     }
 
+    /// <summary>体积统计的文件数上限：超大目录（或伪造的目录树）不该把设置面板卡住。</summary>
+    private const int MaxSizeScanFiles = 50_000;
+
     private static long ComputeSize(string directory)
     {
         long total = 0;
+        var scanned = 0;
 
         try
         {
-            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            // 用 SafeRecursiveFileOptions：跳过 reparse point（符号链接成环会无限递归），
+            // 无权限的子目录直接跳过而不是整次枚举抛异常。上限兜住超大目录。
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SafeRecursiveFileOptions))
             {
+                if (++scanned > MaxSizeScanFiles)
+                {
+                    break;
+                }
+
                 try
                 {
                     total += new FileInfo(file).Length;
