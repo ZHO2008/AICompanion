@@ -475,9 +475,17 @@ public partial class MainWindow : Window
     /// <summary>切换交互模式。托盘菜单与"输入文字…"都走这里。</summary>
     public void SetInteractive(bool interactive)
     {
-        _clickThrough = !interactive;
-        ApplyClickThrough(_clickThrough);
+        /*
+         * 必须走 SetClickThrough 这个统一入口，不能自己写 _clickThrough 再 ApplyClickThrough：
+         *   1. 绕过它就不会复位 _hoverArmed —— 托盘切到透明后光标往往还压在角色上，
+         *      悬停检测（100ms 一次）很快就会把窗口反切回覆盖，用户点的"透明"看起来没生效；
+         *   2. _hoverSwitched 不复位，手动切到覆盖后也会被"离开自动退回"改回透明；
+         *   3. 右上角按钮文字不更新（还显示「覆」），日志里也没有这次切换。
+         * 传 fromHover:false：这是用户的明确选择，不参与自动退回。
+         */
+        SetClickThrough(!interactive, fromHover: false, source: "托盘/文字输入");
 
+        // SetClickThrough 在模式未变时会提前返回，下面这些副作用仍要执行。
         if (interactive)
         {
             Activate();

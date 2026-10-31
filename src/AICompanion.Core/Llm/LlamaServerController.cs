@@ -49,6 +49,16 @@ public sealed class LlamaServerController : IAsyncDisposable
     private readonly object _sync = new();
     private readonly LinkedList<string> _stderrHistory = new();
 
+    /// <summary>
+    /// 进程句柄的临界区：<see cref="_process"/> 的"读 → 终止 → 写入"必须串行。
+    ///
+    /// 并发 Start（OOM 回退重试与游戏结束 restore / 托盘恢复可能同时触发）时，
+    /// 两个线程各自的 Stop → Start 会互相覆盖 _process：后写的把前一个**还活着的**
+    /// 句柄顶掉，前一个 llama-server 就成了没人管、还占着显存的孤儿进程。
+    /// 注意 SemaphoreSlim 不可重入 —— 持锁期间只能调不加锁的 StopProcessCoreAsync。
+    /// </summary>
+    private readonly SemaphoreSlim _processLock = new(1, 1);
+
     private readonly LlamaClient _client;
     private readonly CancellationTokenSource _lifetime = new();
 
@@ -468,7 +478,22 @@ public sealed class LlamaServerController : IAsyncDisposable
         var exited = await WaitForExitAsync(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
         if (!exited)
         {
-            _logger.Warn("llama-server 未在 10 秒内退出，显存可能尚未完全释放。");
+            /*
+             * 进程没退出就是没让出显存，不能报成功。
+             *
+             * 原实现在这里只记一条 Warn，然后照样弹"已让出显存"并 return true ——
+             * 与文件开头"不谎报"的原则（以及 §3.9 的语义）直接冲突：用户以为显存空了，
+             * 游戏照样因显存不足掉帧。这里如实返回失败，不弹成功气泡，改为提示可手动重试。
+             */
+            _logger.Error("llama-server 未在 10 秒内退出，显存没有确定释放：本次 unload 按失败处理（不报成功）。");
+
+            _bubble.Show(
+                "gpu-yield-failed",
+                "让出显存失败：llama-server 未在 10 秒内退出，显存可能仍被占用。请查看日志后手动结束该进程，或重启程序。",
+                BubbleLevel.Error,
+                TimeSpan.FromSeconds(_config.Ui.BubbleDurationSeconds));
+
+            return false;
         }
 
         _bubble.Clear("llm-offline");
@@ -527,8 +552,7 @@ public sealed class LlamaServerController : IAsyncDisposable
     /// </summary>
     private async Task<(bool Success, string Message)> StartProcessAsync(string exePath, string modelPath, int ngl)
     {
-        await StopProcessAsync(CancellationToken.None).ConfigureAwait(false);
-
+        // 参数先拼好再进临界区：临界区只包进程句柄相关的操作，越短越好。
         var psi = new ProcessStartInfo(exePath)
         {
             WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppPaths.Root,
@@ -571,45 +595,67 @@ public sealed class LlamaServerController : IAsyncDisposable
         process.OutputDataReceived += (_, e) => CaptureLine(e.Data, isError: false);
         process.ErrorDataReceived += (_, e) => CaptureLine(e.Data, isError: true);
 
-        lock (_sync)
-        {
-            _intentionalStop = false;
-            _process = process;
-        }
-
+        /*
+         * 临界区只覆盖"停掉旧进程 → 启动新进程 → 写 _process → 失败清理"这一小段：
+         *   - 不包住 StartAsync 的 OOM 重试循环（每轮各自取放锁，循环里必有释放）；
+         *   - 临界区内不调用 StopProcessAsync（它自己要取同一把锁），改用不加锁的
+         *     StopProcessCoreAsync，所以同线程不会重入死锁。
+         * Stop 与 Start 落在同一段临界区里，就不存在"别人在我 Stop 之后、Start 之前
+         * 插进来覆盖句柄"的窗口 —— 孤儿 llama-server 无从产生。
+         */
+        await _processLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (!process.Start())
-            {
-                lock (_sync)
-                {
-                    if (ReferenceEquals(_process, process))
-                    {
-                        _process = null;
-                    }
-                }
+            await StopProcessCoreAsync(CancellationToken.None).ConfigureAwait(false);
 
-                process.Dispose();
-                return (false, "Process.Start 返回 false。");
+            lock (_sync)
+            {
+                _intentionalStop = false;
+                _process = process;
             }
 
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            process.Exited += OnProcessExited;
+            try
+            {
+                if (!process.Start())
+                {
+                    ClearProcessIfCurrent(process);
+                    process.Dispose();
+                    return (false, "Process.Start 返回 false。");
+                }
 
-            _logger.Info($"已启动进程 PID={process.Id}：{exePath} {string.Join(' ', psi.ArgumentList)}");
-            return (true, string.Empty);
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                process.Exited += OnProcessExited;
+
+                _logger.Info($"已启动进程 PID={process.Id}：{exePath} {string.Join(' ', psi.ArgumentList)}");
+                return (true, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"启动 llama-server 失败：{ex.Message}", ex);
+
+                // 只清掉确实属于本次的句柄：盲目置 null 会把并发 Start 写进去的活进程
+                // 句柄抹掉，那个 llama-server 就再也没人终止得了。
+                ClearProcessIfCurrent(process);
+                process.Dispose();
+                return (false, ex.Message);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.Error($"启动 llama-server 失败：{ex.Message}", ex);
-            lock (_sync)
+            _processLock.Release();
+        }
+    }
+
+    /// <summary>仅当 _process 仍指向本次启动的进程时才清空，避免抹掉并发写入的活句柄。</summary>
+    private void ClearProcessIfCurrent(Process process)
+    {
+        lock (_sync)
+        {
+            if (ReferenceEquals(_process, process))
             {
                 _process = null;
             }
-
-            process.Dispose();
-            return (false, ex.Message);
         }
     }
 
@@ -719,7 +765,30 @@ public sealed class LlamaServerController : IAsyncDisposable
         _bubble.Show("llm-offline", "LLM 服务已离线。请查看日志后手动重启程序。", BubbleLevel.Error);
     }
 
+    /// <summary>
+    /// 停止并释放进程（供 unload / 启动 / 退出流程复用）。
+    /// 外部调用方只能走这个入口：它先取 <see cref="_processLock"/>，保证与
+    /// <see cref="StartProcessAsync"/> 的句柄写入互斥。
+    /// </summary>
     private async Task StopProcessAsync(CancellationToken cancellationToken)
+    {
+        await _processLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await StopProcessCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _processLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 停止并释放进程（不加锁，调用方必须已持有 <see cref="_processLock"/>）。
+    /// 单独拆出来是因为 <see cref="StartProcessAsync"/> 要在同一段临界区里"先停旧、再起新"：
+    /// 直接调 StopProcessAsync 会重入 SemaphoreSlim（不可重入）而死锁。
+    /// </summary>
+    private async Task StopProcessCoreAsync(CancellationToken cancellationToken)
     {
         Process? process;
         lock (_sync)

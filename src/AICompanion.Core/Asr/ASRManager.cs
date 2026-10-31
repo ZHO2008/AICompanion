@@ -833,7 +833,26 @@ public sealed class ASRManager : IDisposable
                     if (_consecutiveFailures >= MaxConsecutiveFailures)
                     {
                         SetFault(AsrFaultReason.RecognitionFailure, ex.Message);
-                        _bubble.Show("asr-fault", "语音识别异常，可切换文字输入。", BubbleLevel.Warning);
+
+                        /*
+                         * 达到阈值后必须真的停下来。
+                         *
+                         * 原实现只 `return` 退出识别循环：采集器仍在采、音频线程仍在跑、
+                         * 每 20ms 还在分配 float[]，麦克风指示灯常亮 —— 用户看到的是
+                         * "一条错误提示 + 麦克风没关"，比彻底停掉更糟。
+                         *
+                         * StopListening 只做"取 _sync → 退订/停采集/取消 token"，
+                         * 不 Join 本识别线程（Join 在 ResetAsync/Dispose 里），
+                         * 所以在本循环内调用不会自我等待，不会递归也不会死锁。
+                         * 手册仍要求不自动重启引擎：这里只停，等待用户重新开始或设备自愈。
+                         */
+                        _logger.Warn(
+                            $"连续识别失败 {_consecutiveFailures} 次（阈值 {MaxConsecutiveFailures}），" +
+                            "已停止监听并释放麦克风；等待用户重新开始监听或设备自愈后重试。");
+
+                        StopListening();
+
+                        _bubble.Show("asr-fault", "语音识别异常，已停止监听，可切换文字输入。", BubbleLevel.Warning);
                         return;   // 手册：不自动重启引擎。
                     }
                 }

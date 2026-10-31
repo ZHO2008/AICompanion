@@ -532,8 +532,14 @@ public sealed class TTSManager : IDisposable
 
     private void UpdateStatusLine()
     {
+        /*
+         * 降级链是"配置引擎 → Piper → SAPI"两级的：Piper 也缺失时会继续降到 SAPI。
+         * 原文案把降级态写死成 "Piper"，降到底之后状态栏还写着 Piper ——
+         * 用户按状态栏去查 Piper 日志，而实际出声的是 SAPI（与手册"不谎报"相悖）。
+         * 这里"实际引擎"一律取 _engine（当前真正在用的引擎）并转成可读名字，降级只是附加说明。
+         */
         var text = IsDegraded
-            ? $"当前实际引擎：Piper（降级，配置为 {_config.Tts.Engine}）"
+            ? $"当前实际引擎：{EngineLabel(_engine.Name)}（降级，配置为 {EngineLabel(_config.Tts.Engine)}）"
             : $"当前实际引擎：{_engine.Name}";
 
         _bubble.SetStatus("tts-engine", text);

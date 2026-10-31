@@ -281,10 +281,54 @@ public sealed class SapiEngine : ITTSEngine
     {
         Stop();
 
+        object? cachedToken;
+
         lock (_sync)
         {
             ReleaseCom(_currentVoice);
             _currentVoice = null;
+
+            /*
+             * 缓存的音色 token 也必须在卸载时释放，并复位"已解析"标记。
+             *
+             * 两个问题：
+             *   1. _voiceToken 是枚举 ISpeechObjectTokens 得到的 COM RCW，只有握在
+             *      _voiceToken 字段里这一份引用；不释放每次"重启语音服务"（Reset 会重建
+             *      引擎）就漏一个 RCW，反复重置会一路累积。
+             *   2. _voiceResolved 一旦置 true 就永不复位，同一个实例再次启用时会直接
+             *      复用旧 token —— 用户改了 voice 配置也不生效（配置看起来"改了没用"）。
+             * 复位后下一次合成会按当前配置重新选一次音色。
+             */
+            cachedToken = _voiceToken;
+            _voiceToken = null;
+            _voiceResolved = false;
+        }
+
+        // 放在锁外释放：ReleaseComObject 会进 COM，不该占着 _sync。
+        ReleaseComToken(cachedToken);
+    }
+
+    /// <summary>
+    /// 释放缓存的音色 token：用 <see cref="Marshal.ReleaseComObject"/> 递减引用计数。
+    /// 释放失败只吞掉异常 —— 卸载流程不该因为一个 COM 引用而失败。
+    /// </summary>
+    private static void ReleaseComToken(object? comObject)
+    {
+        if (comObject is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (Marshal.IsComObject(comObject))
+            {
+                Marshal.ReleaseComObject(comObject);
+            }
+        }
+        catch
+        {
+            // 释放失败不应影响调用方
         }
     }
 
