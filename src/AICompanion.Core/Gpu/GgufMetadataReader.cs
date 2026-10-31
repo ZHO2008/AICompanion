@@ -48,10 +48,11 @@ public static class GgufMetadataReader
     /// 而换小模型时又可能开得比模型支持的上限还大，直接被 llama-server 截断。
     /// 有了这两个值，`llm.context_length: 0` 就能"按模型自动"。
     /// </summary>
-    public static bool TryReadModelInfo(string path, out string? architecture, out int contextLength, out string? error)
+    public static bool TryReadModelInfo(string path, out string? architecture, out int contextLength, out int expertCount, out string? error)
     {
         architecture = null;
         contextLength = 0;
+        expertCount = 0;
         error = null;
 
         try
@@ -102,8 +103,15 @@ public static class GgufMetadataReader
                 if (type == GgufValueType.UInt32 && key.EndsWith(".context_length", StringComparison.Ordinal))
                 {
                     contextLength = (int)reader.ReadUInt32();
-                    // 继续读完也没意义，但要把剩余条目跳完才能安全退出（这里直接返回）。
-                    return architecture is not null || contextLength > 0;
+                    continue;
+                }
+
+                // MoE 模型的专家数（如 qwen2moe.expert_count / deepseek2.expert_count）。
+                // 只用来在显存预算上留出余量，不需要精确。
+                if (type == GgufValueType.UInt32 && key.EndsWith(".expert_count", StringComparison.Ordinal))
+                {
+                    expertCount = (int)reader.ReadUInt32();
+                    continue;
                 }
 
                 SkipValue(reader, type, wide);

@@ -400,13 +400,27 @@ public sealed class MonitorConfig
 /// <summary>显存计算参数（手册 §3.3 的常量外提，默认值与手册一致）。</summary>
 public sealed class GpuConfig
 {
-    public int ReservedMb { get; set; } = 4096;
+    /// <summary>
+    /// 系统预留显存（MB）。**0 = 按显存档位自动**（见 <see cref="Gpu.VramTiers"/>）。
+    /// 以前固定 4096：4 GB 及以下的卡直接算成"显存不足"走 CPU，8 GB 卡又白让 4 GB。
+    /// </summary>
+    public int ReservedMb { get; set; }
 
-    public int KvCacheReservedMb { get; set; } = 1024;
+    /// <summary>KV Cache 预留（MB）。**0 = 按"层数 × 上下文"自动估算**。</summary>
+    public int KvCacheReservedMb { get; set; }
 
-    public int PerLayerMb { get; set; } = 150;
+    /// <summary>每层占用（MB）。**0 = 按 GGUF 文件大小 ÷ 层数自动估算**（固定 150 是按 7B 拍的）。</summary>
+    public int PerLayerMb { get; set; }
 
-    public double SafetyFactor { get; set; } = 0.9;
+    /// <summary>安全系数（0–1）。**0 = 按显存档位自动**。</summary>
+    public double SafetyFactor { get; set; }
+
+    /// <summary>
+    /// MoE 模型的额外余量（1.0 = 不加）。MoE 的激活缓冲比同参数量稠密模型大，
+    /// 检测到 GGUF 里的 expert_count 时由 LlamaServerController 设成 1.15，不回写配置文件。
+    /// </summary>
+    [YamlIgnore]
+    public double MoeExtraFactor { get; set; } = 1.0;
 
     /// <summary>OOM 回退最大次数。</summary>
     public int MaxOomRetries { get; set; } = 2;

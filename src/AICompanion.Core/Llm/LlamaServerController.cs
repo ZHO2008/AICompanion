@@ -127,7 +127,7 @@ public sealed class LlamaServerController : IAsyncDisposable
         const int autoCap = 8192;
 
         var configured = _config.Llm.ContextLength;
-        var hasInfo = GgufMetadataReader.TryReadModelInfo(modelPath, out var arch, out var modelCtx, out var error);
+        var hasInfo = GgufMetadataReader.TryReadModelInfo(modelPath, out var arch, out var modelCtx, out var experts, out var error);
 
         if (!hasInfo)
         {
@@ -141,6 +141,12 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
 
         var archLabel = string.IsNullOrWhiteSpace(arch) ? "未知架构" : arch;
+        if (experts > 0)
+        {
+            _logger.Info($"MoE 模型：{archLabel} 有 {experts} 个专家/层 —— 显存预算会额外留 15% 余量（激活缓冲比稠密模型大）。");
+            _config.Gpu.MoeExtraFactor = 1.15;
+        }
+
         var modelLabel = modelCtx > 0 ? modelCtx.ToString() : "未声明";
 
         if (configured > 0)

@@ -93,6 +93,10 @@ public sealed class GPUMemoryManager
         var reservedMb = gpu.ReservedMb > 0 ? gpu.ReservedMb : tier.ReservedMb;
         var safetyFactor = gpu.SafetyFactor > 0 ? gpu.SafetyFactor : tier.SafetyFactor;
         var perLayerMb = gpu.PerLayerMb > 0 ? gpu.PerLayerMb : EstimatePerLayerMb(totalLayers);
+        if (gpu.MoeExtraFactor > 1.0)
+        {
+            perLayerMb = (int)Math.Ceiling(perLayerMb * gpu.MoeExtraFactor);
+        }
         var kvReservedMb = gpu.KvCacheReservedMb > 0
             ? gpu.KvCacheReservedMb
             : EstimateKvReserveMb(totalLayers, totalVramMb);
