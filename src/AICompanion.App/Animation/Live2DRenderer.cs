@@ -390,12 +390,15 @@ public sealed class Live2DRenderer : IDisposable
                  */
                 lock (FailedContexts)
                 {
-                    if (control is not null)
+                    // 上限 8 份：这是"不释放也不回收"的隔离区，反复用坏模型试错时
+                    // 无界增长就是真泄漏（每份都带 GL 表面与渲染线程）。
+                    const int maxFailedContexts = 8;
+                    if (control is not null && FailedContexts.Count < maxFailedContexts)
                     {
                         FailedContexts.Add(control);
                     }
 
-                    if (lapp is not null)
+                    if (lapp is not null && FailedContexts.Count < maxFailedContexts)
                     {
                         FailedContexts.Add(lapp);
                     }

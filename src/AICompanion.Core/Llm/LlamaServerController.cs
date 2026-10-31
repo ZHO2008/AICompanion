@@ -537,6 +537,15 @@ public sealed class LlamaServerController : IAsyncDisposable
         psi.ArgumentList.Add("--port");
         psi.ArgumentList.Add(_config.Llm.Port.ToString());
         psi.ArgumentList.Add("-ngl");
+
+        // 多模态投影器（可选）：视觉/音频塔是独立文件，存在才传。
+        var mmprojPath = ResolveMmprojPath();
+        if (mmprojPath is not null)
+        {
+            psi.ArgumentList.Add("--mmproj");
+            psi.ArgumentList.Add(mmprojPath);
+            _logger.Info($"已加载多模态投影器：{Path.GetFileName(mmprojPath)}");
+        }
         psi.ArgumentList.Add(ngl.ToString());
         psi.ArgumentList.Add("-c");
         psi.ArgumentList.Add(_config.Llm.ContextLength.ToString());
