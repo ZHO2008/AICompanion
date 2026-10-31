@@ -259,7 +259,7 @@ public static class ConfigLoader
         c.Llm.Host = FixString(c.Llm.Host, llmDefaults.Host, "llm.host", warnings);
         c.Llm.ServerExecutablePath = FixString(c.Llm.ServerExecutablePath, llmDefaults.ServerExecutablePath, "llm.server_executable_path", warnings);
         c.Llm.Port = FixPort(c.Llm.Port, llmDefaults.Port, "llm.port", warnings);
-        c.Llm.ContextLength = FixPositive(c.Llm.ContextLength, llmDefaults.ContextLength, "llm.context_length", warnings);
+        c.Llm.ContextLength = FixNonNegative(c.Llm.ContextLength, "llm.context_length", warnings);   // 0 = 按模型元数据自动
         c.Llm.StartupTimeoutSeconds = FixPositive(c.Llm.StartupTimeoutSeconds, llmDefaults.StartupTimeoutSeconds, "llm.startup_timeout_seconds", warnings);
         if (c.Llm.LayerCount < 0)
         {

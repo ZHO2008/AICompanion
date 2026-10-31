@@ -121,6 +121,50 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
     }
 
+    /// <summary>按 GGUF 元数据确定本次使用的上下文长度（config 写 0 = 自动）。</summary>
+    private void ApplyModelContextLength(string modelPath)
+    {
+        const int autoCap = 8192;
+
+        var configured = _config.Llm.ContextLength;
+        var hasInfo = GgufMetadataReader.TryReadModelInfo(modelPath, out var arch, out var modelCtx, out var error);
+
+        if (!hasInfo)
+        {
+            if (configured <= 0)
+            {
+                _config.Llm.ContextLength = 4096;
+            }
+
+            _logger.Warn($"读不到模型元数据（{error}），上下文长度按 {_config.Llm.ContextLength} 处理。");
+            return;
+        }
+
+        var archLabel = string.IsNullOrWhiteSpace(arch) ? "未知架构" : arch;
+        var modelLabel = modelCtx > 0 ? modelCtx.ToString() : "未声明";
+
+        if (configured > 0)
+        {
+            if (modelCtx > 0 && configured > modelCtx)
+            {
+                _logger.Warn($"配置的上下文 {configured} 超过模型训练上限 {modelCtx}，已夹回 {modelCtx}（{archLabel}）。");
+                _config.Llm.ContextLength = modelCtx;
+            }
+            else
+            {
+                _logger.Info($"模型元数据：架构 {archLabel}，训练上下文 {modelLabel}；按配置使用 {configured}。");
+            }
+
+            return;
+        }
+
+        var chosen = modelCtx > 0 ? Math.Min(modelCtx, autoCap) : 4096;
+        _config.Llm.ContextLength = Math.Max(2048, chosen);
+        _logger.Info(
+            $"模型元数据：架构 {archLabel}，训练上下文 {modelLabel}；上下文自动取 {_config.Llm.ContextLength}" +
+            (modelCtx > autoCap ? $"（上限 {autoCap}，再大会把 KV Cache 撑爆显存）" : string.Empty) + "。");
+    }
+
     /// <summary>
     /// 启动 llama-server（手册 §3.3 启动计算逻辑 + OOM 回退逻辑）。
     /// 返回失败时**不会**抛异常，调用方据此阻断或降级。
@@ -160,6 +204,9 @@ public sealed class LlamaServerController : IAsyncDisposable
             _bubble.Show("llm-model-missing", "LLM 模型文件缺失或路径错误，无法启动对话服务。请检查 config.yaml 的 llm.model_path。", BubbleLevel.Error);
             return new LlamaStartResult(LlamaStartOutcome.ModelFileMissing, 0, message, plan);
         }
+
+        // 上下文长度适配：config 写 0 时按 GGUF 元数据自动（含架构与训练上限）
+        ApplyModelContextLength(modelPath);
 
         var exePath = AppPaths.Resolve(_config.Llm.ServerExecutablePath);
         if (!File.Exists(exePath))

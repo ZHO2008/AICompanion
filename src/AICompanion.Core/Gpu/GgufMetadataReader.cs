@@ -41,6 +41,83 @@ public static class GgufMetadataReader
     /// <summary>数组最大嵌套层数（防止损坏文件用嵌套数组打爆线程栈）。</summary>
     private const int MaxArrayDepth = 32;
 
+    /// <summary>
+    /// 读模型元数据里的"架构名"和"训练上下文长度"（键名形如 <c>qwen2.context_length</c>、<c>llama.context_length</c>）。
+    ///
+    /// 为什么需要：上下文长度以前固定取 config 的 4096，换成长上下文模型（32k/128k）也用不到；
+    /// 而换小模型时又可能开得比模型支持的上限还大，直接被 llama-server 截断。
+    /// 有了这两个值，`llm.context_length: 0` 就能"按模型自动"。
+    /// </summary>
+    public static bool TryReadModelInfo(string path, out string? architecture, out int contextLength, out string? error)
+    {
+        architecture = null;
+        contextLength = 0;
+        error = null;
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                error = $"模型文件不存在：{path}";
+                return false;
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
+
+            if (reader.ReadUInt32() != Magic)
+            {
+                error = "文件头不是 GGUF 魔数。";
+                return false;
+            }
+
+            var version = reader.ReadUInt32();
+            if (version is < 1 or > 3)
+            {
+                error = $"不支持的 GGUF 版本：{version}";
+                return false;
+            }
+
+            var wide = version >= 2;
+            _ = wide ? reader.ReadUInt64() : reader.ReadUInt32();
+            var kvCount = wide ? reader.ReadUInt64() : reader.ReadUInt32();
+
+            if (kvCount > MaxMetadataCount)
+            {
+                error = $"元数据条目数异常（{kvCount}）";
+                return false;
+            }
+
+            for (ulong i = 0; i < kvCount; i++)
+            {
+                var key = ReadString(reader, wide);
+                var type = (GgufValueType)reader.ReadUInt32();
+
+                if (type == GgufValueType.String && key.Equals("general.architecture", StringComparison.Ordinal))
+                {
+                    architecture = ReadString(reader, wide);
+                    continue;
+                }
+
+                if (type == GgufValueType.UInt32 && key.EndsWith(".context_length", StringComparison.Ordinal))
+                {
+                    contextLength = (int)reader.ReadUInt32();
+                    // 继续读完也没意义，但要把剩余条目跳完才能安全退出（这里直接返回）。
+                    return architecture is not null || contextLength > 0;
+                }
+
+                SkipValue(reader, type, wide);
+            }
+
+            return architecture is not null || contextLength > 0;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
     public static bool TryReadBlockCount(string path, out int blockCount, out string? error)
     {
         blockCount = 0;

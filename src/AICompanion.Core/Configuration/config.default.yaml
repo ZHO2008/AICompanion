@@ -14,7 +14,7 @@ llm:
   model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
   host: "127.0.0.1"
   port: 8080
-  context_length: 4096
+  context_length: 0          # 0 = 按 GGUF 元数据自动（min(模型训练上限, 8192)）
   # 模型层数 L。0 = 启动时自动从 GGUF 元数据探测，无需手填。
   layer_count: 0
   # 由主程序自行拉起 llama-server（决策 Q5），因此 bat 里不再启动它。
