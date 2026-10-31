@@ -1,3 +1,26 @@
+## 未发布 — 双后端（CUDA / Vulkan）实测对照
+
+同一份 `third_party/llama.cpp`、同一套编译参数，只改后端；模型 qwen2.5-1.5B Q4_K_M，
+预热后、单次 64 max tokens：
+
+| 后端 / 设备 | 满卸载（ngl=99） | 应用内（ngl=14/28） |
+| --- | --- | --- |
+| CUDA / RTX 5060（新编） | **182.8 tok/s** | 46.8 tok/s |
+| Vulkan / RTX 5060 | 81.9 tok/s | — |
+| CUDA / RTX 5060（旧 bin，10 月构建） | 41.4 tok/s | — |
+| Vulkan / AMD 780M | 25.9 tok/s | 23.9 tok/s |
+| CPU（8 核） | 19.0 tok/s | — |
+
+结论：
+
+1. 独显上 CUDA 仍是快路径（比 Vulkan 快 2.2 倍），而且**旧的那份 CUDA 构建慢了 4 倍多**
+   （41.4 → 182.8），`bin\` 里那份该换了。
+2. Vulkan 的价值在核显：780M 上 25.9 tok/s，比纯 CPU 快 36%，这是 CUDA 覆盖不到的场景。
+3. 应用内只有 46.8 tok/s 的原因不是后端，而是 **ngl 算得太保守**（`gpu.reserved_mb=4096`
+   把 14/28 层留在 CPU）。8 GB 卡跑 1.5B 完全够全卸载，值得单独调。
+
+后端已按模块摆放：`modules/llm-cuda/`（34.7 MB ggml-cuda.dll）与 `modules/llm-vulkan/`
+（40.6 MB ggml-vulkan.dll），产物不入库（.gitignore）。
 ## 未发布 — Vulkan 后端可用
 
 编译出带 Vulkan 后端的 llama.cpp（`build-vulkan/`，不入库）。同一模型实测：

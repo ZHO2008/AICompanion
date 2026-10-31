@@ -64,3 +64,8 @@ _verify-*.yaml
 # Vulkan 后端构建目录（产物 ~50MB，不入库）
 build-vulkan/
 
+
+# LLM 后端模块（llama-server + ggml 后端 DLL，几十 MB，不入库）
+modules/*/*.dll
+modules/*/*.exe
+
