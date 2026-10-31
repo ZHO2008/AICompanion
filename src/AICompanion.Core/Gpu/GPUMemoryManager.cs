@@ -75,15 +75,37 @@ public sealed class GPUMemoryManager
         // ---- 步骤 6：总层数 L ----
         var totalLayers = ResolveTotalLayers(out var layerSource);
 
-        // ---- 步骤 3/4/5：保守可用显存 = (空闲 - 4096 - 1024) * 0.9 ----
-        var usableMb = freeMb - gpu.ReservedMb - gpu.KvCacheReservedMb;
-        var conservative = usableMb * gpu.SafetyFactor;
+        /*
+         * ---- 步骤 3/4/5：保守可用显存 ----
+         *
+         * 预留与安全系数都改成"按显存档位自动"（配置里写 0 = 自动）：
+         *   1/2/3/4 GB 的卡用小预留（192–512 MB），不然扣掉 4 GB 直接算成"显存不足"走 CPU；
+         *   8/12/16 GB 的卡留 1–2 GB 就够系统用，剩下的尽量全卸载。
+         *
+         * 每层占用也改成"按 GGUF 文件大小 ÷ 层数"估算：固定 150 MB 是按 7B 拍的，
+         * 1.5B 每层只有 ~40 MB，会把 ngl 压掉一半（实测 8 GB 卡算成 14/28，只有 46.8 tok/s；
+         * 全卸载能到 182.8 tok/s）。
+         */
+        var totalVram = await _smi.QueryTotalMemoryMbAsync(cancellationToken).ConfigureAwait(false);
+        var totalVramMb = totalVram.Success ? totalVram.Value : 0;
+        var tier = VramTiers.For(totalVramMb);
+
+        var reservedMb = gpu.ReservedMb > 0 ? gpu.ReservedMb : tier.ReservedMb;
+        var safetyFactor = gpu.SafetyFactor > 0 ? gpu.SafetyFactor : tier.SafetyFactor;
+        var perLayerMb = gpu.PerLayerMb > 0 ? gpu.PerLayerMb : EstimatePerLayerMb(totalLayers);
+
+        _logger.Info(
+            $"显存档位：{tier.Label}（总 {totalVramMb} MB；预留 {(gpu.ReservedMb > 0 ? "配置" : "档位")} {reservedMb} MB，" +
+            $"安全系数 {(gpu.SafetyFactor > 0 ? "配置" : "档位")} {safetyFactor:F2}，每层 {(gpu.PerLayerMb > 0 ? "配置" : "按 GGUF 估算")} {perLayerMb} MB）");
+
+        var usableMb = freeMb - reservedMb - gpu.KvCacheReservedMb;
+        var conservative = usableMb * safetyFactor;
 
         // ---- 决策 Q12 的边界：算不出正层数就直接走 CPU ----
-        if (conservative <= 0 || gpu.PerLayerMb <= 0)
+        if (conservative <= 0 || perLayerMb <= 0)
         {
-            var reason = $"空闲显存 {freeMb} MB 扣除预留 {gpu.ReservedMb + gpu.KvCacheReservedMb} MB 后不足，已切换为 CPU 模式";
-            _logger.Warn($"显存不足：free={freeMb}MB，预留={gpu.ReservedMb + gpu.KvCacheReservedMb}MB，保守可用={conservative:N0}MB");
+            var reason = $"空闲显存 {freeMb} MB 扣除预留 {reservedMb + gpu.KvCacheReservedMb} MB 后不足，已切换为 CPU 模式";
+            _logger.Warn($"显存不足：free={freeMb}MB，预留={reservedMb + gpu.KvCacheReservedMb}MB，保守可用={conservative:N0}MB");
             _bubble.Show(
                 "gpu-insufficient",
                 $"可用显存不足（空闲 {freeMb} MB），已切换为 CPU 模式以保证可用性。",
@@ -96,10 +118,10 @@ public sealed class GPUMemoryManager
         }
 
         // ---- 步骤 7：ngl = max(1, min(L, 保守可用 / 每层占用)) ----
-        var layersByMemory = (int)Math.Floor(conservative / gpu.PerLayerMb);
+        var layersByMemory = (int)Math.Floor(conservative / perLayerMb);
         if (layersByMemory < 1)
         {
-            var reason = $"保守可用显存 {conservative:N0} MB 不足一层（每层 {gpu.PerLayerMb} MB），已切换为 CPU 模式";
+            var reason = $"保守可用显存 {conservative:N0} MB 不足一层（每层 {perLayerMb} MB），已切换为 CPU 模式";
             _logger.Warn(reason);
             _bubble.Show("gpu-insufficient", "显存不足以承载任何一层，已切换为 CPU 模式。", BubbleLevel.Warning);
 
@@ -112,9 +134,9 @@ public sealed class GPUMemoryManager
         var ngl = Math.Max(1, Math.Min(totalLayers, layersByMemory));
 
         var explanation =
-            $"空闲 {freeMb} MB − 预留 {gpu.ReservedMb + gpu.KvCacheReservedMb} MB = {usableMb} MB，" +
-            $"× {gpu.SafetyFactor} = {conservative:N0} MB 保守可用；" +
-            $"÷ {gpu.PerLayerMb} MB/层 = {layersByMemory} 层；" +
+            $"空闲 {freeMb} MB − 预留 {reservedMb + gpu.KvCacheReservedMb} MB = {usableMb} MB，" +
+            $"× {safetyFactor:F2} = {conservative:N0} MB 保守可用；" +
+            $"÷ {perLayerMb} MB/层 = {layersByMemory} 层；" +
             $"层数上限 {totalLayers}（{layerSource}）⇒ ngl={ngl}";
 
         var plan = new GpuPlan(ngl, freeMb, totalLayers, RuntimeMode.Gpu, conservative, explanation);
@@ -159,6 +181,33 @@ public sealed class GPUMemoryManager
     {
         var step = Math.Max(1, _config.Gpu.OomNglStep);
         return Math.Max(1, currentNgl - step);
+    }
+
+    /// <summary>
+    /// 按 GGUF 文件大小估算"每层占用（MB）"：文件大小 ÷ 层数 × 1.1（经验系数，含输出头与对齐）。
+    /// 拿不到文件大小时回退 150 MB（7B 的经验值）。
+    /// </summary>
+    private int EstimatePerLayerMb(int totalLayers)
+    {
+        try
+        {
+            var modelPath = AppPaths.Resolve(_config.Llm.ModelPath);
+            if (totalLayers > 0 && File.Exists(modelPath))
+            {
+                var sizeMb = new FileInfo(modelPath).Length / 1024.0 / 1024.0;
+                var perLayer = (int)Math.Ceiling(sizeMb / totalLayers * 1.1);
+                if (perLayer > 0)
+                {
+                    return perLayer;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"按 GGUF 估算每层占用失败，回退 150 MB：{ex.Message}");
+        }
+
+        return 150;
     }
 
     private int ResolveTotalLayers(out string source)

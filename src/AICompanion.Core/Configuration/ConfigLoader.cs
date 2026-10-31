@@ -379,10 +379,10 @@ public static class ConfigLoader
 
         // ---------------- gpu ----------------
         var gpuDefaults = new GpuConfig();
-        c.Gpu.ReservedMb = FixPositive(c.Gpu.ReservedMb, gpuDefaults.ReservedMb, "gpu.reserved_mb", warnings);
+        c.Gpu.ReservedMb = FixNonNegative(c.Gpu.ReservedMb, "gpu.reserved_mb", warnings);   // 0 = 按显存档位自动
         c.Gpu.KvCacheReservedMb = FixPositive(c.Gpu.KvCacheReservedMb, gpuDefaults.KvCacheReservedMb, "gpu.kv_cache_reserved_mb", warnings);
-        c.Gpu.PerLayerMb = FixPositive(c.Gpu.PerLayerMb, gpuDefaults.PerLayerMb, "gpu.per_layer_mb", warnings);
-        c.Gpu.SafetyFactor = FixPositive(c.Gpu.SafetyFactor, gpuDefaults.SafetyFactor, "gpu.safety_factor", warnings);
+        c.Gpu.PerLayerMb = FixNonNegative(c.Gpu.PerLayerMb, "gpu.per_layer_mb", warnings);   // 0 = 按 GGUF 自动
+        c.Gpu.SafetyFactor = FixSafetyFactor(c.Gpu.SafetyFactor, "gpu.safety_factor", warnings);   // 0 = 按显存档位自动
         if (c.Gpu.SafetyFactor > 1.0)
         {
             warnings.Add($"gpu.safety_factor 大于 1（{c.Gpu.SafetyFactor}），已回退为 {gpuDefaults.SafetyFactor}。");
@@ -486,6 +486,36 @@ public static class ConfigLoader
 
         warnings.Add($"{field} 缺失或为空，已回退为 \"{fallback}\"。");
         return fallback;
+    }
+
+    /// <summary>允许 0（表示"自动"）的整数校验。</summary>
+    private static int FixNonNegative(int value, string field, List<string> warnings)
+    {
+        if (value >= 0)
+        {
+            return value;
+        }
+
+        warnings.Add($"{field} 为负数（{value}），已按 0（自动）处理。");
+        return 0;
+    }
+
+    /// <summary>允许 0（表示"自动"）的安全系数校验；非 0 时限制在 0–1。</summary>
+    private static double FixSafetyFactor(double value, string field, List<string> warnings)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value) || value < 0)
+        {
+            warnings.Add($"{field} 非法（{value}），已按 0（自动）处理。");
+            return 0;
+        }
+
+        if (value > 1)
+        {
+            warnings.Add($"{field} 大于 1（{value}），已按 0（自动）处理。");
+            return 0;
+        }
+
+        return value;
     }
 
     private static int FixPositive(int value, int fallback, string field, List<string> warnings)

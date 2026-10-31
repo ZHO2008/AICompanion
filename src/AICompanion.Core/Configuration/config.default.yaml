@@ -138,10 +138,10 @@ monitor:
   restore_low_gpu_minutes: 3.0
 
 gpu:
-  reserved_mb: 4096              # 系统预留 4GB
+  reserved_mb: 0            # 0 = 按显存档位自动（1/2/3/4/6/8/10/12/16 GB）
   kv_cache_reserved_mb: 1024     # KV Cache 预留 1GB
-  per_layer_mb: 150              # 每层约 150MB
-  safety_factor: 0.9
+  per_layer_mb: 0           # 0 = 按 GGUF 文件大小 ÷ 层数自动估算
+  safety_factor: 0          # 0 = 按显存档位自动
   max_oom_retries: 2
   oom_ngl_step: 4
   oom_retry_delay_seconds: 5

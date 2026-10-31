@@ -40,6 +40,10 @@ public sealed class NvidiaSmi
     public Task<NvidiaSmiValue> QueryFreeMemoryMbAsync(CancellationToken cancellationToken = default)
         => QueryIntegerAsync("--query-gpu=memory.free --format=csv,noheader,nounits", cancellationToken);
 
+    /// <summary>总显存（MB）。用于"按显存档位"挑选保守预算（见 VramTiers）。</summary>
+    public Task<NvidiaSmiValue> QueryTotalMemoryMbAsync(CancellationToken cancellationToken = default)
+        => QueryIntegerAsync("--query-gpu=memory.total --format=csv,noheader,nounits", cancellationToken);
+
     /// <summary>GPU 使用率（百分比）。失败时 Success=false。</summary>
     public Task<NvidiaSmiValue> QueryUtilizationPercentAsync(CancellationToken cancellationToken = default)
         => QueryIntegerAsync("--query-gpu=utilization.gpu --format=csv,noheader,nounits", cancellationToken);
