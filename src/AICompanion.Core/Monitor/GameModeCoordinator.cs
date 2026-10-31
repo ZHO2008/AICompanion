@@ -109,7 +109,8 @@ public sealed class GameModeCoordinator
         _bubble.Show("game-mode", $"检测到游戏运行（{process ?? "未知"}），正在让出显存…", BubbleLevel.Info);
 
         // 步骤 1-2：优先 /unload，失败则终止 llama-server 进程。
-        await _llama.UnloadAsync(cancellationToken).ConfigureAwait(false);
+        // 返回值必须判：UnloadAsync 在进程没真正退出时会返回 false，不能再报"已让出显存"。
+        var unloaded = await _llama.UnloadAsync(cancellationToken).ConfigureAwait(false);
 
         // 步骤 3：外部 HTTP 语音服务同样要停（它是外部进程，只能按端口反查后结束）。
         if (_tts.ActiveHttpEngine is { } httpEngine)
@@ -136,11 +137,20 @@ public sealed class GameModeCoordinator
         _bubble.Clear("game-mode");
         _bubble.Show(
             "gpu-yielded",
-            "已让出显存，游戏结束后会自动恢复对话服务。",
+            unloaded
+                ? "已让出显存，游戏结束后会自动恢复对话服务。"
+                : "已请求让出显存，但 llama-server 仍在退出中；若显存未释放，游戏结束后会自动重试恢复。",
             BubbleLevel.Info,
             TimeSpan.FromSeconds(_config.Ui.BubbleDurationSeconds * 2));
 
-        _logger.Info("已让出显存。");
+        if (unloaded)
+        {
+            _logger.Info("已让出显存。");
+        }
+        else
+        {
+            _logger.Warn("llama-server 未在超时内退出，显存可能仍被占用（已如实提示用户）。");
+        }
     }
 
     /// <summary>手册 §3.9 收到 restore 的流程 + 决策 Q11 的冷却期。</summary>
