@@ -39,8 +39,6 @@ public sealed class Live2dModelInfo
     /// <summary>视频里可用的动作组名（如 Idle / TapBody）。</summary>
     public IReadOnlyCollection<string> MotionGroups => _motionGroups;
 
-    /// <summary>参数组：LipSync / EyeBlink 等 → 参数 id 列表（仅本类内部使用）。</summary>
-
     /// <summary>口型参数名（来自 model3.json 的 LipSync 组），没有则为 null。</summary>
     public string? LipSyncParameter { get; }
 

@@ -36,13 +36,38 @@ public sealed class NvidiaSmi
     public async Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default)
         => await ResolveExecutableAsync(cancellationToken).ConfigureAwait(false) is not null;
 
-    /// <summary>空闲显存（MB）。失败时 Success=false。</summary>
-    public Task<NvidiaSmiValue> QueryFreeMemoryMbAsync(CancellationToken cancellationToken = default)
-        => QueryIntegerAsync("--query-gpu=memory.free --format=csv,noheader,nounits", cancellationToken);
+    /// <summary>
+    /// 空闲与总显存（MB）**一次**查出。
+    ///
+    /// 分开查会各起一个 nvidia-smi 进程（每个约百毫秒级），启动路径上纯属白等。
+    /// 解析按两列 CSV 走（"free, total"；同样兼容 "used, total" 这类两列输出）。
+    /// 任一列解析不出来就整体判失败 —— 调用方的语义本来就是"拿不到显存就降级 CPU"。
+    /// </summary>
+    public async Task<(NvidiaSmiValue Free, NvidiaSmiValue Total)> QueryFreeAndTotalMemoryMbAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var result = await QueryAsync(
+            "--query-gpu=memory.free,memory.total --format=csv,noheader,nounits",
+            cancellationToken).ConfigureAwait(false);
 
-    /// <summary>总显存（MB）。用于"按显存档位"挑选保守预算（见 VramTiers）。</summary>
-    public Task<NvidiaSmiValue> QueryTotalMemoryMbAsync(CancellationToken cancellationToken = default)
-        => QueryIntegerAsync("--query-gpu=memory.total --format=csv,noheader,nounits", cancellationToken);
+        if (!result.Success)
+        {
+            return (result, result);
+        }
+
+        var parts = result.Raw.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 2
+            && ProcessRunner.TryParseFirstInteger(parts[0], out var free)
+            && ProcessRunner.TryParseFirstInteger(parts[1], out var total))
+        {
+            return (new NvidiaSmiValue(true, free, result.Raw, null),
+                    new NvidiaSmiValue(true, total, result.Raw, null));
+        }
+
+        var reason = $"无法从 \"{result.Raw}\" 解析空闲/总显存。";
+        return (new NvidiaSmiValue(false, 0, result.Raw, reason),
+                new NvidiaSmiValue(false, 0, result.Raw, reason));
+    }
 
     /// <summary>GPU 使用率（百分比）。失败时 Success=false。</summary>
     public Task<NvidiaSmiValue> QueryUtilizationPercentAsync(CancellationToken cancellationToken = default)

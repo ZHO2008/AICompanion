@@ -23,7 +23,6 @@ namespace AICompanion.App;
 /// </summary>
 internal static class MonitorGeometry
 {
-    private const uint MonitorDefaultToNearest = 2;
     private const uint SwpNoZOrder = 0x0004;
     private const uint SwpNoActivate = 0x0010;
 
@@ -206,6 +205,10 @@ internal static class MonitorGeometry
     private struct MonitorInfo
     {
         public int cbSize;
+
+        // rcMonitor / dwFlags 本类不读取，但**不能删**：
+        // GetMonitorInfo 会校验 cbSize 是否等于原生 MONITORINFO（40 字节），
+        // 且 rcWork 的偏移由这两个字段决定 —— 删掉字段会让查询直接失败。
         public NativeRect rcMonitor;
         public NativeRect rcWork;
         public uint dwFlags;
@@ -224,7 +227,4 @@ internal static class MonitorGeometry
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
 }

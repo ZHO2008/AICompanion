@@ -270,7 +270,6 @@ public sealed class AnimationManager
         }
 
         timer.Stop();
-        timer.Tick -= (_, _) => OnHoldExpired();
     }
 
     private void OnHoldExpired()

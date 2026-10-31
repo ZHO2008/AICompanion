@@ -57,7 +57,9 @@ public sealed class GPUMemoryManager
         var gpu = _config.Gpu;
 
         // ---- 步骤 1/2：查询空闲显存；失败即判定无可用 NVIDIA GPU ----
-        var free = await _smi.QueryFreeMemoryMbAsync(cancellationToken).ConfigureAwait(false);
+        // free 与 total 一次查出：分开查会各起一个 nvidia-smi 进程。
+        var memory = await _smi.QueryFreeAndTotalMemoryMbAsync(cancellationToken).ConfigureAwait(false);
+        var free = memory.Free;
         if (!free.Success)
         {
             var reason = $"无法获取显存信息（{free.FailureReason}），已切换为 CPU 模式";
@@ -86,8 +88,7 @@ public sealed class GPUMemoryManager
          * 1.5B 每层只有 ~40 MB，会把 ngl 压掉一半（实测 8 GB 卡算成 14/28，只有 46.8 tok/s；
          * 全卸载能到 182.8 tok/s）。
          */
-        var totalVram = await _smi.QueryTotalMemoryMbAsync(cancellationToken).ConfigureAwait(false);
-        var totalVramMb = totalVram.Success ? totalVram.Value : 0;
+        var totalVramMb = memory.Total.Success ? memory.Total.Value : 0;
         var tier = VramTiers.For(totalVramMb);
 
         var reservedMb = gpu.ReservedMb > 0 ? gpu.ReservedMb : tier.ReservedMb;

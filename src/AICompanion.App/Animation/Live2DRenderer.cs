@@ -70,6 +70,9 @@ public sealed class Live2DRenderer : IDisposable
     private int _mouthIndex = -1;
     private double _mouth;
 
+    /// <summary>渲染异常计数：前 3 次打 Warn，之后只计数不再刷日志。</summary>
+    private int _renderErrorCount;
+
     private Live2DRenderer(
         IAppLogger logger,
         GLWpfControl control,
@@ -530,7 +533,7 @@ public sealed class Live2DRenderer : IDisposable
     /// 但**必须限帧**：CompositionTarget.Rendering 的回调频率跟着合成器走，
     /// 实测会跑到 ~170 fps —— 桌宠根本不需要这么高，白白放大 GL/D3D 的资源churn。
     /// 实测对照组（静态图模式）内存与句柄都是持平甚至回落的，说明增长只来自这条渲染路径。
-    /// 限到约 60 fps，并跳过不可见窗口。
+    /// 限到约 30 fps（MinFrameIntervalMs = 33ms），并跳过不可见窗口。
     /// </summary>
     private void OnCompositionRendering(object? sender, EventArgs e)
     {
@@ -681,7 +684,13 @@ public sealed class Live2DRenderer : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.Warn($"渲染异常：{ex.Message}");
+            // 渲染失败往往是"每帧都失败"：逐帧打 Warn 一秒钟就有几十条，会把日志冲掉。
+            // 只报前 3 次（带序号），之后静默计数。
+            _renderErrorCount++;
+            if (_renderErrorCount <= 3)
+            {
+                _logger.Warn($"渲染帧异常（第 {_renderErrorCount} 次，后续不再重复）：{ex.Message}");
+            }
         }
     }
 

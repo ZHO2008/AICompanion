@@ -27,10 +27,6 @@ namespace AICompanion.App;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const int GwlExStyle = -20;
-    private const int WsExTransparent = 0x00000020;
-    private const int WsExLayered = 0x00080000;
-
     private readonly AppHost _host;
     private readonly BubbleNotifier _bubbles;
 
@@ -62,7 +58,6 @@ public partial class MainWindow : Window
     // 表现就是窗口来回抽搐。
     private bool _dragActive;
     private bool _isDragging;
-    private Point _dragStartWindowPos;
 
     /// <summary>拖动起点的窗口物理矩形（跨不同缩放率的屏幕时用物理像素才不出错）。</summary>
     private Rect _dragStartWindowPhysical;
@@ -1194,7 +1189,6 @@ public partial class MainWindow : Window
 
         _dragStartCursorX = cursor.X;
         _dragStartCursorY = cursor.Y;
-        _dragStartWindowPos = new Point(Left, Top);
         _dragStartWindowPhysical = MonitorGeometry.GetPhysicalRect(this);
         _dragActive = true;
         _isDragging = false;
@@ -1361,13 +1355,6 @@ public partial class MainWindow : Window
             _taskBar.ShowBelow(this);
         }
 
-        // 缩放同样会改变 GL 控件尺寸 → 旧 D3D 表面不再合成，需要重建
-        // 用户手动改倍率同样会改变 GL 控件尺寸 → 旧 D3D 表面不再合成，需要重建。
-        // 启动时那次（persist=false）不重建：渲染器随后会在布局完成后正常创建。
-        if (persist)
-        {
-            // 重建逻辑暂时停用（会破坏渲染器创建）
-        }
         _cornerButton?.ApplyScale(clamped);
         _cornerButton?.ShowAt(this);
 
@@ -2170,14 +2157,6 @@ public partial class MainWindow : Window
 
             _host.Logger.Info($"鼠标穿透已{(clickThrough ? "开启" : "关闭")}。");
 
-            /*
-             * 模式切换会改变 GL 控件的尺寸（输入区隐藏、气泡清空），
-             * 而 GLWpfControl 的 D3D 共享表面一旦尺寸变化就不再被合成 ——
-             * 表现是"切到透明态，角色整块消失"（实测：覆盖态 10.3%，透明态 0.7%，
-             */
-            // 重建逻辑暂时停用（会破坏渲染器创建），见 CHANGELOG
-
-
             // 记录实际布局尺寸：用于确认"切换模式不会改变角色大小"。
             // 角色图片是 Uniform 拉伸的，一旦所在行的高度变了就会跟着缩放。
             _host.Logger.Info(
@@ -2191,12 +2170,6 @@ public partial class MainWindow : Window
             _host.Logger.Warn($"设置鼠标穿透失败：{ex.Message}");
         }
     }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint
