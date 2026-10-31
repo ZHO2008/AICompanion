@@ -60,6 +60,10 @@ public sealed class Live2DRenderer : IDisposable
 
     private bool _rendering;
     private bool _fbProbeDone;
+    private int _pendingViewportWidth;
+    private int _pendingViewportHeight;
+    private double _pendingTranslation;
+    private bool _pendingTranslationSet;
     private int _probeWidth;
     private int _probeHeight;
     private bool _disposed;
@@ -551,12 +555,6 @@ public sealed class Live2DRenderer : IDisposable
     {
         ApplyViewport();
     }
-
-    /// <summary>
-    /// 设置 GL 视口。**必须用物理像素**：控件尺寸是 DIP，
-    /// 在 150% 缩放的屏幕上直接拿 DIP 当像素会让视口只有帧缓冲的 2/3，
-    /// 模型就会被画成小小的一块（已踩过）。
-    /// </summary>
     private void ApplyViewport()
     {
         try
@@ -566,74 +564,30 @@ public sealed class Live2DRenderer : IDisposable
                 return;
             }
 
-            /*
-             * 关键：视口尺寸必须和 SDK 内部认为的窗口尺寸一致。
-             *
-             * 之前分别按 DIP、按物理像素设过视口，模型都会偏 —— 因为 SDK 计算投影用的是
-             * 它自己的 GetWindowSize()，跟我们猜的尺寸不一致时，模型就被画小/画偏。
-             * 直接问 SDK 要尺寸，两边永远对齐。
-             */
-            _lapp.Resize();
-
-            // 表面是物理像素，视口也必须是物理像素，否则模型会被按比例缩小
             var dpi = VisualTreeHelper.GetDpi(_control);
             var width = (int)Math.Round(_control.ActualWidth * dpi.DpiScaleX);
             var height = (int)Math.Round(_control.ActualHeight * dpi.DpiScaleY);
-
             if (width <= 0 || height <= 0)
             {
                 return;
             }
 
-            GL.Viewport(0, 0, width, height);
-            _probeWidth = width;
-            _probeHeight = height;
-
-            // 诊断：把"实际显示到屏幕上的像素尺寸"和"我们设的视口"放一起看
-            int screenW = 0, screenH = 0;
-            try
-            {
-                var p0 = _control.PointToScreen(new Point(0, 0));
-                var p1 = _control.PointToScreen(new Point(_control.ActualWidth, _control.ActualHeight));
-                screenW = (int)Math.Round(p1.X - p0.X);
-                screenH = (int)Math.Round(p1.Y - p0.Y);
-            }
-            catch
-            {
-                // 忽略
-            }
-
-            // 用 Debug：SizeChanged 在拖拽窗口时会高频触发，Info 每次都 Flush 会持续写盘。
-            _logger.Debug(
-                $"渲染视口：{width}x{height} 像素｜控件 {_control.ActualWidth:F0}x{_control.ActualHeight:F0} DIP" +
-                $"｜DPI {dpi.DpiScaleX:F2}×｜**屏幕上实际 {screenW}x{screenH} 像素**");
-
             /*
-             * 尺寸变化后模型矩阵的平移基线要重算：
-             * 先撤销已应用的量，再按当前用户偏移重新应用。
-             * （ModelMatrix 是累积平移，不撤销会越拖越偏。）
+             * 只登记、不当场执行：GL 上下文只活在 GLWpfControl 的渲染线程上，
+             * 在 UI 线程调 GL.Viewport / _lapp.Resize 要么静默无效，要么与 OnRender
+             * 里的 _lapp.Run 抢状态（历史关窗崩溃同根源）。真正应用在 OnRender 开头。
              */
-            if (Math.Abs(_appliedTranslation) > 0.0001)
-            {
-                try
-                {
-                    _model.ModelMatrix.TranslateRelative((float)-_appliedTranslation, 0f);
-                }
-                catch
-                {
-                    // 忽略
-                }
+            _pendingViewportWidth = width;
+            _pendingViewportHeight = height;
 
-                _appliedTranslation = 0;
-            }
-
-            ApplyTranslation(_userTranslation);
+            _logger.Debug($"渲染视口登记：{width}x{height} 像素（控件 {_control.ActualWidth:F0}x{_control.ActualHeight:F0} DIP，DPI {dpi.DpiScaleX:F2}×）");
         }
-        catch
+        catch (Exception ex)
         {
-            // 尺寸切换期的瞬时异常忽略
+            _logger.Warn($"计算渲染视口失败：{ex.Message}");
         }
     }
+
 
     private void OnRender(TimeSpan elapsed)
     {
@@ -648,6 +602,45 @@ public sealed class Live2DRenderer : IDisposable
             {
                 _glInfoLogged = true;
                 LogGlInfo();
+            }
+
+            // ---- 在渲染线程上消费 UI 线程登记的视口与平移 ----
+            if (_pendingViewportWidth > 0 && _pendingViewportHeight > 0)
+            {
+                var vw = _pendingViewportWidth;
+                var vh = _pendingViewportHeight;
+                _pendingViewportWidth = 0;
+                _pendingViewportHeight = 0;
+
+                try
+                {
+                    _lapp.Resize();
+                    GL.Viewport(0, 0, vw, vh);
+                    _probeWidth = vw;
+                    _probeHeight = vh;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warn($"应用渲染视口失败：{ex.Message}");
+                }
+            }
+
+            if (_pendingTranslationSet)
+            {
+                var target = _pendingTranslation;
+                var delta = target - _appliedTranslation;
+                if (Math.Abs(delta) > 0.0005)
+                {
+                    try
+                    {
+                        _model.ModelMatrix.TranslateRelative((float)delta, 0f);
+                        _appliedTranslation = target;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn($"应用水平平移失败：{ex.Message}");
+                    }
+                }
             }
 
             GL.ClearColor(new Color4(0f, 0f, 0f, 0f));
@@ -779,23 +772,11 @@ public sealed class Live2DRenderer : IDisposable
     /// <summary>把模型矩阵的平移量设到目标值（增量应用，避免累积漂移）。</summary>
     private void ApplyTranslation(double target)
     {
-        var delta = target - _appliedTranslation;
-
-        if (Math.Abs(delta) < 0.0005)
-        {
-            return;
-        }
-
-        try
-        {
-            _model.ModelMatrix.TranslateRelative((float)delta, 0f);
-            _appliedTranslation = target;
-        }
-        catch (Exception ex)
-        {
-            _logger.Warn($"应用水平平移失败：{ex.Message}");
-        }
+        // 只登记目标值；ModelMatrix 只能在渲染线程改（见 ApplyViewport 注释）。
+        _pendingTranslation = target;
+        _pendingTranslationSet = true;
     }
+
 
     /// <summary>
     /// 打印 OpenGL 环境信息。
