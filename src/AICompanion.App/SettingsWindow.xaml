@@ -200,9 +200,9 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center">
-                                    <TextBlock Style="{StaticResource RowLabel}" Text="模型水平微调" />
+                                    <TextBlock Style="{StaticResource RowLabel}" Text="水平位置" />
                                     <TextBlock Style="{StaticResource RowHint}"
-                                               Text="0 = 自动居中"
+                                               Text="自动居中，无需调节"
                                                ToolTip="Live2D 自带画布偏移时用来微调" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -212,7 +212,8 @@
                                             Maximum="0.30"
                                             TickFrequency="0.01"
                                             IsSnapToTickEnabled="True"
-                                            ValueChanged="OnHorizontalOffsetChanged" />
+                                            ValueChanged="OnHorizontalOffsetChanged"
+                                            IsEnabled="False" />
                                     <TextBlock x:Name="HorizontalOffsetText" Style="{StaticResource ValueText}" Width="76" Margin="10,0,0,0" />
                                     <Button Content="复位居中"
                                             Style="{StaticResource GhostButton}"

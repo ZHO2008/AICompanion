@@ -1153,7 +1153,9 @@ public partial class MainWindow : Window
                 : $"按住说话（{_host.Config.Asr.PushToTalkKey}）")
             : _host.Asr.State.ToString();
 
-        StageText.Text = $"运行模式：{_host.RuntimeMode.Mode}｜TTS：{_host.Tts.CurrentEngineName}｜ASR：{asrText}";
+        // 只说状态，不再暴露 GPU / TTS 引擎名 / 按键名这些实现细节（细节进诊断页与日志）。
+        StageText.Text = _host.Asr.State == AsrState.Running ? "在听…" : "能聊";
+        _host.Logger.Debug($"状态栏：模式={_host.RuntimeMode.Mode}，TTS={_host.Tts.CurrentEngineName}，ASR={asrText}");
     }
 
     // ------------------------------------------------------------------ 交互

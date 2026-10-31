@@ -708,6 +708,26 @@ public sealed class Live2DRenderer : IDisposable
                 EnableTextureMipmaps();
             }
 
+            /*
+             * 位置：绝对 SetPosition，不用相对平移。
+             *
+             * ModelMatrix 是 SDK 按模型画布（moc3 的 csmReadCanvasInfo）构建的 CubismModelMatrix；
+             * SetPosition 是**赋值**而不是累加，(0,0) 即"画布中心对齐视口中心"，
+             * 所以居中由画布尺寸决定，不需要任何像素测量。
+             *
+             * 之前的教训：用 TranslateRelative 逐轮逼近，同样 0.09 单位的位移实测换算出来
+             * 一会儿 230px/单位、一会儿 724px/单位（相对量在矩阵里累乘），于是来回震荡
+             * （109px → 38px → 73px）。绝对赋值没有这个问题。
+             */
+            try
+            {
+                _model.ModelMatrix.SetPosition((float)_userTranslation, 0f);
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"设置模型位置失败（沿用 SDK 默认位置）：{ex.Message}");
+            }
+
             _lapp.Run((float)elapsed.TotalSeconds);
             _drawnOnce = true;
 
