@@ -15,6 +15,9 @@ llm:
   host: "127.0.0.1"
   port: 8080
   context_length: 0          # 0 = 按 GGUF 元数据自动（min(模型训练上限, 8192)）
+  # 多模态投影器（视觉/音频塔）。留空 = 纯文本；会自动在模型同目录找 *mmproj*.gguf。
+  # 例：mmproj_path: "models/llm/mmproj-Qwen2-VL-7B-f16.gguf"
+  mmproj_path: ""
   # 模型层数 L。0 = 启动时自动从 GGUF 元数据探测，无需手填。
   layer_count: 0
   # 由主程序自行拉起 llama-server（决策 Q5），因此 bat 里不再启动它。

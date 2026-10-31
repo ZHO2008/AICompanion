@@ -65,6 +65,12 @@ public sealed class LlmConfig
 
     public int ContextLength { get; set; } = 4096;
 
+    /// <summary>
+    /// 多模态投影器（mmproj）路径。空 = 纯文本模型，且会自动在模型同目录找 `*mmproj*.gguf`。
+    /// 视觉/音频塔是独立文件，不属于主权重，所以要单独指定。
+    /// </summary>
+    public string MmprojPath { get; set; } = string.Empty;
+
     /// <summary>模型层数 L。0 表示启动时从 GGUF 元数据自动探测（qwen2.block_count）。</summary>
     public int LayerCount { get; set; }
 

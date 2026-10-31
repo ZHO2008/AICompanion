@@ -121,6 +121,46 @@ public sealed class LlamaServerController : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 找多模态投影器：优先 llm.mmproj_path；为空时在模型同目录找 mmproj*.gguf（常见命名）。
+    /// 找不到返回 null（纯文本模型，正常情况）。
+    /// </summary>
+    private string? ResolveMmprojPath()
+    {
+        try
+        {
+            var configured = _config.Llm.MmprojPath;
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                var resolved = AppPaths.Resolve(configured);
+                if (File.Exists(resolved))
+                {
+                    return resolved;
+                }
+
+                _logger.Warn($"配置的 mmproj 不存在：{resolved}，按纯文本模型运行。");
+                return null;
+            }
+
+            var modelPath = AppPaths.Resolve(_config.Llm.ModelPath);
+            var dir = Path.GetDirectoryName(modelPath);
+            if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+            {
+                return null;
+            }
+
+            var candidate = Directory.EnumerateFiles(dir, "*mmproj*.gguf", SearchOption.TopDirectoryOnly)
+                .OrderBy(f => f.Length)
+                .FirstOrDefault();
+
+            return candidate;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"查找 mmproj 失败（按纯文本运行）：{ex.Message}");
+            return null;
+        }
+    }
     /// <summary>按 GGUF 元数据确定本次使用的上下文长度（config 写 0 = 自动）。</summary>
     private void ApplyModelContextLength(string modelPath)
     {
