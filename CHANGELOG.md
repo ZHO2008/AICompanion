@@ -1,3 +1,22 @@
+## 未发布 — 整合与清理（死代码 / 潜在泄漏）
+
+按"整合所有改动、查死循环与泄漏"做了一次清理：
+
+- **删除死代码**：`MainWindow` 里"按尺寸重建 Live2D 渲染器"的
+  `ScheduleLive2dRebuild` / `RebuildLive2D` / `_live2dRebuildTimer`
+  （调用点早已停用；且实测重建会把渲染器弄坏）。连同残留注释一起删掉。
+- **给隔离区加上限**：`Live2DRenderer.FailedContexts` 原先是无界静态列表，
+  用户反复用坏模型试错时会一直积累（每个失败上下文带着 GL 表面与 Cubism 资源）。
+  现在是"最多 8 份"，足够覆盖正常试错。
+- **确认无空转循环**：空闲调度器对"取消"这一支**已经**在 finally 里统一进冷却
+  （注释里记着那个"每秒一轮刷了六分钟"的历史 bug），本次复查无新增问题。
+- **确认探针资源已释放**：FBO 探针在 finally 里恢复默认帧缓冲并 `DeleteTexture` /
+  `DeleteFramebuffer`，只跑一次。
+- **确认无残留实验代码**：`DimOverlay`、`SetDim`、`AI_DBG_*` 开关、`DescribeState`
+  均已不在代码中。
+
+整合后自检：`ngl=28/28`、`LLM 就绪=True`、`启动问题 0 项`；
+主程序 554 MB / 3024 句柄，llama-server 1387 MB / 405 句柄（7B/1.5B 全卸载量级正常）。
 ## 未发布 — LLM 模型适配：mmproj 多模态
 
 - 新增 `llm.mmproj_path`（空 = 纯文本）。存在时给 llama-server 传 `--mmproj`。

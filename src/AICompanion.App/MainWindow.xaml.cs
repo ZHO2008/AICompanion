@@ -2091,73 +2091,6 @@ public partial class MainWindow : Window
     /// <summary>
     /// 穿透态把整窗命中测试结果改成 HTTRANSPARENT，等效于"点到哪就透到下面那个窗口"。
     /// </summary>
-
-    private DispatcherTimer? _live2dRebuildTimer;
-
-    private bool _live2dRebuilding;
-
-    /// <summary>
-    /// 安排一次 Live2D 渲染器重建。
-    ///
-    /// 为什么需要：GLWpfControl 的内容是 D3D 共享纹理，宿主控件**尺寸一变**，
-    /// 原来的表面就不再被 WPF 合成 —— 模型整块消失，而日志里一切正常
-    /// （渲染器已就绪、帧数在涨、控件可见）。实测切到透明态就会触发：
-    /// 覆盖态能测到 10.3% 的像素，透明态只剩 0.7%，重建后立刻回到 17.9%。
-    ///
-    /// 重建约 0.5–1 秒（要重新加载 moc3 与贴图），所以做去抖。
-    /// </summary>
-    private void ScheduleLive2dRebuild(string reason)
-    {
-        if (_live2d is null)
-        {
-            return;
-        }
-
-        _live2dRebuildTimer?.Stop();
-
-        _live2dRebuildTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
-        {
-            Interval = TimeSpan.FromMilliseconds(350),
-        };
-
-        _live2dRebuildTimer.Tick += (_, _) =>
-        {
-            _live2dRebuildTimer?.Stop();
-            RebuildLive2D(reason);
-        };
-
-        _live2dRebuildTimer.Start();
-    }
-
-    private void RebuildLive2D(string reason)
-    {
-        if (_live2dRebuilding || _live2d is null || Live2DHost is null)
-        {
-            return;
-        }
-
-        _live2dRebuilding = true;
-
-        try
-        {
-            _host.Logger.Info($"重建 Live2D 渲染器（{reason}：宿主尺寸变化后旧 D3D 表面不再合成）");
-            _live2d.Dispose();
-            _live2d = null;
-            Live2DHost.Child = null;
-            Live2DHost.Visibility = Visibility.Collapsed;
-
-            LoadAvatar();
-        }
-        catch (Exception ex)
-        {
-            _host.Logger.Warn($"重建 Live2D 渲染器失败，继续使用静态图：{ex.Message}");
-        }
-        finally
-        {
-            _live2dRebuilding = false;
-        }
-    }
-
     private IntPtr NCHitTestHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         const int WM_NCHITTEST = 0x0084;
@@ -2237,7 +2170,6 @@ public partial class MainWindow : Window
              * 模式切换会改变 GL 控件的尺寸（输入区隐藏、气泡清空），
              * 而 GLWpfControl 的 D3D 共享表面一旦尺寸变化就不再被合成 ——
              * 表现是"切到透明态，角色整块消失"（实测：覆盖态 10.3%，透明态 0.7%，
-             * 重建渲染器后立刻恢复到 17.9%）。尺寸变化统一由 ScheduleLive2dRebuild 处理。
              */
             // 重建逻辑暂时停用（会破坏渲染器创建），见 CHANGELOG
 
