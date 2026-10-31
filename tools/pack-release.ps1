@@ -2,15 +2,16 @@
 #  pack-release.ps1 - 生成**可复现**的发布 zip，并自带完整性断言
 #
 #  与 tools\pack.ps1 的分工：
-#    pack.ps1        面向"本机出一套完整安装包"，默认把 1 GB 模型、CUDA 运行库、
-#                    Inno Setup 安装包都带上，产物 1.6 GB 级，适合对外发行大包。
+#    pack.ps1        **已废弃**（一运行就打印中文提示并 exit 1）。它不会带 modules\，
+#                    产出的包没有对话后端；历史原因保留文件，方便对照旧文档。
 #    pack-release.ps1（本脚本）面向"可复现 + 可校验"的发布 zip，只做一件事：
 #                    dotnet publish → 汇总运行环境 → 打 zip → 逐项断言。
 #                    模型默认不入包（-IncludeModel），产物 150 MB 级，便于上传/回归。
 #
 #  用法：
 #    pwsh -File tools\pack-release.ps1
-#        自包含 win-x64、含 modules\、不含模型 → 目标是"干净机器解压即跑"
+#        自包含 win-x64、含 modules\、不含模型、**不含** Live2D Cubism Core
+#        → 目标是"干净机器解压即跑"，且默认避开发行授权项
 #
 #    pwsh -File tools\pack-release.ps1 -SelfContained:$false
 #        框架依赖包（约 10 MB），目标机须自装 .NET 8 桌面运行时
@@ -21,12 +22,18 @@
 #    pwsh -File tools\pack-release.ps1 -IncludeModel:$true
 #        把 models\ 一起打进包（1 GB 起，慎用）
 #
+#    pwsh -File tools\pack-release.ps1 -IncludeCubismCore:$true   # 或 -WithCubismCore
+#        把 Live2DCubismCore.dll 打进包。**默认 false**：该 DLL 属 Live2D 授权项，
+#        公开分发前必须自行确认 Cubism SDK 的许可条款。
+#        不含时脚本会在包根生成 Live2DCubismCore.dll.README.txt，说明用户如何自备。
+#
 #    pwsh -File tools\pack-release.ps1 -OutDir D:\release
 #        输出到别处（默认 <仓库>\dist）
 #
 #  注意：PowerShell 5.1 的 `-File` 模式**传不了布尔值**（-SelfContained:$false 会被
 #        当成字符串，绑 [bool] 直接报错）。要传 false 请用 `pwsh -Command` 调用，
-#        或改用本脚本另给的不带值开关：-FrameworkOnly / -WithModel / -NoModules。
+#        或改用本脚本另给的不带值开关：-FrameworkOnly / -WithModel / -NoModules /
+#        -WithCubismCore / -NoVcRuntime / -NoSlim。
 #
 #  产物：
 #    <OutDir>\AICompanion-<版本>-<runtime>-<selfcontained|framework>\     分发目录
@@ -50,6 +57,10 @@ param(
     # 是否把 modules\（llm-cuda / llm-vulkan 等）打进包。默认 true：缺了就没有对话能力。
     [bool]$IncludeModules = $true,
 
+    # 是否把 Live2DCubismCore.dll 打进包。默认 **false**：该 DLL 属 Live2D 授权项，
+    # 公开分发包默认不含，由用户自行从 Live2D 官网下载官方 Cubism Core 放进来。
+    [bool]$IncludeCubismCore = $false,
+
     # 输出目录。留空 = <仓库>\dist。相对路径按仓库根解析。
     [string]$OutDir = '',
 
@@ -57,6 +68,7 @@ param(
     [switch]$FrameworkOnly,   # 等价于 -SelfContained:$false
     [switch]$WithModel,       # 等价于 -IncludeModel:$true
     [switch]$NoModules,       # 等价于 -IncludeModules:$false
+    [switch]$WithCubismCore,  # 等价于 -IncludeCubismCore:$true（Live2D 授权项，默认不带）
     [switch]$NoVcRuntime,     # 不把 MSVC 运行库（msvcp140/vcruntime140）打进包
     [switch]$NoSlim           # 不删 .pdb、不裁语言目录
 )
@@ -66,6 +78,7 @@ $ErrorActionPreference = 'Stop'
 if ($FrameworkOnly) { $SelfContained = $false }
 if ($WithModel) { $IncludeModel = $true }
 if ($NoModules) { $IncludeModules = $false }
+if ($WithCubismCore) { $IncludeCubismCore = $true }
 
 # 让中文在 PowerShell 5.1 的控制台里不变成乱码（不改则 GBK 控制台会吞字）
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
@@ -178,6 +191,7 @@ Note "目标运行时：$Runtime"
 Note "自包含：$SelfContained（.NET 8 运行时$(if ($SelfContained) { '打进包' } else { '由目标机提供' })）"
 Note "含 modules：$IncludeModules"
 Note "含模型：$IncludeModel"
+Note "含 Live2D Cubism Core：$IncludeCubismCore$(if (-not $IncludeCubismCore) { '（授权项，默认不含；包内会生成说明文件）' } else { '（公开分发前请自行确认 Live2D 授权）' })"
 Note "输出目录：$outRoot"
 
 # ---------------------------------------------------------------- 1. 前置检查
@@ -191,18 +205,30 @@ $dotnetVer = (& dotnet --version) 2>&1
 Note "dotnet SDK：$dotnetVer"
 
 # 这些是"发布流程之外、必须由仓库根目录提供"的原生库。
-# 缺了不会有编译错误，但目标机上程序会静默降级（ASR 不可用 / 没形象），所以这里硬失败。
+# 缺了不会有编译错误，但目标机上程序会静默降级（ASR 不可用），所以这里硬失败。
+#
+# Live2DCubismCore.dll **不在**这个列表里：它是 Live2D 的授权项，默认不打进公开包，
+# 因此"仓库里有没有它"不再是出包的前提。加 -IncludeCubismCore 时才要求它存在。
 $nativeSources = @(
-    @{ Path = 'Live2DCubismCore.dll'; Why = 'Live2D 渲染原生库（Cubism Core）' },
     @{ Path = 'bin\ai_asr.dll';       Why = '语音识别原生库（whisper.cpp 桥接）' },
     @{ Path = 'bin\libfvad.dll';      Why = 'WebRTC VAD 原生库' }
 )
 foreach ($item in $nativeSources) {
     $full = Join-Path $root $item.Path
     if (-not (Test-Path $full)) {
-        throw "缺少 $($item.Path)（$($item.Why)）。它不是 dotnet publish 的产物，必须放在仓库里对应位置；从 Live2D SDK / third_party 构建取得后再打包。"
+        throw "缺少 $($item.Path)（$($item.Why)）。它不是 dotnet publish 的产物，必须放在仓库里对应位置；从 third_party 构建取得后再打包。"
     }
     Note "有 $($item.Path)（$(Get-SizeText (Get-Item $full).Length)）"
+}
+
+$cubismSource = Join-Path $root 'Live2DCubismCore.dll'
+if ($IncludeCubismCore) {
+    if (-not (Test-Path $cubismSource)) {
+        throw "参数要求打包 Live2DCubismCore.dll，但仓库根目录没有它。请从 Live2D 官网下载官方 Cubism Core（x64）放到 $root 后重试；或去掉 -IncludeCubismCore 打不带它的公开包。"
+    }
+    Note "有 Live2DCubismCore.dll（$(Get-SizeText (Get-Item $cubismSource).Length)），将随包（授权归 Live2D）"
+} else {
+    Warn '按默认策略排除 Live2DCubismCore.dll（Live2D 授权项）：包内只放 Live2DCubismCore.dll.README.txt 说明如何自行放入。'
 }
 
 # modules\ 是 LLM 后端的容器，程序按 AppPaths.Root\modules 扫描 module.json。
@@ -316,13 +342,51 @@ foreach ($f in $binFiles) {
 }
 Note "bin\ ← $($binFiles.Count) 个原生库（$(Get-SizeText (Get-DirBytes $binStage))）"
 
-# 4.3 Live2D Cubism Core → 与 exe 同级
-# csproj 里有 None Include + CopyToOutputDirectory，publish 通常已经带上了；这里兜底。
-if (-not (Test-Path (Join-Path $stage 'Live2DCubismCore.dll'))) {
-    Copy-Item (Join-Path $root 'Live2DCubismCore.dll') (Join-Path $stage 'Live2DCubismCore.dll') -Force
-    Note 'Live2DCubismCore.dll 由脚本补拷（publish 未带）'
+# 4.3 Live2D Cubism Core → 与 exe 同级（**默认不含**，属授权项）
+# csproj 里有 None Include + CopyToOutputDirectory，所以只要仓库根有那个 DLL，
+# publish 就会把它带进来；不含时必须**删掉**，否则"默认不含"只是句空话。
+$cubismTarget = Join-Path $stage 'Live2DCubismCore.dll'
+$cubismReadme = Join-Path $stage 'Live2DCubismCore.dll.README.txt'
+if ($IncludeCubismCore) {
+    if (-not (Test-Path $cubismTarget)) {
+        Copy-Item $cubismSource $cubismTarget -Force
+        Note 'Live2DCubismCore.dll 由脚本补拷（publish 未带）'
+    } else {
+        Note 'Live2DCubismCore.dll 已由 publish 带入（随包）'
+    }
+
+    if (Test-Path $cubismReadme) {
+        Remove-Item $cubismReadme -Force
+    }
 } else {
-    Note 'Live2DCubismCore.dll 已由 publish 带入'
+    if (Test-Path $cubismTarget) {
+        Remove-Item $cubismTarget -Force
+        Note 'Live2DCubismCore.dll 已从产物里删除（Live2D 授权项，默认不含）'
+    }
+
+    @(
+        '关于 Live2DCubismCore.dll',
+        '',
+        '本发布包**不含** Live2DCubismCore.dll，因为它是 Live2D 公司的授权组件：',
+        'Cubism Core 的分发受到 Live2D Cubism SDK 许可条款约束，与本程序的许可证无关。',
+        '未经确认就随包再分发，风险由分发者承担。',
+        '',
+        '需要 Live2D 形象时，请自行从 Live2D 官网下载官方 Cubism Core：',
+        '',
+        '  1. 访问 https://www.live2d.com/download/cubism-sdk/ 并同意其许可条款；',
+        '  2. 下载 Cubism SDK for Native（Windows x64）；',
+        '  3. 从 SDK 里取出 Core\include 同级的 Live2DCubismCore.dll（x64 版）；',
+        '  4. 把它放到**本文件所在的同一个目录**（即 AICompanion.exe 旁边）；',
+        '  5. 重启 AICompanion.exe。',
+        '',
+        '没有这个 DLL 时程序仍然能正常启动：形象会按既有降级链退回静态立绘 / 纯色背景，',
+        '对话、语音等功能不受影响。启动日志里会写明这一级降级的原因。',
+        '',
+        '如果是从源码自己打包，可以用 tools\pack-release.ps1 -IncludeCubismCore:$true（或 -WithCubismCore）',
+        '把仓库根目录里已下载好的那份一起打进包。',
+        '再次提醒：公开分发带该 DLL 的包之前，请自行确认 Live2D 的授权条款。'
+    ) | Set-Content -Path $cubismReadme -Encoding UTF8
+    Note 'Live2DCubismCore.dll.README.txt（说明用户如何自行放入官方 Cubism Core）'
 }
 
 # 4.4 modules\ → modules\
@@ -511,7 +575,7 @@ $runtimeLines = @(
     "MSVC 运行库：$(if ($NoVcRuntime) { '未随包（目标机需装 VC++ 2015-2022 x64）' } else { '随包（msvcp140/vcruntime140/vcruntime140_1，app-local）' })"
     "LLM 后端模块：$(if ($IncludeModules) { ($moduleDirs | ForEach-Object { $_.Name }) -join ', ' } else { '未包含' })"
     "模型：$(if ($IncludeModel) { '随包' } else { '未随包（见 models\README.txt）' })"
-    "Live2D Cubism Core：随包（授权归 Live2D，商业分发需自行确认）"
+    "Live2D Cubism Core：$(if ($IncludeCubismCore) { '随包（授权归 Live2D，商业分发需自行确认）' } else { '未随包（Live2D 授权项，见 Live2DCubismCore.dll.README.txt）' })"
     ''
     '启动：AICompanion.exe'
 )
@@ -575,7 +639,11 @@ try {
     # Required = $false 的项只做提示，不计入失败（例如可选的 libfvad / 语言目录）。
     $checks = @(
         @{ Key = 'AICompanion.exe';        Pattern = '^AICompanion\.exe$';                    Required = $true;  Why = '主程序入口' }
-        @{ Key = 'Live2DCubismCore.dll';   Pattern = '(^|/)Live2DCubismCore\.dll$';           Required = $true;  Why = 'Live2D 渲染原生库' }
+        # Live2D Cubism Core 默认不含（授权项）。含与不含的要求相反，两条都要能真的失败：
+        #   含 → 必须有 DLL，且不能同时留着"请自备"的说明（否则说明在骗人）；
+        #   不含 → 必须有说明文件，且**必须没有** DLL（下面"反向断言"里再兜一道）。
+        @{ Key = 'Live2DCubismCore.dll';   Pattern = '(^|/)Live2DCubismCore\.dll$';           Required = $IncludeCubismCore; Why = 'Live2D 渲染原生库（仅 -IncludeCubismCore 时必需）' }
+        @{ Key = 'Live2DCubismCore.dll.README.txt'; Pattern = '(^|/)Live2DCubismCore\.dll\.README\.txt$'; Required = (-not $IncludeCubismCore); Why = '不含 Cubism Core 时的自备说明' }
         @{ Key = 'ai_asr.dll';             Pattern = '(^|/)ai_asr\.dll$';                     Required = $true;  Why = '语音识别原生库' }
         @{ Key = 'modules/llm-*/llama-server.exe'; Pattern = '^modules/llm-[^/]+/llama-server\.exe$'; Required = $IncludeModules; Why = 'LLM 后端入口' }
         @{ Key = 'config.yaml';            Pattern = '^config\.yaml$';                        Required = $true;  Why = '用户配置（出厂模板）' }
@@ -585,6 +653,7 @@ try {
         @{ Key = 'hostfxr.dll';            Pattern = '(^|/)hostfxr\.dll$';                    Required = $false; Why = '自包含宿主' }
         @{ Key = 'config.default.yaml';    Pattern = '(^|/)config\.default\.yaml$';           Required = $false; Why = '模板副本' }
         @{ Key = 'VERSION.txt';            Pattern = '(^|/)VERSION\.txt$';                    Required = $false; Why = '版本与环境说明' }
+        @{ Key = 'models/README.txt';      Pattern = '^models/README\.txt$';                  Required = (-not $IncludeModel); Why = '模型不入包时的放置说明' }
         @{ Key = 'module.json';            Pattern = '(^|/)module\.json$';                    Required = $IncludeModules; Why = '模块清单（程序靠它发现后端）' }
         @{ Key = 'msvcp140.dll';           Pattern = '(^|/)msvcp140\.dll$';                   Required = (-not $NoVcRuntime); Why = 'MSVC 运行库' }
     )
@@ -603,6 +672,32 @@ try {
             $failures += "$($c.Key)（$($c.Why)）"
         } else {
             Write-Host "    [提示] $($c.Key) 不在包里 —— $($c.Why)（可选）" -ForegroundColor DarkGray
+        }
+    }
+
+    # ---- 反向断言：这些"绝不该出现"的东西混进来时，必须让脚本失败 ----
+    # 只断言"必需项存在"是不够的：开发机的 logs\、appearance.json、以及被明确排除的
+    # 模型 / Cubism Core 一旦漏进包，正向断言全绿而包是脏的。
+    $forbidden = @(
+        @{ Key = 'Assets/appearance.json'; Pattern = '(^|/)appearance\.json$'; Why = '开发机的界面覆盖状态（窗口位置等个人数据）' }
+        @{ Key = 'logs/';                  Pattern = '^logs/';                   Why = '开发机运行日志' }
+        @{ Key = 'Knowledge/.pending/';    Pattern = '(^|/)\.pending/';          Why = '开发机的待审核知识' }
+    )
+    if (-not $IncludeModel) {
+        $forbidden += @{ Key = 'models/ 里的模型文件'; Pattern = '^models/.+\.(gguf|bin|onnx|pth|ckpt)$'; Why = '本次打包明确排除模型' }
+    }
+    if (-not $IncludeCubismCore) {
+        $forbidden += @{ Key = 'Live2DCubismCore.dll'; Pattern = '(^|/)Live2DCubismCore\.dll$'; Why = 'Live2D 授权项，本次打包明确排除' }
+    } else {
+        $forbidden += @{ Key = 'Live2DCubismCore.dll.README.txt'; Pattern = '(^|/)Live2DCubismCore\.dll\.README\.txt$'; Why = 'DLL 已随包，不该再留"请自备"的说明（会自相矛盾）' }
+    }
+    foreach ($c in $forbidden) {
+        $hits = @($names | Where-Object { $_ -match $c.Pattern })
+        if ($hits.Count -eq 0) {
+            Write-Host "    [通过] 不含 $($c.Key) —— $($c.Why)" -ForegroundColor Green
+        } else {
+            Write-Host "    [混入] 含 $($c.Key)（$($hits.Count) 个）—— $($c.Why)" -ForegroundColor Red
+            $failures += "混入了 $($c.Key)（$($c.Why)）"
         }
     }
 
@@ -633,7 +728,7 @@ try {
 
     if ($failures.Count -gt 0) {
         Write-Host ''
-        Write-Host "校验失败：缺 $($failures.Count) 项必需内容" -ForegroundColor Red
+        Write-Host "校验失败：$($failures.Count) 项不满足要求（缺必需项 / 混入排除项）" -ForegroundColor Red
         foreach ($f in $failures) { Write-Host "  - $f" -ForegroundColor Red }
         Write-Host "包不可用于分发：$zipPath" -ForegroundColor Red
         Write-Host '修好上面几项后重跑本脚本（打包流程是幂等的，直接重跑即可）。' -ForegroundColor Red
@@ -667,7 +762,11 @@ if ($IncludeModules) {
     Write-Host '    GPU 驱动：不适用 —— 本包不含 LLM 后端模块'
 }
 Write-Host "    是否含模型：$($IncludeModel.ToString().ToLowerInvariant()) —— $(if ($IncludeModel) { '模型在包内，解压即可对话' } else { '需用户自行放 models\llm\*.gguf，否则只能看形象' })"
-Write-Host '    Live2D 授权：包内含 Live2DCubismCore.dll，其授权归 Live2D 公司；公开分发前须自行确认 Cubism SDK 的许可条款'
+if ($IncludeCubismCore) {
+    Write-Host '    Live2D：包内**含** Live2DCubismCore.dll，其授权归 Live2D 公司；公开分发前须自行确认 Cubism SDK 的许可条款'
+} else {
+    Write-Host '    Live2D：包内**不含** Live2DCubismCore.dll（授权项）。用户需从 Live2D 官网下载官方 Cubism Core 放到程序根目录，见包内 Live2DCubismCore.dll.README.txt；没有它时形象降级为静态立绘/纯色块，其它功能不受影响'
+}
 Write-Host ('-' * 62) -ForegroundColor Cyan
 
 Write-Host ''

@@ -1,6 +1,10 @@
 ﻿# ============================================================================
 #  pack.ps1 - 生成可分发目录、zip 与安装包
 #
+#  **已废弃**：不要再用本脚本出包。它不会把 modules\ 打进包，产物缺 LLM 后端，
+#  在目标机上"对话功能等于没有"。请改用 tools\pack-release.ps1（见 docs\打包与分发.md）。
+#  文件保留只为对照旧文档与历史记录；运行时会在 param 之后立刻打印中文提示并 exit 1。
+#
 #  默认行为（"带所有环境"）：
 #    - self-contained：自带 .NET 8 桌面运行时，目标机器不需要装任何东西
 #    - ReadyToRun：启动更快（体积略增）
@@ -42,6 +46,19 @@ param(
     # 跳过把 CUDA 运行库打进 bin\（默认会打，装完只需要 NVIDIA 驱动）
     [switch]$NoCudaRuntime
 )
+
+# ---------------------------------------------------------------- 已废弃（强制拦截）
+# 本脚本从头到尾没有处理 modules\：它打的包里没有 modules\llm-*\{module.json,llama-server.exe}，
+# 程序扫不到任何 LLM 后端，目标机上"对话功能等于没有"（详见 docs\打包与分发.md §0.1）。
+# 与其让人拿到一个静默残缺的包，不如在这里直接停下。
+Write-Host ''
+Write-Host '已废弃，请用 tools\pack-release.ps1' -ForegroundColor Red
+Write-Host '  原因：pack.ps1 产出的分发包缺少 modules\（LLM 后端），对话在目标机上不可用；' -ForegroundColor Yellow
+Write-Host '        且它的 Live2D / MSVC 运行库策略已与当前仓库结构不一致。' -ForegroundColor Yellow
+Write-Host '  新脚本： powershell -ExecutionPolicy Bypass -File tools\pack-release.ps1' -ForegroundColor Yellow
+Write-Host '  参数与断言说明见 docs\打包与分发.md（§3）。' -ForegroundColor Yellow
+Write-Host ''
+exit 1
 
 # 开关覆盖（开关写法对 cmd / -File 都友好）
 if ($NoModels) { $IncludeModels = $false }

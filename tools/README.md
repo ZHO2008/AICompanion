@@ -13,8 +13,9 @@ tools\
 
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
-| `pack.ps1` | 打包：发布主程序 + GameMonitor、复制资源与模型、调 Inno Setup 出安装包。默认**不打包需授权的 Live2D 素材**（`-IncludeLicensedAssets` 才打） | `powershell -File tools\pack.ps1 [-NoModels \| -NoLicensedAssets]` |
-| `verify_dist.ps1` | 分发包校验：复制到临时目录、**换工作目录**启动，查进程/窗口/日志/错误行；并断言包里**没有**需授权的素材、清理 llama-server 子进程 | `powershell -File tools\verify_dist.ps1` |
+| `pack-release.ps1` | **当前唯一可用的打包脚本**：`dotnet publish` + 汇总原生库/模块/MSVC 运行库 + 打 zip + 逐项断言（含反向断言）。模型默认不入包；`Live2DCubismCore.dll` 属 Live2D 授权项，**默认不含**（不含时包内生成自备说明），加 `-IncludeCubismCore` 才带 | `powershell -File tools\pack-release.ps1 [-FrameworkOnly \| -WithModel \| -WithCubismCore]` |
+| `pack.ps1` | **已废弃**：不处理 `modules\`，产物缺 LLM 后端。运行时打印中文提示并 `exit 1`（保留文件只为对照历史文档） | 不要用，改用 `pack-release.ps1` |
+| `verify_dist.ps1` | **已废弃**：必需文件清单停在模块化之前（还找 `bin\llama-server.exe`），验证当前包只会误报。运行时 `exit 1` | 不要用，出包自检看 `pack-release.ps1` 的断言与退出码 |
 | `soak_test.ps1` | 长时间连续运行采样：每分钟记内存、句柄、线程、CPU，并做 UI 交互压测 | `powershell -File tools\soak_test.ps1` |
 | `ptt_smoke.ps1` | 按住说话冒烟：模拟按住按键，按时间戳筛日志，判断是"出字/误触/没收到音频" | `powershell -File tools\ptt_smoke.ps1 -HoldMs 1500` |
 | `make_speech_wav.ps1` | 用 SAPI 合成中文语音到 WAV（**只写文件、不播放**，不吵人），供真实语音探针使用 | `powershell -File tools\make_speech_wav.ps1` |

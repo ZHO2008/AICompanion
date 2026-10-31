@@ -936,9 +936,31 @@ public partial class SettingsWindow : Window
             }
         }
 
-        if (TtsEngineCombo.SelectedItem is null && TtsEngineCombo.Items.Count > 0)
+        /*
+         * 当前引擎不在可选项里，有两种情况，都不能假装"就是 Piper"：
+         *   - 「拓展」页启用了 TTS 模块 → AppHost 把 tts.engine 改成了 module:<目录名>；
+         *   - config.yaml 里写了别的值。
+         * 前一种以前会在下拉框里显示 Piper（因为回退到第 0 项），而状态行写着 module:xxx，
+         * 两处口径相反。这里把真实值作为一条不可选中的项显示出来。
+         */
+        if (TtsEngineCombo.SelectedItem is null)
         {
-            TtsEngineCombo.SelectedIndex = 0;
+            if (Core.Tts.TTSEngineFactory.IsModuleEngine(current))
+            {
+                var moduleItem = new ComboBoxItem
+                {
+                    Content = $"模块：{current}（由「拓展」页决定，不在这里切换）",
+                    Tag = current,
+                    IsEnabled = false,
+                };
+
+                TtsEngineCombo.Items.Add(moduleItem);
+                TtsEngineCombo.SelectedItem = moduleItem;
+            }
+            else if (TtsEngineCombo.Items.Count > 0)
+            {
+                TtsEngineCombo.SelectedIndex = 0;
+            }
         }
 
         _ttsEngineInitialized = true;
@@ -1317,7 +1339,6 @@ public partial class SettingsWindow : Window
         }
 
         AppearanceStore.SaveAsrCapture(capture);
-        TtsEngineHintText.Text = string.Empty;
         _host.Logger.Info($"设置面板选择音频采集源：{capture}（下次启动生效，config.yaml 未改动）。");
     }
 
@@ -1933,16 +1954,28 @@ public partial class SettingsWindow : Window
     /// <summary>正在刷新模块列表：此期间下拉框的 SelectionChanged 是程序代选，不算用户操作。</summary>
     private bool _refreshingModules;
 
+    /// <summary>
+    /// 环境识别是否在飞行中。
+    ///
+    /// 与 <see cref="_refreshingModules"/> 分开：后者是"下拉框正在被程序代填"的抑制标志，
+    /// 而这里只用来防止两次识别叠加（各起 nvidia-smi / vulkaninfo / llama-server 子进程）。
+    /// 之前两者共用一个 bool，导致识别期间点"重新识别"会静默什么都不做。
+    /// </summary>
+    private bool _envRefreshing;
+
     /// <summary>首次环境识别完成前不套门禁，避免打开窗口瞬间控件闪一下"置灰"。</summary>
     private bool _gatesReady;
 
     private async Task RefreshEnvironmentAndModulesAsync()
     {
-        if (_refreshingModules)
+        if (_envRefreshing)
         {
+            ModuleHintText.Text = "正在识别运行环境，请稍候…（完成后会自动刷新模块列表）";
+            _host.Logger.Debug("设置面板重新识别请求被忽略：上一次环境识别还没结束。");
             return;
         }
 
+        _envRefreshing = true;
         _refreshingModules = true;
 
         try
@@ -1984,6 +2017,7 @@ public partial class SettingsWindow : Window
         finally
         {
             _refreshingModules = false;
+            _envRefreshing = false;
         }
     }
 
@@ -2105,7 +2139,11 @@ public partial class SettingsWindow : Window
         return new Border
         {
             Style = (Style)FindResource("ModuleCard"),
-            Tag = "module",
+
+            // 标签用 "card" 而不是自定义的 "module"：
+            // ApplySearchFilter 只认 "row" / "card" 两种标签，写成 "module" 等于把这张卡片
+            // 排除在搜索之外 —— 搜 "cuda" 时别的卡片都藏起来了，模块卡片却还挂在页面上。
+            Tag = "card",
             Child = grid,
         };
     }

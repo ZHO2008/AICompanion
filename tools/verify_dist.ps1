@@ -1,6 +1,10 @@
 ﻿# ============================================================================
 #  verify_dist.ps1 - 验证分发包能在"干净环境"下跑起来
 #
+#  **已废弃**：必需文件清单还停在模块化之前（bin\llama-server.exe、默认随包的
+#  Live2DCubismCore.dll），验证当前包只会误报。出包/自检请用 tools\pack-release.ps1
+#  （自带断言，退出码 0 即通过）。文件保留只为对照旧文档；运行时立刻 exit 1。
+#
 #  用法：
 #    powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1
 #    powershell -ExecutionPolicy Bypass -File tools\verify_dist.ps1 -DistDir dist\AICompanion-0.9.1-win-x64
@@ -22,6 +26,21 @@ param(
     [string]$DistDir,
     [int]$WaitSeconds = 40
 )
+
+# ---------------------------------------------------------------- 已废弃（强制拦截）
+# 它的必需文件清单还写着 bin\llama-server.exe 与 Live2DCubismCore.dll：
+# 前者在模块化之后已经搬进 modules\，后者默认不再随公开包分发。
+# 拿它验证现在的包只会得到一串误报；而它要验证的"异目录启动"能力，
+# pack-release.ps1 的断言 + 手动解压启动已经覆盖。
+Write-Host ''
+Write-Host '已废弃，请用 tools\pack-release.ps1' -ForegroundColor Red
+Write-Host '  原因：verify_dist.ps1 的必需文件清单（bin\llama-server.exe、Live2DCubismCore.dll）' -ForegroundColor Yellow
+Write-Host '        与模块化之后的包结构不一致，验证现在的包只会误报。' -ForegroundColor Yellow
+Write-Host '  要验证出包结果： powershell -ExecutionPolicy Bypass -File tools\pack-release.ps1' -ForegroundColor Yellow
+Write-Host '        （脚本自带断言，退出码 0 即通过），再解压 zip 双击 AICompanion.exe。' -ForegroundColor Yellow
+Write-Host '  说明见 docs\打包与分发.md（§3 参数、§3.4 断言、§7 验收清单）。' -ForegroundColor Yellow
+Write-Host ''
+exit 1
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

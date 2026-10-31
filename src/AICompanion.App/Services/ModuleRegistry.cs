@@ -235,37 +235,14 @@ public static class ModuleRegistry
 
     /// <summary>
     /// 给 AppHost 用：按 appearance.json 里保存的启用模块解析出 entry 的配置相对路径。
-    /// 没有保存过（或模块已不存在）时返回 null，表示继续用 config.yaml。
+    /// 没有保存过（或模块不存在 / entry 指向的文件不存在）时返回 null，表示继续用 config.yaml。
+    ///
+    /// 这里**直接复用** <see cref="ResolveEnabledRuntime"/>，不再自己拼一遍：
+    /// 先前是两份独立实现，且这一份不检查 entry 文件是否存在、也不检查路径穿越，
+    /// 于是"模块缺 exe"时它照样返回一条指向不存在文件的路径，被写进 llm.server_executable_path。
     /// </summary>
     public static string? ResolveEnabledEntryRelative(ModuleKind kind)
-    {
-        var stored = AppearanceStore.LoadEnabledModule(KindKey(kind));
-        if (string.IsNullOrWhiteSpace(stored))
-        {
-            return null;
-        }
-
-        var directory = Path.Combine(ModulesRoot, stored);
-        var manifestPath = Path.Combine(directory, "module.json");
-        if (!File.Exists(manifestPath))
-        {
-            return null;
-        }
-
-        var manifest = ReadManifest(manifestPath);
-        if (manifest is null)
-        {
-            return null;
-        }
-
-        var entry = ResolveEntryName(directory, manifest);
-        if (entry is null)
-        {
-            return null;
-        }
-
-        return $"modules/{stored}/{entry}";
-    }
+        => ResolveEnabledRuntime(kind).Binding?.EntryRelativePath;
 
     /// <summary>
     /// 模块引擎标识前缀：<c>module:&lt;目录名&gt;</c>。
@@ -306,6 +283,18 @@ public static class ModuleRegistry
                 return (null, $"Assets\\appearance.json 里没有启用的{KindLabel(kind)}模块");
             }
 
+            /*
+             * 启用项来自 Assets\appearance.json —— 这是一个用户（或别的程序）可以随手编辑的文件。
+             * 不校验就直接 Path.Combine(ModulesRoot, stored)，"..\..\Windows" 这类值就能把模块根
+             * 指到仓库外面去；后面还会把拼出来的怪路径写进配置并打进日志。
+             * 目录名只允许"单个目录名"：不许分隔符、不许盘符、不许 . / ..。
+             */
+            stored = stored.Trim();
+            if (!IsSafeModuleDirectoryName(stored))
+            {
+                return (null, $"appearance.json 里启用的模块名 \"{stored}\" 不是合法目录名（不能含路径分隔符、盘符或 ..），已忽略");
+            }
+
             var directory = Path.Combine(ModulesRoot, stored);
             if (!Directory.Exists(directory))
             {
@@ -327,7 +316,9 @@ public static class ModuleRegistry
             var declaredKind = InferKind(manifest, directory);
             if (declaredKind != kind)
             {
-                return (null, $"modules/{stored} 的 kind 是 {KindKey(declaredKind ?? ModuleKind.Llm)}，与{KindLabel(kind)}模块不符");
+                return (null, declaredKind is null
+                    ? $"modules/{stored} 的 kind 无法确定（module.json 没写 kind，目录名也推断不出），已忽略"
+                    : $"modules/{stored} 的 kind 是 {KindKey(declaredKind.Value)}，与{KindLabel(kind)}模块不符");
             }
 
             var notes = new List<string>();
@@ -337,6 +328,11 @@ public static class ModuleRegistry
             if (entryName is null)
             {
                 notes.Add("manifest 没写 entry，目录里也没有 *.exe");
+            }
+            else if (!IsSafeRelativePath(entryName))
+            {
+                // entry 来自模块自带的 module.json（第三方可写）：绝对路径或 ..\ 一律当无效。
+                notes.Add($"entry \"{entryName}\" 越出模块目录（不允许绝对路径或 ..），已忽略");
             }
             else if (!File.Exists(Path.Combine(directory, entryName)))
             {
@@ -351,6 +347,10 @@ public static class ModuleRegistry
             if (string.IsNullOrWhiteSpace(manifest.Model))
             {
                 notes.Add("manifest 没写 model");
+            }
+            else if (!IsSafeRelativePath(manifest.Model))
+            {
+                notes.Add($"model \"{manifest.Model!.Trim()}\" 越出模块目录（不允许绝对路径或 ..），已忽略");
             }
             else
             {
@@ -393,9 +393,61 @@ public static class ModuleRegistry
         }
     }
 
-    /// <summary>只读：列出某类模块（用于「后端选择」下拉）。</summary>
-    public static IReadOnlyList<ModuleInfo> EnabledCandidates(ModuleKind kind, ModuleEnvironment environment)
-        => Scan(kind, environment);
+    // ------------------------------------------------------------------ 路径安全
+
+    /// <summary>
+    /// 模块目录名是否安全：只允许"单个目录名"。
+    ///
+    /// 拒绝分隔符 / 盘符 / 点目录，是因为这个值来自 <c>Assets\appearance.json</c>（用户可编辑），
+    /// 直接 Path.Combine(ModulesRoot, name) 会让 <c>..\..\Windows</c> 之类的值跳出 modules 根。
+    /// </summary>
+    private static bool IsSafeModuleDirectoryName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        var trimmed = name.Trim();
+
+        return trimmed is not "." and not ".." &&
+               !Path.IsPathRooted(trimmed) &&
+               trimmed.IndexOfAny(new[]
+               {
+                   Path.DirectorySeparatorChar,
+                   Path.AltDirectorySeparatorChar,
+                   ':',
+               }) < 0;
+    }
+
+    /// <summary>
+    /// 模块内的相对路径是否安全（manifest 的 entry / model）：允许子目录，但必须是相对路径，
+    /// 且任何一段都不能是 <c>..</c>（否则模块可以指向自己目录之外的任意文件）。
+    /// </summary>
+    private static bool IsSafeRelativePath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim().Replace('\\', '/');
+
+        if (Path.IsPathRooted(value) || normalized.StartsWith('/') || normalized.Contains(':'))
+        {
+            return false;
+        }
+
+        foreach (var segment in normalized.Split('/'))
+        {
+            if (segment.Length == 0 || segment is "." or "..")
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     // ------------------------------------------------------------------ 环境识别
 
@@ -650,6 +702,16 @@ public static class ModuleRegistry
                 return new ModuleImportResult(false, "无法从路径推断模块目录名。", null);
             }
 
+            // 目录名要拿来当 modules\<name> 的目标名：选了 ".." 或盘符根这类目录时必须拒绝，
+            // 否则复制目标会落到 modules 根之外（覆盖前一步的"已存在"判断也未必挡得住）。
+            if (!IsSafeModuleDirectoryName(directoryName))
+            {
+                return new ModuleImportResult(
+                    false,
+                    $"无法把 \"{directoryName}\" 当作模块目录名（不能是 . / .. 或含路径分隔符），请先改选一个正常的子目录。",
+                    null);
+            }
+
             var manifestPath = Path.Combine(trimmed, "module.json");
             if (!File.Exists(manifestPath))
             {
@@ -790,7 +852,7 @@ public static class ModuleRegistry
         ModuleEnvironment environment)
     {
         var entryPath = ResolveEntry(directory, manifest);
-        var availability = CheckAvailability(kind, entryPath, manifest, environment);
+        var availability = CheckAvailability(kind, directory, entryPath, manifest, environment);
 
         return new ModuleInfo
         {
@@ -836,6 +898,7 @@ public static class ModuleRegistry
 
     private static ModuleAvailability CheckAvailability(
         ModuleKind kind,
+        string directory,
         string? entryPath,
         ModuleManifest manifest,
         ModuleEnvironment environment)
@@ -872,12 +935,40 @@ public static class ModuleRegistry
             return ModuleAvailability.MissingEntry;
         }
 
-        return ModelPresent(kind) ? ModuleAvailability.Available : ModuleAvailability.MissingModel;
+        return ModelPresent(kind, directory, manifest) ? ModuleAvailability.Available : ModuleAvailability.MissingModel;
     }
 
-    /// <summary>模型是否存在：只看目录里有没有模型文件，不读内容、不评估性能。</summary>
-    private static bool ModelPresent(ModuleKind kind)
+    /// <summary>
+    /// 模型是否存在。
+    ///
+    /// 两处都要看，缺一不可：
+    ///   1. 模块自带的 <c>model</c> 字段（模块目录内或仓库根相对路径）—— 运行时
+    ///      <see cref="ResolveEnabledRuntime"/> 就是优先用它；
+    ///   2. 全局 <c>models\</c> 下的约定目录 —— 没有 model 字段的老模块靠它。
+    ///
+    /// 之前这里**只看**全局 models\：一个自带模型的模块会被判成"已识别：缺模型"，
+    /// 门禁把整页置灰，可运行时其实用得好好的 —— 界面上说的和实际做的相反。
+    /// </summary>
+    private static bool ModelPresent(ModuleKind kind, string directory, ModuleManifest manifest)
     {
+        if (!string.IsNullOrWhiteSpace(manifest.Model) && IsSafeRelativePath(manifest.Model))
+        {
+            var modelName = manifest.Model!.Trim().Replace('\\', '/');
+
+            try
+            {
+                if (File.Exists(Path.Combine(directory, modelName.Replace('/', Path.DirectorySeparatorChar))) ||
+                    File.Exists(AppPaths.Resolve(modelName)))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // 路径非法（超长、字符非法）时按"没有"处理，继续走全局 models\ 的口径。
+            }
+        }
+
         try
         {
             var modelsRoot = Path.Combine(AppPaths.Root, "models");

@@ -771,6 +771,20 @@ public sealed class AppHost : IAsyncDisposable
 
         var previousEngine = Config.Tts.Engine;
 
+        /*
+         * 设置面板「合成引擎」下拉框与「拓展」页的 TTS 模块是两个入口，后者优先。
+         * 用户如果两边都动过，实际生效的是模块 —— 之前这件事只体现在一行 Info 里，
+         * 从下拉框看是"我明明选了 GPT-SoVITS"，排查时会被误导。这里明确记一条 Warn。
+         */
+        var explicitChoice = AppearanceStore.LoadTtsEngine();
+        if (explicitChoice is not null &&
+            !string.Equals(explicitChoice, binding.EngineId, StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.Warn(
+                $"设置面板里选过的 TTS 引擎 \"{explicitChoice}\" 被「拓展」页启用的语音合成模块覆盖：" +
+                $"实际使用 {binding.EngineId}。要回到 \"{explicitChoice}\"，请在设置 → 拓展模块里停用该模块。");
+        }
+
         // 复用 Piper 实现：模块提供的是 piper 兼容的命令行入口（piper.exe 或自定义 exe），
         // 因此不改 TTS 的对外接口与状态机，只把入口/模型路径指到模块目录。
         Config.Tts.Piper.ExecutablePath = binding.EntryRelativePath;

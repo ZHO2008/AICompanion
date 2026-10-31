@@ -63,8 +63,15 @@ public static class TTSEngineFactory
     /// </summary>
     public const string ModulePrefix = "module:";
 
-    /// <summary>是否是模块引擎标识。</summary>
-    public static bool IsModuleEngine(string engineType) =>
+    /// <summary>
+    /// 是否是模块引擎标识。
+    ///
+    /// 允许 <paramref name="engineType"/> 为 null：<c>tts.engine</c> 在 config.yaml 里被写成空值时
+    /// 绑出来就是 null，而这里原来直接调 <c>StartsWith</c> 会抛 NullReferenceException ——
+    /// 一个手滑的 YAML 空值就足以让启动路径崩在工厂里。
+    /// </summary>
+    public static bool IsModuleEngine(string? engineType) =>
+        !string.IsNullOrEmpty(engineType) &&
         engineType.StartsWith(ModulePrefix, StringComparison.OrdinalIgnoreCase);
 
     public static ITTSEngine Create(string engineType, TtsEngineContext context)
