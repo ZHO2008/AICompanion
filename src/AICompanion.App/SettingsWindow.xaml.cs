@@ -2171,8 +2171,19 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// 门禁：某一类没有任何可用模块时，把对应页的控件整块置灰，
-    /// 并在页顶显示一条可点击的提示（点了跳到「拓展」页）。
+    /// 门禁：只有某一类**既没有可用模块、也没有内置实现**时，才把该区域置灰；
+    /// 模块缺失本身不算缺陷，只给一条中性提示。
+    ///
+    /// 本次修掉的缺陷：默认分发包不带 tts / asr 模块，但内置实现（TTS = Windows SAPI，
+    /// ASR = ai_asr.dll 桥接）本来就能用。旧实现只看模块，于是把整个「语音」页的
+    /// TTS/ASR 开关、引擎下拉、重置 ASR 全部灰掉 —— 开箱就无法配置语音，与事实矛盾。
+    ///
+    /// 现在的规则：
+    ///   1. 内置实现也算一条可用路径。TTS 恒有 SAPI；ASR 只要 ai_asr.dll 存在即可用；
+    ///   2. 语音页的通用配置项按"模块可用 || 内置可用"决定是否禁用，正常情况下恒可用；
+    ///   3. 模块缺失只用 <see cref="VoiceBuiltinHint"/> 做中性提示（可点进「拓展」，不拦操作）；
+    ///   4. 「拓展」页的模块卡片按钮/状态仍按模块自身的 <see cref="ModuleInfo.IsUsable"/>
+    ///      单独门禁 —— 那才是真正的"模块专属"控件。
     /// </summary>
     private void ApplyGates()
     {
@@ -2181,6 +2192,7 @@ public partial class SettingsWindow : Window
             return;
         }
 
+        // 对话没有内置实现：模块是唯一路径，保持原来的整块门禁。
         var llm = ModuleRegistry.EffectiveModule(ModuleKind.Llm, _llmModules);
         var llmUsable = llm is { IsUsable: true };
         DialogueGateArea.IsEnabled = llmUsable;
@@ -2189,21 +2201,66 @@ public partial class SettingsWindow : Window
             ? "尚未启用对话模块 → 去「拓展」添加"
             : $"对话模块「{llm.DisplayName}」不可用：{llm.StatusText} → 去「拓展」查看";
 
+        // 语音合成：内置 SAPI 永远是一条可用路径，所以默认包（无模块）也应可配置。
         var tts = ModuleRegistry.EffectiveModule(ModuleKind.Tts, _ttsModules);
         var ttsUsable = tts is { IsUsable: true };
-        VoiceTtsArea.IsEnabled = ttsUsable;
-        TtsGateBanner.Visibility = ttsUsable ? Visibility.Collapsed : Visibility.Visible;
+        var ttsBuiltin = HasBuiltinTts();
+        var ttsAvailable = ttsUsable || ttsBuiltin;
+        VoiceTtsArea.IsEnabled = ttsAvailable;
+        TtsGateBanner.Visibility = ttsAvailable ? Visibility.Collapsed : Visibility.Visible;
         TtsGateBanner.Content = tts is null
-            ? "尚未启用语音合成模块 → 去「拓展」添加"
-            : $"语音合成模块「{tts.DisplayName}」不可用：{tts.StatusText} → 去「拓展」查看";
+            ? "语音合成暂无可用实现（既没有模块，也没有内置 SAPI）→ 去「拓展」添加模块"
+            : $"语音合成模块「{tts.DisplayName}」不可用：{tts.StatusText}，内置 SAPI 也不可用 → 去「拓展」查看";
 
+        // 语音识别：内置实现是 ai_asr.dll 桥接，文件存在即算可用。
         var asr = ModuleRegistry.EffectiveModule(ModuleKind.Asr, _asrModules);
         var asrUsable = asr is { IsUsable: true };
-        VoiceAsrArea.IsEnabled = asrUsable;
-        AsrGateBanner.Visibility = asrUsable ? Visibility.Collapsed : Visibility.Visible;
+        var asrBuiltin = HasBuiltinAsr();
+        var asrAvailable = asrUsable || asrBuiltin;
+        VoiceAsrArea.IsEnabled = asrAvailable;
+        AsrGateBanner.Visibility = asrAvailable ? Visibility.Collapsed : Visibility.Visible;
         AsrGateBanner.Content = asr is null
-            ? "尚未启用语音识别模块 → 去「拓展」添加"
-            : $"语音识别模块「{asr.DisplayName}」不可用：{asr.StatusText} → 去「拓展」查看";
+            ? "语音识别暂无可用实现（既没有模块，也没有 ai_asr.dll 桥接）→ 去「拓展」添加模块"
+            : $"语音识别模块「{asr.DisplayName}」不可用：{asr.StatusText}，ai_asr.dll 也不可用 → 去「拓展」查看";
+
+        // 顶部中性提示：只要有一类在用内置路径就提示，点了去「拓展」，不阻断任何操作。
+        // 两类都没有内置路径时，上面两条真门禁已经说明原因，这里不再重复。
+        var ttsOnBuiltin = ttsBuiltin && !ttsUsable;
+        var asrOnBuiltin = asrBuiltin && !asrUsable;
+        VoiceBuiltinHint.Visibility = ttsOnBuiltin || asrOnBuiltin ? Visibility.Visible : Visibility.Collapsed;
+        VoiceBuiltinHint.Content = ttsOnBuiltin
+            ? "当前使用内置语音引擎；如需其他实现，可到「拓展」添加模块"
+            : asrOnBuiltin
+                ? "当前使用内置语音识别（ai_asr.dll）；如需其他实现，可到「拓展」添加模块"
+                : string.Empty;
+    }
+
+    /// <summary>
+    /// 内置语音合成实现（SAPI）是否构成一条可用路径。
+    ///
+    /// 恒为 true：SAPI 是 Windows 自带组件，不依赖 modules\，它是产品的兜底引擎
+    /// （见 <see cref="Core.Tts.SapiEngine"/>）。门禁不该因为"没装 tts 模块"就把语音页锁死，
+    /// 那正是本次修掉的缺陷；即便个别系统上 SAPI 真的不可用，运行时也会在 TTS 状态里
+    /// 如实降级提示，而不是提前把配置入口封死。
+    /// </summary>
+    private static bool HasBuiltinTts() => true;
+
+    /// <summary>
+    /// 内置语音识别实现（ai_asr.dll 桥接）是否可用：动态库存在即算可用。
+    /// 路径来自 config.yaml 的 asr.library_path，不硬编码（准则 8）。
+    /// </summary>
+    private bool HasBuiltinAsr()
+    {
+        try
+        {
+            var libraryPath = AppPaths.Resolve(_host.Config.Asr.LibraryPath);
+            return !string.IsNullOrWhiteSpace(libraryPath) && File.Exists(libraryPath);
+        }
+        catch
+        {
+            // 路径解析异常不构成"没有实现"的证据，按可用处理，避免把配置锁死。
+            return true;
+        }
     }
 
     private async void OnRedetectEnvironment(object sender, RoutedEventArgs e)

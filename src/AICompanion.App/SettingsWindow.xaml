@@ -417,16 +417,28 @@
                     <StackPanel x:Name="PageVoice" Visibility="Collapsed">
                         <TextBlock Style="{StaticResource PageTitle}" Text="语音" />
 
+                        <!--
+                            中性提示：默认包里没有 tts/asr 模块，但内置实现（SAPI / ai_asr.dll）
+                            本来就能用。这里只提示"现在走的是内置路径"，可点进「拓展」，
+                            **不禁用**下面的任何通用配置项。
+                        -->
+                        <Button x:Name="VoiceBuiltinHint"
+                                Style="{StaticResource GateBanner}"
+                                Visibility="Collapsed"
+                                Click="OnGoToExtend"
+                                Content="当前使用内置语音引擎；如需其他实现，可到「拓展」添加模块" />
+
+                        <!-- 真门禁：某一类"既无模块、也无内置实现"时才出现（见 ApplyGates）。 -->
                         <Button x:Name="TtsGateBanner"
                                 Style="{StaticResource GateBanner}"
                                 Visibility="Collapsed"
                                 Click="OnGoToExtend"
-                                Content="尚未启用语音合成模块 → 去「拓展」添加" />
+                                Content="语音合成暂无可用实现（既没有模块，也没有内置 SAPI）→ 去「拓展」添加" />
                         <Button x:Name="AsrGateBanner"
                                 Style="{StaticResource GateBanner}"
                                 Visibility="Collapsed"
                                 Click="OnGoToExtend"
-                                Content="尚未启用语音识别模块 → 去「拓展」添加" />
+                                Content="语音识别暂无可用实现（既没有模块，也没有 ai_asr.dll 桥接）→ 去「拓展」添加" />
 
                         <Border x:Name="SectionVoice" Style="{StaticResource Card}" Tag="card">
                             <StackPanel>
