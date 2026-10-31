@@ -380,7 +380,7 @@ public static class ConfigLoader
         // ---------------- gpu ----------------
         var gpuDefaults = new GpuConfig();
         c.Gpu.ReservedMb = FixNonNegative(c.Gpu.ReservedMb, "gpu.reserved_mb", warnings);   // 0 = 按显存档位自动
-        c.Gpu.KvCacheReservedMb = FixPositive(c.Gpu.KvCacheReservedMb, gpuDefaults.KvCacheReservedMb, "gpu.kv_cache_reserved_mb", warnings);
+        c.Gpu.KvCacheReservedMb = FixNonNegative(c.Gpu.KvCacheReservedMb, "gpu.kv_cache_reserved_mb", warnings);   // 0 = 自动
         c.Gpu.PerLayerMb = FixNonNegative(c.Gpu.PerLayerMb, "gpu.per_layer_mb", warnings);   // 0 = 按 GGUF 自动
         c.Gpu.SafetyFactor = FixSafetyFactor(c.Gpu.SafetyFactor, "gpu.safety_factor", warnings);   // 0 = 按显存档位自动
         if (c.Gpu.SafetyFactor > 1.0)

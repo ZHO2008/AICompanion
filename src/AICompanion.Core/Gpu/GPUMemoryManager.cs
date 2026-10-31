@@ -93,19 +93,25 @@ public sealed class GPUMemoryManager
         var reservedMb = gpu.ReservedMb > 0 ? gpu.ReservedMb : tier.ReservedMb;
         var safetyFactor = gpu.SafetyFactor > 0 ? gpu.SafetyFactor : tier.SafetyFactor;
         var perLayerMb = gpu.PerLayerMb > 0 ? gpu.PerLayerMb : EstimatePerLayerMb(totalLayers);
+        var kvReservedMb = gpu.KvCacheReservedMb > 0
+            ? gpu.KvCacheReservedMb
+            : EstimateKvReserveMb(totalLayers, totalVramMb);
 
         _logger.Info(
             $"显存档位：{tier.Label}（总 {totalVramMb} MB；预留 {(gpu.ReservedMb > 0 ? "配置" : "档位")} {reservedMb} MB，" +
-            $"安全系数 {(gpu.SafetyFactor > 0 ? "配置" : "档位")} {safetyFactor:F2}，每层 {(gpu.PerLayerMb > 0 ? "配置" : "按 GGUF 估算")} {perLayerMb} MB）");
+            $"安全系数 {(gpu.SafetyFactor > 0 ? "配置" : "档位")} {safetyFactor:F2}，" +
+            $"每层 {(gpu.PerLayerMb > 0 ? "配置" : "按 GGUF 估算")} {perLayerMb} MB，" +
+            $"KV 预留 {(gpu.KvCacheReservedMb > 0 ? "配置" : "按层数×上下文估算")} {kvReservedMb} MB，" +
+            $"层数 {totalLayers}（{layerSource}））");
 
-        var usableMb = freeMb - reservedMb - gpu.KvCacheReservedMb;
+        var usableMb = freeMb - reservedMb - kvReservedMb;
         var conservative = usableMb * safetyFactor;
 
         // ---- 决策 Q12 的边界：算不出正层数就直接走 CPU ----
         if (conservative <= 0 || perLayerMb <= 0)
         {
-            var reason = $"空闲显存 {freeMb} MB 扣除预留 {reservedMb + gpu.KvCacheReservedMb} MB 后不足，已切换为 CPU 模式";
-            _logger.Warn($"显存不足：free={freeMb}MB，预留={reservedMb + gpu.KvCacheReservedMb}MB，保守可用={conservative:N0}MB");
+            var reason = $"空闲显存 {freeMb} MB 扣除预留 {reservedMb + kvReservedMb} MB 后不足，已切换为 CPU 模式";
+            _logger.Warn($"显存不足：free={freeMb}MB，预留={reservedMb + kvReservedMb}MB，保守可用={conservative:N0}MB");
             _bubble.Show(
                 "gpu-insufficient",
                 $"可用显存不足（空闲 {freeMb} MB），已切换为 CPU 模式以保证可用性。",
@@ -134,7 +140,7 @@ public sealed class GPUMemoryManager
         var ngl = Math.Max(1, Math.Min(totalLayers, layersByMemory));
 
         var explanation =
-            $"空闲 {freeMb} MB − 预留 {reservedMb + gpu.KvCacheReservedMb} MB = {usableMb} MB，" +
+            $"空闲 {freeMb} MB − 预留 {reservedMb + kvReservedMb} MB = {usableMb} MB，" +
             $"× {safetyFactor:F2} = {conservative:N0} MB 保守可用；" +
             $"÷ {perLayerMb} MB/层 = {layersByMemory} 层；" +
             $"层数上限 {totalLayers}（{layerSource}）⇒ ngl={ngl}";
@@ -187,6 +193,29 @@ public sealed class GPUMemoryManager
     /// 按 GGUF 文件大小估算"每层占用（MB）"：文件大小 ÷ 层数 × 1.1（经验系数，含输出头与对齐）。
     /// 拿不到文件大小时回退 150 MB（7B 的经验值）。
     /// </summary>
+    /// <summary>
+    /// 按"层数 × 上下文长度"估算 KV Cache 预留（MB）。
+    ///
+    /// KV 大小 ≈ 2 × layers × ctx × n_kv_heads × head_dim × 2 字节，与层数和 ctx 都成线性；
+    /// 这里用 7B/4096 的实测值（约 16 MB/层）做基准，再按 ctx 缩放，并夹在 [128 MB, 总显存 25%] 之间。
+    /// 1.5B：28 层 → 448 MB（实际约 56 MB，偏保守但不会 OOM）；7B：32 层 → 512 MB（贴近实测）。
+    /// </summary>
+    private int EstimateKvReserveMb(int totalLayers, int totalVramMb)
+    {
+        var ctx = _config.Llm.ContextLength > 0 ? _config.Llm.ContextLength : 4096;
+        var layers = totalLayers > 0 ? totalLayers : FallbackLayerCount;
+
+        var estimate = (int)Math.Round(layers * 16.0 * ctx / 4096.0);
+        estimate = Math.Max(128, estimate);
+
+        if (totalVramMb > 0)
+        {
+            estimate = Math.Min(estimate, (int)(totalVramMb * 0.25));
+        }
+
+        return estimate;
+    }
+
     private int EstimatePerLayerMb(int totalLayers)
     {
         try
