@@ -284,6 +284,11 @@ public sealed class AppHost : IAsyncDisposable
         // 因为它们会在构造时读取 tts.engine、tts.piper.*、asr.model_path 等配置。
         ApplyModuleRuntimePreferences();
 
+        // 对话后端的兜底发现：配置里的 llama-server.exe 不存在时（旧模板的 bin\ 路径、
+        // 用户改坏、只留了 cuda 模块……），按 vulkan → cuda → 其他 自动挑一个能用的。
+        // 必须在 LlamaServerController 构造与 StartAsync 之前做，日志顺序才如实。
+        ApplyLlmServerDiscovery();
+
         NvidiaSmi = new NvidiaSmi(Logger);
         RuntimeMode = new RuntimeModeState();
 
@@ -755,6 +760,56 @@ public sealed class AppHost : IAsyncDisposable
         catch (Exception ex)
         {
             Logger.Warn($"接入语音识别模块失败（不影响启动，继续使用内置 ASR）：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 对话后端兜底发现：<c>llm.server_executable_path</c> 指向的文件不存在时，
+    /// 扫描 <c>modules\*\module.json</c>，按 vulkan → cuda → 其他 llm 模块 的顺序
+    /// 取第一个入口真实存在的模块，覆盖**内存里**的配置（绝不回写 config.yaml）。
+    ///
+    /// 为什么在 AppHost 也做一遍（LlamaServerController.StartAsync 里有同样的兜底）：
+    ///   - 这里更早，日志顺序与用户看到的启动流程一致；
+    ///   - 设置面板「跟随 config.yaml（…）」显示的是 Config.Llm.ServerExecutablePath，
+    ///     若只在 StartAsync 里改，用户先看到的是那条不存在的路径；
+    ///   - 启动横幅（"启动完成"那行）之前就有结论，排查时不用翻两层日志。
+    /// 两处调用同一个 <see cref="LlmServerDiscovery"/>，判断口径不会分叉。
+    /// </summary>
+    private void ApplyLlmServerDiscovery()
+    {
+        try
+        {
+            var configured = Config.Llm.ServerExecutablePath;
+            var resolved = AppPaths.Resolve(configured);
+
+            if (File.Exists(resolved))
+            {
+                // 正常路径：只记一条 Info，证明"包内后端就位"，便于冒烟日志断言。
+                Logger.Info($"对话后端就位：{resolved}（llm.server_executable_path={configured}）。");
+                return;
+            }
+
+            var fallback = LlmServerDiscovery.TryFind(out var discovery);
+
+            if (fallback is null)
+            {
+                // 不在这里报错：交给 LlamaServerController 走既有"缺 exe"分支，
+                // 那条路径会弹气泡、写 Error、并计入启动问题项。
+                Logger.Warn(
+                    $"配置的对话后端不存在：{resolved}；兜底发现也没找到可用后端（{discovery}）。" +
+                    "对话将不可用，其余功能不受影响。");
+                return;
+            }
+
+            Config.Llm.ServerExecutablePath = fallback.RelativePath;
+
+            Logger.Warn(
+                $"配置的对话后端不存在：{resolved}；已自动改用 {fallback.RelativePath}（{fallback.RankLabel}）。" +
+                $"发现过程：{discovery}。本次仅内存生效，config.yaml 未改动。");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"对话后端兜底发现失败（不影响启动，将按配置路径继续）：{ex.Message}");
         }
     }
 

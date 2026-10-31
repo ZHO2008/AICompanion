@@ -74,8 +74,16 @@ public sealed class LlmConfig
     /// <summary>模型层数 L。0 表示启动时从 GGUF 元数据自动探测（qwen2.block_count）。</summary>
     public int LayerCount { get; set; }
 
-    /// <summary>llama-server 可执行文件路径，由主程序自行拉起（决策 Q5）。</summary>
-    public string ServerExecutablePath { get; set; } = "bin/llama-server.exe";
+    /// <summary>
+    /// llama-server 可执行文件路径，由主程序自行拉起（决策 Q5）。
+    ///
+    /// 默认值必须与**分发包里的实际布局**一致：后端随包放在 <c>modules\llm-vulkan\</c>，
+    /// 不在 <c>bin\</c>。历史默认值写成 <c>bin/llama-server.exe</c>，而 bin\ 里只有
+    /// ai_asr.dll / libfvad.dll —— 于是干净机器首启必然报"未找到 llama-server"。
+    /// 选 vulkan 而不是 cuda：Vulkan 由显卡驱动提供，没有 CUDA 运行时依赖；
+    /// CUDA 作为可选模块，由用户/界面在「拓展模块」里切换。
+    /// </summary>
+    public string ServerExecutablePath { get; set; } = "modules/llm-vulkan/llama-server.exe";
 
     /// <summary>推理线程数，0 表示交给 llama.cpp 自行决定。</summary>
     public int Threads { get; set; }

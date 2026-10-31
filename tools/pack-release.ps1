@@ -30,16 +30,27 @@
 #    pwsh -File tools\pack-release.ps1 -OutDir D:\release
 #        输出到别处（默认 <仓库>\dist）
 #
+#    pwsh -File tools\pack-release.ps1 -SkipSmokeTest
+#        跳过第 8 步的"解压 → 真启动 → 读日志"冒烟断言，只做前 7 步的静态断言。
+#        只在明确知道为什么跳过时用（例如本机没有可用的 llm 后端 / 要出纯离线包）。
+#
 #  注意：PowerShell 5.1 的 `-File` 模式**传不了布尔值**（-SelfContained:$false 会被
 #        当成字符串，绑 [bool] 直接报错）。要传 false 请用 `pwsh -Command` 调用，
 #        或改用本脚本另给的不带值开关：-FrameworkOnly / -WithModel / -NoModules /
-#        -WithCubismCore / -NoVcRuntime / -NoSlim。
+#        -WithCubismCore / -NoVcRuntime / -NoSlim / -SkipSmokeTest。
 #
 #  产物：
 #    <OutDir>\AICompanion-<版本>-<runtime>-<selfcontained|framework>\     分发目录
 #    <OutDir>\AICompanion-<版本>-<runtime>-<selfcontained|framework>.zip  发布包
 #
-#  退出码：0 = 全部断言通过；非 0 = 缺东西/发布失败（错误信息为中文）
+#  退出码：0 = 全部断言（含冒烟）通过；非 0 = 缺东西/发布失败/冒烟不过（错误信息为中文）
+#
+#  第 8 步"冒烟断言"为什么存在：
+#    静态断言只能证明"文件都在"，证明不了"启动起来能用"。本仓库确实吃过
+#    "AICompanion.exe 在、modules\ 在，但配置指向一个包里不存在的 llama-server.exe，
+#    首启必然报「未找到 llama-server」"的亏。所以现在必须解压到临时目录、
+#    以解压目录为工作目录真启动一次，读它自己写的 logs\app\*.log，
+#    断言出现「启动完成」「LLM 就绪=True」，且不出现「未找到 llama-server」。
 # ============================================================================
 
 [CmdletBinding()]
@@ -70,7 +81,23 @@ param(
     [switch]$NoModules,       # 等价于 -IncludeModules:$false
     [switch]$WithCubismCore,  # 等价于 -IncludeCubismCore:$true（Live2D 授权项，默认不带）
     [switch]$NoVcRuntime,     # 不把 MSVC 运行库（msvcp140/vcruntime140）打进包
-    [switch]$NoSlim           # 不删 .pdb、不裁语言目录
+    [switch]$NoSlim,          # 不删 .pdb、不裁语言目录
+
+    # ---- 冒烟断言（第 8 步）----
+    # 关掉它只跳过"解压 → 真启动 → 读日志"这一段；前面 7 步的静态断言照旧。
+    # 只在明确知道为什么跳过时用（例如没有可用的 llm 后端、或要出纯离线包）。
+    [switch]$SkipSmokeTest,
+
+    # 冒烟等待上限（秒）。程序要拉 llama-server 并等它 /health 就绪，
+    # 1.5B 模型在 Vulkan 上通常 5~20 秒；给到 90 秒是为了兼顾冷启动/机械盘。
+    [int]$SmokeWaitSeconds = 90,
+
+    # 冒烟时临时塞进解压目录的 GGUF 模型（包本身仍然不含模型）。
+    # 留空 = 自动用 <仓库>\models\llm 下体积最小的那个 .gguf；找不到就跳过 LLM 就绪断言并说明原因。
+    [string]$SmokeModelPath = '',
+
+    # 冒烟用的临时工作目录。默认 <系统临时目录>\AICompanion-smoke，跑完必删。
+    [string]$SmokeWorkDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -115,6 +142,59 @@ function Get-DirBytes([string]$path) {
     return [long]$sum
 }
 
+# 读一个**正被别的进程写着**的文件。
+#
+# 不能用 Get-Content / [System.IO.File]::ReadAllText：它们以 FileShare.Read 打开，
+# 而程序写日志用的是 FileAccess.Write + FileShare.ReadWrite（见 FileLogger.cs），
+# 两者共享模式不兼容 → 直接 IOException（"文件正由另一进程使用"）。
+# 冒烟断言的全部意义就是在程序**还在跑**的时候读它的日志，所以必须用宽松共享打开。
+# 这个坑实测踩过：脚本读日志抛异常被吞成空串，于是"日志里什么都没有"，
+# 看起来像启动失败，其实是读不到。
+function Read-SharedFileText([string]$path) {
+    if (-not (Test-Path $path)) { return '' }
+
+    $stream = $null
+    try {
+        $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        $stream = [System.IO.FileStream]::new($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+        try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    catch {
+        return ''
+    }
+    finally {
+        if ($stream) { try { $stream.Dispose() } catch { } }
+    }
+}
+
+# 从出厂配置里读一个"路径型"键，归一化成 zip 条目名的写法（正斜杠、去掉 ./）。
+#
+# 只在**打包脚本里**做这种粗粒度解析：配置是扁平的两级 YAML，
+# 这里要的键（server_executable_path / default_texture_path / pet_image_path /
+# vad_library_path）全项目各只出现一次，不值得为它引入一个 YAML 解析器。
+function Get-ConfigPathValue([string]$configFile, [string]$key) {
+    if (-not (Test-Path $configFile)) { return $null }
+
+    $pattern = '^\s*' + [regex]::Escape($key) + '\s*:\s*(.+)$'
+    $match = Select-String -Path $configFile -Pattern $pattern -Encoding UTF8 | Select-Object -First 1
+    if (-not $match) { return $null }
+
+    $value = $match.Matches[0].Groups[1].Value.Trim()
+
+    # 去掉行尾注释（配置里的 # 只会出现在值后面）
+    $hash = $value.IndexOf('#')
+    if ($hash -ge 0) { $value = $value.Substring(0, $hash).Trim() }
+
+    $value = $value.Trim('"').Trim("'").Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+
+    $value = $value.Replace('\', '/')
+    while ($value.StartsWith('./')) { $value = $value.Substring(2) }
+
+    return $value
+}
+
 # 为什么不用 Compress-Archive：
 #   实测 Windows PowerShell 5.1 的 Compress-Archive 把条目名写成反斜杠
 #   （bin\ai_asr.dll、modules\llm-cuda\llama-server.exe），而 ZIP 规范里路径分隔符
@@ -145,6 +225,243 @@ function New-ReleaseZip([string]$SourceDir, [string]$TargetZip) {
     } finally { $fs.Dispose() }
 
     return $files.Count
+}
+
+# ---------------------------------------------------------------- 冒烟断言（第 8 步的核心）
+#
+# 为什么必须真启动一次：本仓库刚吃过"静态断言全绿、包却开箱不可用"的亏 ——
+# AICompanion.exe 在、modules\ 在、config.yaml 在，但配置指着一个包里不存在的
+# llama-server.exe，首启必然报"未找到 llama-server"，对话完全不可用。
+# 只有"解压 → 在解压目录里启动 → 读它自己写的日志"才能把这种缺陷挡在发版之前。
+#
+# 约定：
+#   * 全程在**临时目录**里做，绝不碰 dist\ 里的 stage 与仓库；
+#   * 无论成功失败都杀掉进程、删掉临时目录（finally 里做）；
+#   * 包默认不带模型，所以冒烟时会**临时**把一个 .gguf 拷进解压目录，
+#     否则 llama-server 起不来、"LLM 就绪=True"这条断言就无从谈起；
+#     拷进去的只是测试用的临时文件，zip 本身仍然不含模型。
+function Invoke-PackageSmokeTest {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string]$WorkDir,
+        [string]$ModelPath = '',
+        [string]$RepoModelsDir = '',
+        [int]$WaitSeconds = 90
+    )
+
+    try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $notes = New-Object System.Collections.Generic.List[string]
+    $extract = Join-Path $WorkDir 'app'
+    $logPath = ''
+    $proc = $null
+    $passed = $false
+
+    try {
+        # 1. 解压
+        if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+        Write-Host "    解压到 $extract ..."
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $extract)
+
+        $exe = Join-Path $extract 'AICompanion.exe'
+        if (-not (Test-Path $exe)) {
+            $reasons.Add('解压后没有 AICompanion.exe，无法冒烟启动。')
+            return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = $extract }
+        }
+
+        # 2. 模型：包里有就用包里的；没有就从仓库临时拷一个进去（zip 不含模型是设计决定）
+        $llmDir = Join-Path $extract 'models\llm'
+        $packageModels = @()
+        if (Test-Path $llmDir) {
+            $packageModels = @(Get-ChildItem $llmDir -File -Filter '*.gguf' -ErrorAction SilentlyContinue)
+        }
+
+        if ($packageModels.Count -gt 0) {
+            $notes.Add("解压目录里已有模型 $($packageModels[0].Name)，直接用它。")
+        } else {
+            $sourceModel = $null
+
+            if (-not [string]::IsNullOrWhiteSpace($ModelPath)) {
+                if (Test-Path $ModelPath) {
+                    $sourceModel = (Resolve-Path -LiteralPath $ModelPath).Path
+                } else {
+                    $notes.Add("指定的 -SmokeModelPath 不存在：$ModelPath")
+                }
+            }
+
+            if ($null -eq $sourceModel -and -not [string]::IsNullOrWhiteSpace($RepoModelsDir) -and (Test-Path $RepoModelsDir)) {
+                # 取体积最小的那个：冒烟只需要"能加载"，不必拿 4 GB 的 7B 模型慢慢跑
+                $candidate = Get-ChildItem $RepoModelsDir -Recurse -File -Filter '*.gguf' -ErrorAction SilentlyContinue |
+                    Sort-Object Length | Select-Object -First 1
+                if ($candidate) { $sourceModel = $candidate.FullName }
+            }
+
+            if ($null -eq $sourceModel) {
+                $reasons.Add(
+                    '包内没有模型，仓库 models\llm 下也找不到 .gguf，无法验证「LLM 就绪=True」。' +
+                    '请用 -SmokeModelPath 指定一个 .gguf，或用 -IncludeModel:$true 打含模型的包；' +
+                    '确实不做冒烟时用 -SkipSmokeTest。')
+                return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = $extract }
+            }
+
+            if (-not (Test-Path $llmDir)) { New-Item -ItemType Directory -Path $llmDir -Force | Out-Null }
+            $modelTarget = Join-Path $llmDir (Split-Path $sourceModel -Leaf)
+            Write-Host "    临时拷入模型（仅用于本次冒烟，zip 不含模型）：$(Split-Path $sourceModel -Leaf)"
+            Copy-Item $sourceModel $modelTarget -Force
+            $notes.Add("冒烟时临时拷入模型 $(Split-Path $sourceModel -Leaf)（zip 本体不含模型）。")
+
+            # config.yaml 的 llm.model_path 若指到别的文件名，这里顺手对齐（只改解压出来的副本）。
+            # llm 段在模板最前面，所以只改**第一个** model_path 行，别动 asr / piper / live2d 的。
+            $cfg = Join-Path $extract 'config.yaml'
+            $currentModelPath = Get-ConfigPathValue $cfg 'model_path'
+            $expected = 'models/llm/' + (Split-Path $sourceModel -Leaf)
+            if ((Test-Path $cfg) -and $currentModelPath -ne $expected) {
+                $lines = [System.IO.File]::ReadAllLines($cfg, [System.Text.Encoding]::UTF8)
+                for ($i = 0; $i -lt $lines.Length; $i++) {
+                    if ($lines[$i] -match '^\s*model_path\s*:') {
+                        $indent = $lines[$i] -replace '\S.*$', ''
+                        $lines[$i] = $indent + 'model_path: "' + $expected + '"'
+                        break
+                    }
+                }
+                [System.IO.File]::WriteAllLines($cfg, $lines, (New-Object System.Text.UTF8Encoding($false)))
+                $notes.Add("已把解压副本的 llm.model_path 对齐为 $expected（只影响临时目录）。")
+            }
+        }
+
+        # 3. 起进程（工作目录 = 解压目录，模拟用户双击）
+        Write-Host "    启动 $exe（工作目录 $extract），最多等 ${WaitSeconds}s 让日志出现「启动完成」 ..."
+        $proc = Start-Process -FilePath $exe -WorkingDirectory $extract -PassThru
+
+        # 4. 轮询日志，直到出现"启动完成"或超时/进程退出
+        $logDir = Join-Path $extract 'logs\app'
+        $deadline = (Get-Date).AddSeconds($WaitSeconds)
+        $finished = $false
+        $logText = ''
+
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 700
+
+            $logs = @(Get-ChildItem $logDir -Filter '*.log' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending)
+            if ($logs.Count -gt 0) {
+                $logPath = $logs[0].FullName
+                # 程序可能**正在写**这个文件：必须用宽松共享打开（Read-SharedFileText）
+                $logText = Read-SharedFileText $logPath
+                if ($logText -and $logText.Contains('启动完成')) { $finished = $true; break }
+            }
+
+            if ($proc.HasExited) {
+                $notes.Add("进程已退出（退出码 $($proc.ExitCode)），未等到「启动完成」。")
+                break
+            }
+        }
+
+        if (-not $finished -and $logPath -eq '') {
+            $reasons.Add("${WaitSeconds}s 内没有生成 logs\app\*.log —— 程序可能根本没起来（自包含运行时缺失 / 依赖 DLL 缺失 / 闪退）。")
+            return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = ''; ExtractDir = $extract }
+        }
+
+        # 5. 断言（日志读的是**解压目录里**那份，不是仓库的 logs\）
+        Write-Host ''
+        Write-Host '    ---- 冒烟断言（读解压目录里的日志）----' -ForegroundColor Cyan
+        Write-Host "    日志：$logPath"
+
+        if ($logText -and $logText.Contains('启动完成')) {
+            Write-Host '    [通过] 日志出现「启动完成」' -ForegroundColor Green
+        } else {
+            Write-Host '    [失败] 日志没有「启动完成」—— 启动流程没走完' -ForegroundColor Red
+            $reasons.Add("日志里没有「启动完成」（等待 ${WaitSeconds}s）")
+        }
+
+        if ($logText -and $logText.Contains('LLM 就绪=True')) {
+            Write-Host '    [通过] 日志出现「LLM 就绪=True」' -ForegroundColor Green
+        } else {
+            Write-Host '    [失败] 日志没有「LLM 就绪=True」—— 对话后端没起来' -ForegroundColor Red
+            $reasons.Add('日志里没有「LLM 就绪=True」（对话后端未就绪）')
+        }
+
+        if ($logText -and $logText.Contains('未找到 llama-server')) {
+            Write-Host '    [失败] 日志出现「未找到 llama-server」—— 配置指向的后端不在包里或没被兜底发现' -ForegroundColor Red
+            $reasons.Add('日志里出现「未找到 llama-server」')
+        } else {
+            Write-Host '    [通过] 日志不含「未找到 llama-server」' -ForegroundColor Green
+        }
+
+        # 额外提示（不计入失败）：启动问题项数与静态立绘是否就位
+        if ($logText -match '启动问题 (\d+) 项') {
+            $count = [int]$Matches[1]
+            if ($count -eq 0) {
+                Write-Host '    [通过] 日志出现「启动问题 0 项」' -ForegroundColor Green
+            } else {
+                Write-Host "    [提示] 日志写着「启动问题 $count 项」（不作为冒烟失败条件，但值得看一眼）" -ForegroundColor Yellow
+            }
+        }
+
+        $avatarHits = @([regex]::Matches($logText, '角色形象：使用[^\r\n]*'))
+        if ($avatarHits.Count -gt 0) {
+            Write-Host "    [通过] 形象素材已就位：$($avatarHits[0].Value)" -ForegroundColor Green
+        } else {
+            Write-Host '    [提示] 日志里没有「角色形象：使用…」，可人工看截图确认立绘' -ForegroundColor Yellow
+        }
+
+        if ($logText -match '未找到任何角色形象素材|角色形象缺失') {
+            Write-Host '    [失败] 日志出现「角色形象缺失」—— 静态立绘没进包或路径不对' -ForegroundColor Red
+            $reasons.Add('日志出现「角色形象缺失」（静态立绘没生效）')
+        }
+
+        $passed = ($reasons.Count -eq 0)
+
+        # 失败时把日志尾巴打出来：临时目录随后会被删掉，不在这里留证据就没得查了。
+        if (-not $passed -and $logText) {
+            Write-Host ''
+            Write-Host '    ---- 日志最后 40 行 ----' -ForegroundColor Yellow
+            $tail = @($logText -split "`r?`n") | Where-Object { $_ -ne '' } | Select-Object -Last 40
+            foreach ($line in $tail) { Write-Host "    | $line" -ForegroundColor DarkGray }
+            Write-Host '    ---- 日志结束 ----' -ForegroundColor Yellow
+        }
+
+        return [PSCustomObject]@{ Passed = $passed; Reasons = $reasons; Notes = $notes; LogPath = $logPath; ExtractDir = $extract }
+    }
+    catch {
+        $reasons.Add("冒烟过程异常：$($_.Exception.Message)")
+        return [PSCustomObject]@{ Passed = $false; Reasons = $reasons; Notes = $notes; LogPath = $logPath; ExtractDir = $extract }
+    }
+    finally {
+        # 必须收尾：杀进程（含它拉起的 llama-server）+ 删临时目录，绝不留下跑着的程序
+        try {
+            if ($proc -and -not $proc.HasExited) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+
+        try {
+            Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue | ForEach-Object {
+                try {
+                    if ($_.Path -and $_.Path.StartsWith($extract, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                    }
+                } catch { }
+            }
+        } catch { }
+
+        Start-Sleep -Milliseconds 600
+
+        for ($i = 0; $i -lt 6; $i++) {
+            try {
+                if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force -ErrorAction Stop }
+                break
+            } catch {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+
+        if (Test-Path $WorkDir) {
+            Write-Host "    ! 临时目录没能删掉（进程还占着文件？）：$WorkDir —— 请手工删除" -ForegroundColor Yellow
+        }
+    }
 }
 
 # ---------------------------------------------------------------- 0. 路径与参数
@@ -196,7 +513,7 @@ Note "输出目录：$outRoot"
 
 # ---------------------------------------------------------------- 1. 前置检查
 
-Step '1/7 前置检查'
+Step '1/8 前置检查'
 
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     throw '未找到 dotnet 命令。请安装 .NET 8 SDK（https://dotnet.microsoft.com/download/dotnet/8.0），并确认 dotnet 在 PATH 里。'
@@ -264,7 +581,7 @@ if ($IncludeModules) {
 
 # ---------------------------------------------------------------- 2. 清理旧产物（幂等）
 
-Step '2/7 清理上一次的产物'
+Step '2/8 清理上一次的产物'
 
 foreach ($p in @($stage, $work)) {
     if (Test-Path $p) {
@@ -283,7 +600,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 # ---------------------------------------------------------------- 3. dotnet publish
 
-Step "3/7 dotnet publish（Release / $Runtime / self-contained=$($SelfContained.ToString().ToLowerInvariant())）"
+Step "3/8 dotnet publish（Release / $Runtime / self-contained=$($SelfContained.ToString().ToLowerInvariant())）"
 
 $scFlag = $SelfContained.ToString().ToLowerInvariant()
 # PublishReadyToRun 显式关掉：R2R 会让产物体积明显变大、且跨机器复现性差
@@ -322,7 +639,7 @@ if (-not $SelfContained -and $hasCoreClr) {
 
 # ---------------------------------------------------------------- 4. 汇总运行环境
 
-Step '4/7 汇总运行环境（原生库 / 模块 / 配置 / 资源）'
+Step '4/8 汇总运行环境（原生库 / 模块 / 配置 / 资源）'
 
 # 4.1 主程序产物
 Copy-Item (Join-Path $publishDir '*') $stage -Recurse -Force
@@ -488,15 +805,58 @@ $assetsDir = Join-Path $stage 'Assets'
 New-Item -ItemType Directory -Path (Join-Path $assetsDir 'Default') -Force | Out-Null
 $appIco = Join-Path $root 'Assets\app.ico'
 if (Test-Path $appIco) { Copy-Item $appIco (Join-Path $assetsDir 'app.ico') -Force }
+
+# 4.7.1 静态立绘：**必须随包**，否则首启只剩"角色形象缺失"的纯色面板
+#
+# 真实缺陷：包内既没有 Live2D 模型（Hiyori\ 不入包），也没有 Assets\Default 里的立绘，
+# 而 config.yaml 的 live2d.default_texture_path / ui.pet_image_path 都指向
+# ./Assets/Default/default.png —— 指向一个包里不存在的文件，首启必然是一块空白。
+#
+# 现在随包的是**本项目自带的占位立绘**（tools\draw_avatar.ps1 用 System.Drawing
+# 画出来的扁平矢量风角色，9 张共约 450 KB），作者与授权都属于本仓库，
+# 可以合法再分发；用户把自己的图丢进 Assets\Default\ 同名覆盖即可替换。
+$artSource = Join-Path $root 'Assets\Default'
+$artDefault = Join-Path $artSource 'default.png'
+$artProfile = Join-Path $artSource 'AvatarProfile.json'
+$artExpressions = Join-Path $artSource 'Expressions'
+
+if (-not (Test-Path $artDefault)) {
+    throw "缺少出厂立绘 Assets\Default\default.png —— 而 config.yaml 的 live2d.default_texture_path 与 ui.pet_image_path 都指向它，不随包就会首启「角色形象缺失」。请先运行 tools\draw_avatar.ps1 生成（可复现的占位立绘），再重跑本脚本。"
+}
+
+Copy-Item $artDefault (Join-Path $assetsDir 'Default\default.png') -Force
+Note "Assets\Default\default.png ← 出厂占位立绘（$(Get-SizeText (Get-Item $artDefault).Length)）"
+
+if (Test-Path $artProfile) {
+    Copy-Item $artProfile (Join-Path $assetsDir 'Default\AvatarProfile.json') -Force
+    Note 'Assets\Default\AvatarProfile.json ← 动作/口型参数映射'
+}
+
+if (Test-Path $artExpressions) {
+    $exprTarget = Join-Path $assetsDir 'Default\Expressions'
+    New-Item -ItemType Directory -Path $exprTarget -Force | Out-Null
+    $exprFiles = @(Get-ChildItem $artExpressions -File -Filter '*.png')
+    foreach ($f in $exprFiles) { Copy-Item $f.FullName -Destination $exprTarget -Force }
+    if ($exprFiles.Count -gt 0) {
+        Note "Assets\Default\Expressions\ ← $($exprFiles.Count) 张表情图（$(Get-SizeText (Get-DirBytes $exprTarget))）"
+    }
+}
+
 @(
-    '把角色立绘放这里（PNG / JPG 均可，建议带透明通道）。',
+    '静态立绘目录。程序按以下顺序取形象，缺哪一级就退到下一级：',
+    '  1. 用户用「更换外观」指定的图片（记录在 Assets\appearance.json，优先）',
+    '  2. Live2D 模型（config.yaml 的 live2d.default_model_path，模型不随包）',
+    '  3. 本目录里的静态立绘（任意文件名，default* 优先，PNG/JPG/BMP/GIF/TIF）',
+    '  4. 纯色块',
     '',
-    '程序按以下顺序取形象，缺哪一级就退到下一级：',
-    '  1. Live2D 模型（config.yaml 的 live2d.default_model_path）',
-    '  2. 本目录里的静态立绘（Assets\Default\）',
-    '  3. 纯色块',
+    '本目录里的 default.png 是**程序自带的占位立绘**（扁平矢量风，由 tools\draw_avatar.ps1 生成，',
+    '授权随本程序，可自由再分发）。想换成自己的角色：',
+    '  - 直接覆盖 Assets\Default\default.png（保持文件名，config.yaml 不必改）；',
+    '  - 或丢一张任意名字的 png/jpg 进来，删掉/改名 default.png —— 程序会扫本目录取图；',
+    '  - 想换 Live2D 模型：把模型目录放到程序根目录，改 live2d.default_model_path，',
+    '    并按包根「素材说明.md」自备 Live2DCubismCore.dll。',
     '',
-    '第三方立绘涉及他人著作权，本包不附带，请自行准备。'
+    '第三方立绘/模型涉及他人著作权，替换时请自行确认授权。'
 ) | Set-Content -Path (Join-Path $assetsDir 'Default\README.txt') -Encoding UTF8
 
 New-Item -ItemType Directory -Path (Join-Path $stage 'Knowledge') -Force | Out-Null
@@ -582,13 +942,107 @@ $runtimeLines = @(
 $runtimeLines | Set-Content -Path (Join-Path $stage 'VERSION.txt') -Encoding UTF8
 Note 'VERSION.txt（版本 + 运行环境）'
 
+# 4.11 素材说明.md —— 代码里多处提示"详见同目录的素材说明.md"，那个文件必须真的在
+#
+# 真实缺陷：日志与气泡都在说"详见同目录的「素材说明.md」"，而包里从来没有这个文件
+# （旧的 tools\pack.ps1 会生成，pack-release.ps1 漏了）——用户照着提示去翻包根，
+# 什么也找不到。这里补上，内容与 docs\打包与分发.md 的口径保持一致：
+# 哪些素材随包、哪些要自备、各自的授权归谁、从哪一步取。
+$materialsNotes = @(
+    '# 素材说明',
+    '',
+    "本包（AICompanion $version，$Runtime / $(if ($SelfContained) { '自包含' } else { '框架依赖' })）里",
+    '哪些素材是自带的、哪些要你自备，一并写清楚。与仓库 `docs\打包与分发.md` 的口径一致。',
+    '',
+    '## 1. 一句话结论',
+    '',
+    '| 素材 | 本包是否包含 | 没有时程序会怎样 |',
+    '| --- | --- | --- |',
+    '| 静态立绘 `Assets\Default\default.png` | **包含**（程序自带的占位立绘） | —— |',
+    '| Live2D 模型（`*.model3.json` + 贴图） | **不包含** | 用静态立绘显示，功能不受影响 |',
+    '| `Live2DCubismCore.dll`（Live2D 官方原生库） | **不包含**（授权项） | 只影响 Live2D 渲染，静态立绘照常显示 |',
+    '| LLM 模型 `models\llm\*.gguf` | **不包含**（1 GB 起） | 只能看形象，对话不可用 |',
+    '| ASR 模型 `models\asr\ggml-base.bin` | **不包含**（约 141 MB） | 语音识别不可用，文字对话照常 |',
+    '| Piper 音色 `models\piper\` | **不包含** | TTS 走 Windows SAPI 兜底 |',
+    '',
+    '## 2. 静态立绘（随包，可自由替换）',
+    '',
+    '`Assets\Default\default.png` 是**程序自带的占位立绘**：扁平矢量风的角色剪影，',
+    '由仓库里的 `tools\draw_avatar.ps1` 用 System.Drawing 生成（可复现），',
+    '作者与授权都属于本程序，可随包自由再分发。',
+    '',
+    '替换方法（三选一，都不用改代码）：',
+    '',
+    '1. 直接覆盖 `Assets\Default\default.png`（保持文件名）；',
+    '2. 丢一张任意名字的 `png/jpg/bmp/gif/tif` 进 `Assets\Default\`；程序按',
+    '   "名字以 default 开头优先 → 否则取最新修改时间"的顺序挑；',
+    '3. 用程序里的「更换外观」按钮挑一张图（结果写进 `Assets\appearance.json`，优先于上面两条）。',
+    '',
+    '> 第三方立绘涉及他人著作权，替换前请自行确认授权；本包只为你准备了自带的占位图，',
+    '> 不代你分发别人的画。',
+    '',
+    '## 3. Live2D 模型（不随包，自备）',
+    '',
+    'Live2D 模型由 Live2D 公司及其样例作者授权，**不属于本程序的许可证范围**，',
+    '因此不随包分发。需要时：',
+    '',
+    '1. 取得模型目录（官方样例里的 `Hiyori\` 最省事），整个目录放到程序根目录，',
+    '   形如 `Hiyori\Hiyori.model3.json` + `Hiyori.2048\texture_00.png` + `*.motion3.json`；',
+    '2. 把 `config.yaml` 的 `live2d.default_model_path` 指到那个 `*.model3.json`，例如：',
+    '   `default_model_path: "./Hiyori/Hiyori.model3.json"`；',
+    '3. 还需要下面第 4 节的 `Live2DCubismCore.dll`，否则渲染器起不来，程序会退回静态立绘；',
+    '4. 重启程序。日志里应出现「Live2D 渲染器已就绪」与「已切换到 Live2D 渲染」。',
+    '',
+    '官方样例模型的下载页与许可条款见 Live2D 官网（Cubism SDK / 示例模型页面）。',
+    '',
+    '## 4. `Live2DCubismCore.dll`（不随包，自备）',
+    '',
+    '它是 Live2D Cubism SDK 的原生核心，**分发受 Live2D Cubism SDK 许可条款约束**，',
+    '与本程序的许可证无关；未经确认就随包再分发，风险由分发者承担。所以默认包不含它，',
+    '包内另有 `Live2DCubismCore.dll.README.txt` 记录同样的说明。',
+    '',
+    '自取步骤：',
+    '',
+    '1. 访问 https://www.live2d.com/download/cubism-sdk/ 并同意其许可条款；',
+    '2. 下载 **Cubism SDK for Native**（Windows x64）；',
+    '3. 从 SDK 里取出 x64 版 `Live2DCubismCore.dll`；',
+    '4. 放到**本文件所在的同一个目录**（即 `AICompanion.exe` 旁边）；',
+    '5. 重启 `AICompanion.exe`。',
+    '',
+    '没有它时程序照常启动：形象按"Live2D → 静态立绘 → 纯色块"的降级链走，对话与语音不受影响。',
+    '',
+    '## 5. 对话模型（不随包）',
+    '',
+    '`models\llm\*.gguf` 自带独立授权（Qwen / DeepSeek 等），且 1 GB 起，故不随包。',
+    '放置位置与仓库一致，例如 `models\llm\qwen2.5-1.5b-instruct-q4_k_m.gguf`，',
+    '并让 `config.yaml` 的 `llm.model_path` 指向它；详见包内 `models\README.txt`。',
+    '',
+    '## 6. 语音素材（不随包）',
+    '',
+    '- ASR：`models\asr\ggml-base.bin`（约 141 MB，whisper.cpp 格式）；',
+    '- TTS：`models\tts\*.wav` 参考音频（GPT-SoVITS / CosyVoice 用）、`models\piper\` 音色。',
+    '  本仓库不提供 `piper.exe`，默认 TTS 走 Windows SAPI，Piper 属可选增强。',
+    '',
+    '## 7. 对话后端模块（随包）',
+    '',
+    '`modules\` 下是 llama-server 后端（Vulkan / CUDA）。它们由 llama.cpp（MIT）构建，',
+    '随包分发没有额外授权问题；`config.yaml` 默认用 `modules/llm-vulkan/llama-server.exe`',
+    '（Vulkan 由显卡驱动提供，干净机器可用），CUDA 模块是可选项，可在「设置 → 拓展模块」切换。',
+    '',
+    '---',
+    '',
+    '以上说明与仓库 `docs\打包与分发.md` 的第 2 / 5 / 6 节一致；两者若不一致，以仓库文档为准。'
+)
+$materialsNotes | Set-Content -Path (Join-Path $stage '素材说明.md') -Encoding UTF8
+Note '素材说明.md（哪些素材随包、哪些自备、授权归谁）'
+
 $stageBytes = Get-DirBytes $stage
 $stageCount = @(Get-ChildItem $stage -Recurse -File).Count
 Good "分发目录：$stage（$stageCount 个文件，$(Get-SizeText $stageBytes)）"
 
 # ---------------------------------------------------------------- 5. 打 zip
 
-Step '5/7 生成 zip'
+Step '5/8 生成 zip'
 
 $zippedCount = New-ReleaseZip -SourceDir $stage -TargetZip $zipPath
 if (-not (Test-Path $zipPath)) {
@@ -599,7 +1053,7 @@ Good "已生成 $zipPath（$zippedCount 个条目，$(Get-SizeText $zipBytes)）
 
 # ---------------------------------------------------------------- 6. 校验（核心）
 
-Step '6/7 校验 zip 内容'
+Step '6/8 校验 zip 内容'
 
 # System.IO.Compression 在 PS 5.1 里要显式加载
 try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
@@ -656,6 +1110,9 @@ try {
         @{ Key = 'models/README.txt';      Pattern = '^models/README\.txt$';                  Required = (-not $IncludeModel); Why = '模型不入包时的放置说明' }
         @{ Key = 'module.json';            Pattern = '(^|/)module\.json$';                    Required = $IncludeModules; Why = '模块清单（程序靠它发现后端）' }
         @{ Key = 'msvcp140.dll';           Pattern = '(^|/)msvcp140\.dll$';                   Required = (-not $NoVcRuntime); Why = 'MSVC 运行库' }
+        # 出厂形象与素材说明：配置指向它们、日志也在提示"详见素材说明.md"，缺了就是开箱不可用。
+        @{ Key = 'Assets/Default/default.png'; Pattern = '^Assets/Default/default\.png$';      Required = $true;  Why = '出厂静态立绘（没有 Live2D 模型时的首启形象）' }
+        @{ Key = '素材说明.md';            Pattern = '^素材说明\.md$';                        Required = $true;  Why = '素材授权与自备说明（代码多处提示要读它）' }
     )
 
     Write-Host ''
@@ -672,6 +1129,39 @@ try {
             $failures += "$($c.Key)（$($c.Why)）"
         } else {
             Write-Host "    [提示] $($c.Key) 不在包里 —— $($c.Why)（可选）" -ForegroundColor DarkGray
+        }
+    }
+
+    # ---- 一致性断言：config.yaml 里写的路径，包里必须真的有 ----
+    #
+    # 这条断言针对的正是"静态断言全绿、程序却开箱不可用"的那类缺陷：
+    #   * llm.server_executable_path 曾写 bin/llama-server.exe，而包里后端在 modules\；
+    #   * live2d.default_texture_path / ui.pet_image_path 曾指向包里没有的 default.png。
+    # 只看"AICompanion.exe 在不在"是查不出来的，必须拿配置去对文件清单。
+    Write-Host ''
+    Write-Host '---- 配置与包内容一致性 ----' -ForegroundColor Cyan
+    $configInStage = Join-Path $stage 'config.yaml'
+    $referencedPaths = @(
+        @{ Key = 'server_executable_path'; Why = 'LLM 后端入口（缺了首启必报「未找到 llama-server」）'; Required = $IncludeModules }
+        @{ Key = 'default_texture_path';  Why = '静态立绘（缺了首启只剩纯色面板）';                   Required = $true }
+        @{ Key = 'pet_image_path';        Why = '角色图片（缺了靠静态立绘兜底）';                     Required = $true }
+        @{ Key = 'vad_library_path';      Why = 'WebRTC VAD 原生库（缺了回退能量 VAD）';              Required = $false }
+    )
+    foreach ($r in $referencedPaths) {
+        $value = Get-ConfigPathValue $configInStage $r.Key
+        if (-not $value) {
+            Write-Host "    [提示] config.yaml 里的 $($r.Key) 为空或没写 —— $($r.Why)" -ForegroundColor DarkGray
+            continue
+        }
+
+        $hit = @($names | Where-Object { $_ -eq $value }).Count -gt 0
+        if ($hit) {
+            Write-Host "    [通过] $($r.Key) = $value 在包里 —— $($r.Why)" -ForegroundColor Green
+        } elseif ([bool]$r.Required) {
+            Write-Host "    [缺失] $($r.Key) = $value **不在包里** —— $($r.Why)" -ForegroundColor Red
+            $failures += "config.yaml 的 $($r.Key) 指向 $value，但包里没有这个文件（$($r.Why)）"
+        } else {
+            Write-Host "    [提示] $($r.Key) = $value 不在包里 —— $($r.Why)（可选）" -ForegroundColor DarkGray
         }
     }
 
@@ -742,7 +1232,7 @@ try {
 
 # ---------------------------------------------------------------- 7. 运行环境说明
 
-Step '7/7 运行环境'
+Step '7/8 运行环境'
 
 Write-Host ''
 Write-Host '---- 这个包在目标机器上需要什么 ----' -ForegroundColor Cyan
@@ -769,11 +1259,65 @@ if ($IncludeCubismCore) {
 }
 Write-Host ('-' * 62) -ForegroundColor Cyan
 
+# ---------------------------------------------------------------- 8. 冒烟断言
+
+$smokeSummary = '未执行（-SkipSmokeTest）'
+
+if ($SkipSmokeTest) {
+    Step '8/8 冒烟断言（已跳过）'
+    Warn '按 -SkipSmokeTest 跳过"解压 → 真启动 → 读日志"。静态断言已通过，但"能不能跑"未经验证。'
+} else {
+    Step '8/8 冒烟断言（解压 → 真启动 → 读日志）'
+
+    $smokeRoot = if ([string]::IsNullOrWhiteSpace($SmokeWorkDir)) {
+        # 必须在仓库外：仓库里出现解压副本会污染 git status，也容易被误当成交付物
+        Join-Path 'C:\Temp' "AICompanion-smoke-$version-$flavor"
+    } else {
+        $SmokeWorkDir
+    }
+
+    if (-not (Test-Path 'C:\Temp') -and $smokeRoot.StartsWith('C:\Temp', [System.StringComparison]::OrdinalIgnoreCase)) {
+        New-Item -ItemType Directory -Path 'C:\Temp' -Force | Out-Null
+    }
+
+    Note "临时目录：$smokeRoot（结束后删除）"
+    Note "等待上限：${SmokeWaitSeconds}s"
+
+    $smoke = Invoke-PackageSmokeTest `
+        -ZipPath $zipPath `
+        -WorkDir $smokeRoot `
+        -ModelPath $SmokeModelPath `
+        -RepoModelsDir (Join-Path $root 'models\llm') `
+        -WaitSeconds $SmokeWaitSeconds
+
+    foreach ($n in $smoke.Notes) { Note $n }
+
+    if ($smoke.Passed) {
+        Good '冒烟通过：解压即可启动，LLM 就绪=True，没有「未找到 llama-server」'
+        $smokeSummary = '通过（解压启动，LLM 就绪=True，无「未找到 llama-server」）'
+    } else {
+        Write-Host ''
+        Write-Host "冒烟失败：$($smoke.Reasons.Count) 项不满足要求" -ForegroundColor Red
+        foreach ($r in $smoke.Reasons) { Write-Host "  - $r" -ForegroundColor Red }
+        Write-Host ''
+        Write-Host '这个包**不能发**：静态断言只证明"文件都在"，冒烟才证明"启动起来能用"。' -ForegroundColor Red
+        Write-Host '定位建议：' -ForegroundColor Red
+        Write-Host '  * 没有 logs\app\*.log        → 双击就闪退，查自包含运行时 / VC 运行库' -ForegroundColor Red
+        Write-Host '  * 有「未找到 llama-server」  → llm.server_executable_path 与包内 modules\ 不一致' -ForegroundColor Red
+        Write-Host '  * 没有「LLM 就绪=True」      → 后端起来了但 /health 没通，查模型路径与显存' -ForegroundColor Red
+        Write-Host '  * 有「角色形象缺失」        → Assets\Default\default.png 没进包' -ForegroundColor Red
+        Write-Host ''
+        Write-Host "包未通过冒烟：$zipPath" -ForegroundColor Red
+        exit 1
+    }
+}
+
 Write-Host ''
 Write-Host "打包成功" -ForegroundColor Green
 Write-Host "    分发目录：$stage"
 Write-Host "    发布包：  $zipPath（$(Get-SizeText $zipBytes)，$($entries.Count) 个文件）"
 Write-Host "    文件数/体积断言：全部通过" -ForegroundColor Green
+Write-Host "    冒烟断言：$smokeSummary"
 Write-Host ''
 
 exit 0

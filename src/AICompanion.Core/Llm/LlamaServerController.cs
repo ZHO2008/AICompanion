@@ -278,10 +278,39 @@ public sealed class LlamaServerController : IAsyncDisposable
         var exePath = AppPaths.Resolve(_config.Llm.ServerExecutablePath);
         if (!File.Exists(exePath))
         {
-            var message = $"未找到 llama-server 可执行文件：{exePath}";
-            _logger.Error(message);
-            _bubble.Show("llm-exe-missing", "未找到 llama-server，无法启动对话服务。请检查 config.yaml 的 llm.server_executable_path。", BubbleLevel.Error);
-            return new LlamaStartResult(LlamaStartOutcome.ExecutableMissing, 0, message, plan);
+            /*
+             * 兜底发现（真实缺陷复盘）：出厂模板曾指向 bin/llama-server.exe，
+             * 而发行包里的后端在 modules\llm-vulkan / modules\llm-cuda ——
+             * 首启必然"未找到 llama-server"，对话完全不可用。
+             *
+             * 这里不能只报错：配置里的路径可能是旧模板、被用户改坏、或换了模块目录名。
+             * 只要 modules\ 下存在一个入口真实的 llm 模块，就按 vulkan → cuda → 其他
+             * 的顺序用它，并把"为什么换"写进日志。覆盖只在内存（准则 9：不回写 config.yaml）。
+             */
+            var fallback = LlmServerDiscovery.TryFind(out var discovery);
+            if (fallback is not null)
+            {
+                _logger.Warn(
+                    $"配置里的 llama-server 路径不存在：{exePath}；" +
+                    $"已自动改用 {fallback.RelativePath}（{fallback.RankLabel}）。" +
+                    $"发现过程：{discovery}。本次仅内存生效，config.yaml 未改动。");
+
+                _config.Llm.ServerExecutablePath = fallback.RelativePath;
+                exePath = fallback.AbsolutePath;
+
+                _bubble.Show(
+                    "llm-exe-fallback",
+                    $"配置里的对话后端路径不存在，已自动改用「{fallback.RelativePath}」。",
+                    BubbleLevel.Info);
+            }
+            else
+            {
+                var message = $"未找到 llama-server 可执行文件：{exePath}";
+                _logger.Error(message);
+                _logger.Error($"兜底发现也没找到可用后端：{discovery}");
+                _bubble.Show("llm-exe-missing", "未找到 llama-server，无法启动对话服务。请检查 config.yaml 的 llm.server_executable_path。", BubbleLevel.Error);
+                return new LlamaStartResult(LlamaStartOutcome.ExecutableMissing, 0, message, plan);
+            }
         }
 
         var ngl = plan.Ngl;
